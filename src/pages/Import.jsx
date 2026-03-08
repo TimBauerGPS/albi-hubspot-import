@@ -9,6 +9,7 @@ import {
   searchCompany,
   associateDeal,
   syncHubspotData,
+  fetchPipelinesAndOwners,
 } from '../lib/hubspot'
 import { processBatched, withRetry } from '../lib/rateLimiter'
 import CSVUploader from '../components/CSVUploader'
@@ -117,6 +118,25 @@ export default function Import({ session }) {
     setSummary(null)
     setIsDone(false)
 
+    // ── Fetch pipeline/stage metadata (label → ID) ────────────────────────────
+    // Mirrors the Google Script: build pipelineMap[label] = { id, stages: { label → id } }
+    // Keys are lowercased for case-insensitive matching (same as reference script).
+    let pipelineLabelToId = {}     // "water mitigation" → pipelineId
+    let stagesByPipeline = {}      // "water mitigation" → { "lead in" → stageId, ... }
+    try {
+      const { pipelines } = await fetchPipelinesAndOwners(session)
+      for (const p of pipelines) {
+        const pKey = p.label.toLowerCase().trim()
+        pipelineLabelToId[pKey] = p.id
+        stagesByPipeline[pKey] = {}
+        for (const s of p.stages) {
+          stagesByPipeline[pKey][s.label.toLowerCase().trim()] = s.id
+        }
+      }
+    } catch (err) {
+      console.warn('Could not fetch pipeline metadata — pipeline/stage will not be set:', err.message)
+    }
+
     let created = 0
     let updated = 0
     let skipped = 0
@@ -158,9 +178,16 @@ export default function Import({ session }) {
           accrual_revenue: String(row.accrualRevenue),
         }
 
-        // Map status/pipeline if available
-        if (row.pipeline) properties.pipeline_label = row.pipeline
-        if (row.status) properties.dealstage_label = row.status
+        // Map pipeline label → HubSpot pipeline ID, stage label → stage ID.
+        // Mirrors the Google Script: lowercase both sides for case-insensitive matching.
+        const pKey = (row.pipeline || '').toLowerCase().trim()
+        const sKey = (row.status || '').toLowerCase().trim()
+        const pipelineId = pipelineLabelToId[pKey]
+        if (pipelineId) {
+          properties.pipeline = pipelineId
+          const stageId = stagesByPipeline[pKey]?.[sKey]
+          if (stageId) properties.dealstage = stageId
+        }
 
         // Google leads (Referrer contains "Google") are inbound — no deal owner is assigned.
         // Non-Google leads: owner would be set here via salesPerson → HubSpot owner lookup
@@ -172,9 +199,12 @@ export default function Import({ session }) {
         if (existingDeal) {
           // ── Duplicate detection ───────────────────────────────────────────
           // Skip update if stage + revenues all match (mirrors Google Script logic).
+          // Compare actual HubSpot stage ID (p.dealstage) to the expected stage ID
+          // derived from the row's pipeline + status labels via our metadata maps.
           const p = existingDeal.properties || {}
+          const expectedStageId = stagesByPipeline[pKey]?.[sKey] ?? ''
           const unchanged =
-            (p.dealstage_label || '') === (row.status || '') &&
+            (p.dealstage || '') === expectedStageId &&
             Math.abs(parseFloat(p.total_estimates || 0) - row.estimatedRevenue) < 0.01 &&
             Math.abs(parseFloat(p.accrual_revenue  || 0) - row.accrualRevenue)  < 0.01
 
