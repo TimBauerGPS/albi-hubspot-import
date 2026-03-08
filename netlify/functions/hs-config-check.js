@@ -61,21 +61,27 @@ export const handler = async (event) => {
   }
 
   // ─── 2. Required API scopes ────────────────────────────────────────────────
+  // HubSpot Private Apps don't expose a token introspection endpoint, so we
+  // verify scopes by making lightweight test calls to each required object type.
+  // Deals scope is already proven by the API key check above.
   try {
-    const tokenInfo = await hsPost('/oauth/v2/private-apps/get/access-token-info', {}, apiKey)
-    const grantedScopes = (tokenInfo.scopes || []).map(s => s.toLowerCase())
-    const missingScopes = REQUIRED_SCOPES.filter(s => !grantedScopes.includes(s))
-
-    if (missingScopes.length === 0) {
-      pass('scopes', 'API Token Scopes', 'All required scopes are present.')
-    } else {
-      fail('scopes', 'API Token Scopes',
-        `Missing scopes: ${missingScopes.join(', ')}. ` +
-        'In HubSpot: Settings → Integrations → Private Apps → [Your App] → Scopes tab.')
-    }
+    const [contactsRes, companiesRes] = await Promise.all([
+      hsGet('/crm/v3/objects/contacts?limit=1', apiKey),
+      hsGet('/crm/v3/objects/companies?limit=1', apiKey),
+    ])
+    // If both succeed, contacts + companies read scopes are confirmed.
+    // Write scopes and crm.schemas.deals.read are verified by later checks.
+    pass('scopes', 'API Token Scopes',
+      'Contacts and companies scopes verified. ' +
+      `Required scopes: ${REQUIRED_SCOPES.join(', ')}.`)
   } catch (err) {
-    warn('scopes', 'API Token Scopes',
-      'Could not verify scopes. Ensure your Private App has all required CRM scopes.')
+    const isForbidden = err.message.includes('403')
+    fail('scopes', 'API Token Scopes',
+      isForbidden
+        ? 'Missing required scopes — your Private App is missing contacts or companies access. ' +
+          'In HubSpot: Settings → Integrations → Private Apps → [Your App] → Scopes tab. ' +
+          `Add all of: ${REQUIRED_SCOPES.join(', ')}`
+        : 'Could not verify scopes: ' + err.message)
   }
 
   // ─── 3. Pipelines ─────────────────────────────────────────────────────────
