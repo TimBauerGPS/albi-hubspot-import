@@ -98,8 +98,12 @@ export default function Import({ session }) {
 
   // Sync gate state
   const [cacheStatus, setCacheStatus] = useState('checking') // 'checking' | 'empty' | 'ready'
-  const [syncQueued, setSyncQueued] = useState(false)
-  const [syncError, setSyncError] = useState(null)
+
+  // Sync UI state (mirrors Configuration.jsx polling pattern)
+  const [syncing,     setSyncing]     = useState(false)
+  const [syncStep,    setSyncStep]    = useState(null)
+  const [syncPolling, setSyncPolling] = useState(null)
+  const pollIntervalRef = useRef(null)
 
   // Import state
   const [importFile, setImportFile] = useState(null)
@@ -117,6 +121,9 @@ export default function Import({ session }) {
   useEffect(() => {
     loadUserConfig()
   }, [session])
+
+  // Clean up any running poll interval on unmount
+  useEffect(() => () => clearInterval(pollIntervalRef.current), [])
 
   async function loadUserConfig() {
     const { data } = await supabase
@@ -150,17 +157,72 @@ export default function Import({ session }) {
     setLoadingConfig(false)
   }
 
-  async function handleQueueSync() {
-    setSyncQueued(true)
-    setSyncError(null)
+  async function handleSync() {
+    clearInterval(pollIntervalRef.current)
+    setSyncing(true)
+    setSyncStep(null)
+    setSyncPolling(null)
+
+    const snapshotTime = new Date().toISOString()
+
     try {
-      await syncHubspotData(session, () => {})
-      setCacheStatus('ready')
-      setLastSyncAt(new Date().toISOString())
+      await syncHubspotData(session, step => setSyncStep(step))
     } catch (err) {
-      setSyncError(err.message)
-      setSyncQueued(false)
+      setSyncing(false)
+      setSyncStep(null)
+      setSyncPolling({ error: err.message })
+      return
     }
+
+    setSyncing(false)
+    setSyncStep(null)
+
+    // Poll Supabase every 3 s (up to 8 min) for rows newer than snapshotTime.
+    // When all 3 tables have updated rows we know the background sync finished.
+    setSyncPolling({ contacts: null, companies: null, deals: null, done: false, timedOut: false })
+
+    const doneByType = { contacts: false, companies: false, deals: false }
+    const SYNC_TABLES = [
+      { key: 'contacts',  table: 'hs_cached_contacts'  },
+      { key: 'companies', table: 'hs_cached_companies'  },
+      { key: 'deals',     table: 'hs_cached_deals'      },
+    ]
+    const pollStart = Date.now()
+    const POLL_TIMEOUT_MS = 8 * 60 * 1000   // 8 min — enough for very large accounts
+
+    pollIntervalRef.current = setInterval(async () => {
+      if (Date.now() - pollStart > POLL_TIMEOUT_MS) {
+        clearInterval(pollIntervalRef.current)
+        setSyncPolling(prev => ({ ...prev, timedOut: true }))
+        return
+      }
+
+      for (const { key, table } of SYNC_TABLES) {
+        if (doneByType[key]) continue
+        const { data: latest } = await supabase
+          .from(table)
+          .select('synced_at')
+          .eq('user_id', session.user.id)
+          .gt('synced_at', snapshotTime)
+          .limit(1)
+
+        if (latest && latest.length > 0) {
+          const { count } = await supabase
+            .from(table)
+            .select('*', { count: 'exact', head: true })
+            .eq('user_id', session.user.id)
+          doneByType[key] = true
+          setSyncPolling(prev => ({ ...prev, [key]: count ?? 0 }))
+        }
+      }
+
+      if (doneByType.contacts && doneByType.companies && doneByType.deals) {
+        clearInterval(pollIntervalRef.current)
+        setSyncPolling(prev => ({ ...prev, done: true }))
+        setCacheStatus('ready')
+        setLastSyncAt(new Date().toISOString())
+      }
+    }, 3000)
   }
 
   function handleStopImport() {
@@ -338,6 +400,11 @@ export default function Import({ session }) {
         // ── Look up existing deal via in-memory cache — zero HubSpot calls ───
         const cachedDeal = findCachedDeal(cachedDeals, row.name)
 
+        // createFallback: set true if updateDeal 404s (stale cached ID).
+        // Falls through to the create path, which itself recovers from 400
+        // "already has that value" if the deal exists under a new ID.
+        let createFallback = false
+
         if (cachedDeal) {
           // ── Duplicate detection ───────────────────────────────────────────
           const expectedStageId = stagesByPipeline[pKey]?.[sKey] ?? ''
@@ -351,43 +418,54 @@ export default function Import({ session }) {
             action = 'skipped'
             skipped++
           } else {
-            await withRetry(() => updateDeal(cachedDeal.hubspot_id, properties, session))
-            hubspotDealId = cachedDeal.hubspot_id
-            action = 'updated'
-            updated++
-            // Update the in-memory cache so subsequent rows reflect the new values
-            cachedDeals.set(row.name, {
-              ...cachedDeal,
-              deal_stage: properties.dealstage ?? cachedDeal.deal_stage,
-              total_estimates: row.estimatedRevenue,
-              accrual_revenue: row.accrualRevenue,
-            })
+            try {
+              await withRetry(() => updateDeal(cachedDeal.hubspot_id, properties, session))
+              hubspotDealId = cachedDeal.hubspot_id
+              action = 'updated'
+              updated++
+              cachedDeals.set(row.name, {
+                ...cachedDeal,
+                deal_stage: properties.dealstage ?? cachedDeal.deal_stage,
+                total_estimates: row.estimatedRevenue,
+                accrual_revenue: row.accrualRevenue,
+              })
+            } catch (updateErr) {
+              // 404: cached deal ID deleted/merged in HubSpot — drop stale entry
+              // and let the create path handle it (with its own 400 recovery).
+              if (!updateErr.message.includes('404')) throw updateErr
+              cachedDeals.delete(row.name)
+              createFallback = true
+            }
           }
 
-          // ── Retroactive association linking ───────────────────────────────
-          // HubSpot associations are idempotent — safe to call on every run.
-          let associationAdded = false
-          if (resolvedContactId) {
-            await withRetry(() => associateDeal(cachedDeal.hubspot_id, 'contacts', resolvedContactId, session))
-            associationAdded = true
-          }
-          if (resolvedCompanyId) {
-            await withRetry(() => associateDeal(cachedDeal.hubspot_id, 'companies', resolvedCompanyId, session))
-            associationAdded = true
-          }
-          if (action === 'skipped' && associationAdded) {
-            action = 'updated'; skipped--; updated++
-          }
+          if (!createFallback) {
+            // ── Retroactive association linking ─────────────────────────────
+            // HubSpot associations are idempotent — safe to call on every run.
+            let associationAdded = false
+            if (resolvedContactId) {
+              await withRetry(() => associateDeal(cachedDeal.hubspot_id, 'contacts', resolvedContactId, session))
+              associationAdded = true
+            }
+            if (resolvedCompanyId) {
+              await withRetry(() => associateDeal(cachedDeal.hubspot_id, 'companies', resolvedCompanyId, session))
+              associationAdded = true
+            }
+            if (action === 'skipped' && associationAdded) {
+              action = 'updated'; skipped--; updated++
+            }
 
-          // Mark as resolved in held queue if this deal was previously held
-          if (heldQueueMap.has(row.name)) {
-            await supabase
-              .from('hs_held_deals')
-              .update({ resolved_at: new Date().toISOString(), resolved_deal_id: hubspotDealId })
-              .eq('user_id', session.user.id)
-              .eq('job_id', row.name)
+            // Mark as resolved in held queue if this deal was previously held
+            if (heldQueueMap.has(row.name)) {
+              await supabase
+                .from('hs_held_deals')
+                .update({ resolved_at: new Date().toISOString(), resolved_deal_id: hubspotDealId })
+                .eq('user_id', session.user.id)
+                .eq('job_id', row.name)
+            }
           }
-        } else {
+        }
+
+        if (!cachedDeal || createFallback) {
           // ── Create new deal — or hold if referrer is unmatched ────────────
           const hasUnmatchedReferrer =
             row.referrer && !row.isGoogleLead && !resolvedContactId && !resolvedCompanyId
@@ -642,69 +720,116 @@ export default function Import({ session }) {
           </div>
         )}
 
-        {/* 24-hour sync staleness warning */}
-        {!configBlocked && cacheStatus === 'ready' && needsResync && !isRunning && !isDone && (
-          <div className="mb-6 bg-amber-50 border border-amber-200 rounded-xl px-5 py-4 flex items-start justify-between gap-4">
-            <div>
-              <p className="text-sm font-semibold text-amber-800">HubSpot data may be stale</p>
-              <p className="text-sm text-amber-700 mt-0.5">
-                Last synced {Math.floor(syncAgeMs / (60 * 60 * 1000))} hours ago. Syncing before
-                importing ensures referrer matches and duplicate detection are accurate.
-              </p>
-            </div>
-            {!syncQueued ? (
+        {/* ── Sync HubSpot Data card ─────────────────────────────────────── */}
+        {!configBlocked && !isRunning && !isDone && (
+          <div className={`mb-4 bg-white rounded-xl border p-5 ${
+            cacheStatus === 'empty' ? 'border-amber-300' : 'border-gray-200'
+          }`}>
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h3 className="text-sm font-semibold text-gray-900">Sync HubSpot Data</h3>
+                {!syncPolling && (
+                  <p className={`text-xs mt-0.5 ${
+                    cacheStatus === 'empty'
+                      ? 'text-amber-600'
+                      : needsResync
+                        ? 'text-amber-600'
+                        : 'text-gray-400'
+                  }`}>
+                    {cacheStatus === 'empty'
+                      ? 'Not yet synced — run a sync before importing to match referrers and detect existing deals.'
+                      : needsResync
+                        ? `Last synced ${Math.floor(syncAgeMs / (60 * 60 * 1000))}h ago — data may be stale.`
+                        : lastSyncAt
+                          ? `Last synced: ${new Date(lastSyncAt).toLocaleString()}`
+                          : 'Run sync to populate the local cache.'}
+                  </p>
+                )}
+              </div>
               <button
-                onClick={handleQueueSync}
-                className="shrink-0 px-3 py-1.5 bg-amber-600 text-white text-xs font-medium rounded-lg hover:bg-amber-700 transition-colors"
+                onClick={handleSync}
+                disabled={syncing || (syncPolling && !syncPolling.done && !syncPolling.timedOut)}
+                className={`shrink-0 px-4 py-2 text-sm font-medium rounded-lg transition-colors disabled:opacity-50 ${
+                  cacheStatus === 'empty' && !syncPolling
+                    ? 'bg-brand-600 text-white hover:bg-brand-700'
+                    : 'border border-gray-300 text-gray-700 hover:bg-gray-50'
+                }`}
               >
-                Sync Now
+                {syncing ? (
+                  <span className="flex items-center gap-2">
+                    <span className="animate-spin rounded-full h-3 w-3 border-b-2 border-current" />
+                    {syncStep ? `Queuing ${syncStep}…` : 'Queuing…'}
+                  </span>
+                ) : 'Sync Now'}
               </button>
-            ) : (
-              <div className="flex items-center gap-2 text-xs text-amber-700 shrink-0 pt-0.5">
-                <span className="animate-spin rounded-full h-3 w-3 border-b-2 border-amber-600" />
-                Syncing in background…
+            </div>
+
+            {/* Error */}
+            {syncPolling?.error && (
+              <p className="mt-2 text-xs text-red-600">Sync failed: {syncPolling.error}</p>
+            )}
+
+            {/* Live polling progress */}
+            {syncPolling && !syncPolling.error && (
+              <div className="mt-3 space-y-1.5">
+                {[
+                  { key: 'contacts',  label: 'Contacts'  },
+                  { key: 'companies', label: 'Companies' },
+                  { key: 'deals',     label: 'Deals'     },
+                ].map(({ key, label }) => {
+                  const count = syncPolling[key]
+                  const done  = count !== null && count !== undefined
+                  return (
+                    <div key={key} className="flex items-center gap-2 text-sm">
+                      {done ? (
+                        <svg className="w-4 h-4 text-green-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                        </svg>
+                      ) : (
+                        <span className="w-4 h-4 shrink-0 flex items-center justify-center">
+                          <span className="animate-spin rounded-full h-3 w-3 border-b-2 border-gray-400" />
+                        </span>
+                      )}
+                      <span className={done ? 'text-gray-700' : 'text-gray-400'}>
+                        {label}
+                        {done && <span className="ml-1.5 text-gray-400 font-normal">— {count.toLocaleString()} cached</span>}
+                      </span>
+                    </div>
+                  )
+                })}
+
+                {syncPolling.done && (
+                  <p className="text-xs text-green-700 pt-1">Sync complete — cache is up to date.</p>
+                )}
+                {syncPolling.timedOut && !syncPolling.done && (
+                  <p className="text-xs text-amber-700 pt-1">
+                    Still running in the background — large accounts can take a few minutes. You can import once it finishes; the cache status above will reflect the latest sync.
+                  </p>
+                )}
+                {!syncPolling.done && !syncPolling.timedOut && (
+                  <p className="text-xs text-gray-400 pt-1">Fetching from HubSpot — usually 15–60 seconds…</p>
+                )}
               </div>
             )}
           </div>
         )}
 
         <div className="bg-white rounded-xl border border-gray-200 p-6 space-y-6">
-          {/* Sync gate — first-time prompt */}
-          {!isRunning && !isDone && !configBlocked && cacheStatus === 'empty' && (
-            <div className="flex flex-col items-start gap-4 py-2">
-              <div>
-                <h3 className="text-sm font-semibold text-gray-800">Sync HubSpot data first</h3>
-                <p className="text-sm text-gray-500 mt-1">
-                  Your HubSpot contacts, companies, and deals haven't been synced yet.
-                  Run a sync so the importer can match referrers and check for existing deals.
+          {/* Uploader — blocked until first sync completes */}
+          {!isRunning && !isDone && (
+            <>
+              {cacheStatus === 'empty' && !syncPolling?.done ? (
+                <p className="text-sm text-gray-500 py-2">
+                  Run a sync above to enable importing.
                 </p>
-                {syncError && (
-                  <p className="text-xs text-red-600 mt-2">{syncError}</p>
-                )}
-              </div>
-              {!syncQueued ? (
-                <button
-                  onClick={handleQueueSync}
-                  className="px-4 py-2 bg-brand-600 text-white text-sm font-medium rounded-lg hover:bg-brand-700 transition-colors"
-                >
-                  Sync HubSpot Data
-                </button>
               ) : (
-                <div className="flex items-center gap-2 text-sm text-gray-600">
-                  <span className="animate-spin rounded-full h-4 w-4 border-b-2 border-brand-600" />
-                  Sync queued — fetching data in the background…
-                </div>
+                <CSVUploader
+                  userConfig={userConfig}
+                  onConfirm={runImport}
+                  disabled={configBlocked}
+                />
               )}
-            </div>
-          )}
-
-          {/* Uploader */}
-          {!isRunning && !isDone && (cacheStatus === 'ready' || configBlocked) && (
-            <CSVUploader
-              userConfig={userConfig}
-              onConfirm={runImport}
-              disabled={configBlocked}
-            />
+            </>
           )}
 
           {/* Progress */}
