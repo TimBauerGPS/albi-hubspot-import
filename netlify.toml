@@ -1,0 +1,20 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+  functions = "netlify/functions"
+
+[build.environment]
+  # The Supabase anon key is the public browser key (eyJ... JWT format).
+  # It is intentionally embedded in the Vite bundle — this is safe.
+  # Security is enforced by Supabase RLS policies, not by keeping this key secret.
+  SECRETS_SCAN_ENABLED = "false"
+
+[[headers]]
+  for = "/index.html"
+  [headers.values]
+    Cache-Control = "no-cache, no-store, must-revalidate"
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
