@@ -299,9 +299,26 @@ export default function Import({ session }) {
         if (d.project_id) cachedDeals.set(d.project_id, d)
       }
       for (const c of contactRows ?? []) {
-        const key = (c.last_name || '').toLowerCase().trim()
+        // Normalize names: some HubSpot contacts store the full "First Last" in
+        // firstname with an empty lastname (e.g. when created via a "Name" field).
+        // Detect and split those so last-name lookups still work correctly.
+        const rawFirst = (c.first_name || '').trim()
+        const rawLast  = (c.last_name  || '').trim()
+        let indexFirst = rawFirst
+        let indexLast  = rawLast
+        if (!rawLast && rawFirst.includes(' ')) {
+          const parts = rawFirst.split(/\s+/)
+          indexLast  = parts[parts.length - 1]
+          indexFirst = parts.slice(0, -1).join(' ')
+        }
+        const key = indexLast.toLowerCase()
         if (!contactsByLastName.has(key)) contactsByLastName.set(key, [])
-        contactsByLastName.get(key).push(c)
+        // If the names were derived from splitting firstname, store a normalized
+        // copy so findCachedContact's first-name matching works correctly.
+        const entry = (indexFirst === rawFirst && indexLast === rawLast)
+          ? c
+          : { ...c, first_name: indexFirst, last_name: indexLast }
+        contactsByLastName.get(key).push(entry)
       }
       for (const c of companyRows ?? []) {
         if (c.name) cachedCompanies.set(c.name.toLowerCase().trim(), c.hubspot_id)
