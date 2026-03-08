@@ -78,21 +78,32 @@ export async function createRequiredProperties(session) {
 }
 
 /**
- * Syncs contacts, companies, and deals from HubSpot in 3 separate calls
- * to stay within Netlify's 10-second function timeout.
- * `onStep(type)` is called before each request so the UI can show progress.
+ * Queues a HubSpot sync using Netlify Background Functions (free plan, 15-min timeout).
+ * Fires three requests — contacts, companies, deals — each returning 202 immediately.
+ * The actual fetching and caching runs server-side with no timeout constraint.
+ *
+ * Because the function runs in the background, no counts are returned.
+ * `onStep(type)` is called before each request so the UI can show which step is queuing.
  */
 export async function syncHubspotData(session, onStep) {
   const types = ['contacts', 'companies', 'deals']
-  const synced = { contacts: 0, companies: 0, deals: 0 }
-  const errors = []
 
   for (const type of types) {
     onStep?.(type)
-    const res = await call('hs-sync', { type }, session)
-    synced[type] = res.synced?.[type] ?? 0
-    if (res.errors?.length) errors.push(...res.errors)
+    const res = await fetch(`/.netlify/functions/hs-sync-background`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({ type }),
+    })
+    // Background functions always return 202 — any non-2xx means a network/config error
+    if (!res.ok && res.status !== 202) {
+      throw new Error(`Sync request failed: ${res.status}`)
+    }
   }
 
-  return { synced, errors: errors.length > 0 ? errors : undefined }
+  // Returns immediately — sync is running in the background
+  return { background: true }
 }

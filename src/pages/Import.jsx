@@ -8,6 +8,7 @@ import {
   searchContact,
   searchCompany,
   associateDeal,
+  syncHubspotData,
 } from '../lib/hubspot'
 import { processBatched, withRetry } from '../lib/rateLimiter'
 import CSVUploader from '../components/CSVUploader'
@@ -49,6 +50,11 @@ export default function Import({ session }) {
   const [configStatus, setConfigStatus] = useState(null)
   const [loadingConfig, setLoadingConfig] = useState(true)
 
+  // Sync gate state
+  const [cacheStatus, setCacheStatus] = useState('checking') // 'checking' | 'empty' | 'ready'
+  const [syncQueued, setSyncQueued] = useState(false)
+  const [syncError, setSyncError] = useState(null)
+
   // Import state
   const [importFile, setImportFile] = useState(null) // { rows, filename }
   const [isRunning, setIsRunning] = useState(false)
@@ -70,7 +76,32 @@ export default function Import({ session }) {
       .maybeSingle()
     setUserConfig(data)
     setConfigStatus(data?.config_status ?? 'unchecked')
+
+    // Check if HubSpot data has ever been synced (cache tables populated)
+    if (data?.config_status === 'valid') {
+      const { count } = await supabase
+        .from('hs_cached_contacts')
+        .select('*', { count: 'exact', head: true })
+        .eq('user_id', session.user.id)
+      setCacheStatus((count ?? 0) > 0 ? 'ready' : 'empty')
+    } else {
+      setCacheStatus('ready') // config not valid — let the configBlocked banner handle it
+    }
+
     setLoadingConfig(false)
+  }
+
+  async function handleQueueSync() {
+    setSyncQueued(true)
+    setSyncError(null)
+    try {
+      await syncHubspotData(session, () => {})
+      // 202 received — sync running in background. Allow import.
+      setCacheStatus('ready')
+    } catch (err) {
+      setSyncError(err.message)
+      setSyncQueued(false)
+    }
   }
 
   function updateRowStatus(idx, update) {
@@ -297,8 +328,37 @@ export default function Import({ session }) {
         )}
 
         <div className="bg-white rounded-xl border border-gray-200 p-6 space-y-6">
-          {/* Uploader — only show if not yet running */}
-          {!isRunning && !isDone && (
+          {/* Sync gate — prompt to sync HubSpot data before first import */}
+          {!isRunning && !isDone && !configBlocked && cacheStatus === 'empty' && (
+            <div className="flex flex-col items-start gap-4 py-2">
+              <div>
+                <h3 className="text-sm font-semibold text-gray-800">Sync HubSpot data first</h3>
+                <p className="text-sm text-gray-500 mt-1">
+                  Your HubSpot contacts, companies, and deals haven't been synced yet.
+                  Run a sync so the importer can match referrers and check for existing deals.
+                </p>
+                {syncError && (
+                  <p className="text-xs text-red-600 mt-2">{syncError}</p>
+                )}
+              </div>
+              {!syncQueued ? (
+                <button
+                  onClick={handleQueueSync}
+                  className="px-4 py-2 bg-brand-600 text-white text-sm font-medium rounded-lg hover:bg-brand-700 transition-colors"
+                >
+                  Sync HubSpot Data
+                </button>
+              ) : (
+                <div className="flex items-center gap-2 text-sm text-gray-600">
+                  <span className="animate-spin rounded-full h-4 w-4 border-b-2 border-brand-600" />
+                  Sync queued — fetching data in the background…
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Uploader — only show if not yet running and cache is ready */}
+          {!isRunning && !isDone && (cacheStatus === 'ready' || configBlocked) && (
             <CSVUploader
               userConfig={userConfig}
               onConfirm={runImport}

@@ -67,8 +67,11 @@ export default function Configuration({ session, onConfigValid }) {
     setSyncStep(null)
     setSyncResult(null)
     try {
-      const res = await syncHubspotData(session, step => setSyncStep(step))
-      setSyncResult({ ok: true, ...res.synced })
+      await syncHubspotData(session, step => setSyncStep(step))
+      // Background function: 202 returned immediately, sync runs server-side.
+      // Reload config to refresh the updated_at timestamp once sync has queued.
+      setSyncResult({ ok: true })
+      await loadConfig()
     } catch (err) {
       setSyncResult({ ok: false, error: err.message })
     }
@@ -190,6 +193,13 @@ export default function Configuration({ session, onConfigValid }) {
                   </button>
                 </div>
 
+                {/* Last synced timestamp */}
+                {config?.updated_at && !syncResult && (
+                  <p className="text-xs text-gray-400 mt-2">
+                    Last synced: {new Date(config.updated_at).toLocaleString()}
+                  </p>
+                )}
+
                 {syncResult && (
                   <div className={`mt-3 text-xs rounded-lg px-3 py-2 ${
                     syncResult.ok
@@ -197,7 +207,7 @@ export default function Configuration({ session, onConfigValid }) {
                       : 'bg-red-50 border border-red-200 text-red-700'
                   }`}>
                     {syncResult.ok
-                      ? `Synced: ${syncResult.contacts} contacts · ${syncResult.companies} companies · ${syncResult.deals} deals`
+                      ? 'Sync queued — contacts, companies, and deals are being fetched in the background. This usually completes within 30 seconds.'
                       : `Sync failed: ${syncResult.error}`}
                   </div>
                 )}
