@@ -146,6 +146,7 @@ export function parseAlbiCSV(file, userConfig = {}) {
         let excludedCount = 0   // excluded suffix / blacklist
         let filteredCount = 0   // failed sales person filter
         const rows = []
+        const unmappedSuffixes = new Set() // suffixes with no pipeline mapping
 
         data.forEach((raw, idx) => {
           const get = key => {
@@ -181,6 +182,7 @@ export function parseAlbiCSV(file, userConfig = {}) {
 
           const customer = get('customer')
           const pipeline = getPipelineFromName(name, pipelineMapping)
+          if (!pipeline) unmappedSuffixes.add(extractSuffix(name))
 
           rows.push({
             _rowIndex: idx,
@@ -209,7 +211,7 @@ export function parseAlbiCSV(file, userConfig = {}) {
           })
         })
 
-        resolve({ rows, missingColumns, excludedCount, filteredCount })
+        resolve({ rows, missingColumns, excludedCount, filteredCount, unmappedSuffixes: [...unmappedSuffixes] })
       },
       error(err) {
         reject(new Error(err.message))

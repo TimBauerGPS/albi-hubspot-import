@@ -77,6 +77,22 @@ export async function createRequiredProperties(session) {
   return data
 }
 
-export async function syncHubspotData(session) {
-  return call('hs-sync', {}, session)
+/**
+ * Syncs contacts, companies, and deals from HubSpot in 3 separate calls
+ * to stay within Netlify's 10-second function timeout.
+ * `onStep(type)` is called before each request so the UI can show progress.
+ */
+export async function syncHubspotData(session, onStep) {
+  const types = ['contacts', 'companies', 'deals']
+  const synced = { contacts: 0, companies: 0, deals: 0 }
+  const errors = []
+
+  for (const type of types) {
+    onStep?.(type)
+    const res = await call('hs-sync', { type }, session)
+    synced[type] = res.synced?.[type] ?? 0
+    if (res.errors?.length) errors.push(...res.errors)
+  }
+
+  return { synced, errors: errors.length > 0 ? errors : undefined }
 }

@@ -17,6 +17,7 @@ export default function Configuration({ session, onConfigValid }) {
   const [loading, setLoading] = useState(true)
   const [configStatus, setConfigStatus] = useState(null)
   const [syncing, setSyncing] = useState(false)
+  const [syncStep, setSyncStep] = useState(null) // 'contacts' | 'companies' | 'deals'
   const [syncResult, setSyncResult] = useState(null)
 
   useEffect(() => {
@@ -63,13 +64,15 @@ export default function Configuration({ session, onConfigValid }) {
 
   async function handleSync() {
     setSyncing(true)
+    setSyncStep(null)
     setSyncResult(null)
     try {
-      const res = await syncHubspotData(session)
+      const res = await syncHubspotData(session, step => setSyncStep(step))
       setSyncResult({ ok: true, ...res.synced })
     } catch (err) {
       setSyncResult({ ok: false, error: err.message })
     }
+    setSyncStep(null)
     setSyncing(false)
   }
 
@@ -181,7 +184,7 @@ export default function Configuration({ session, onConfigValid }) {
                     {syncing ? (
                       <span className="flex items-center gap-2">
                         <span className="animate-spin rounded-full h-3 w-3 border-b-2 border-gray-500" />
-                        Syncing…
+                        {syncStep ? `Syncing ${syncStep}…` : 'Syncing…'}
                       </span>
                     ) : 'Sync Now'}
                   </button>
