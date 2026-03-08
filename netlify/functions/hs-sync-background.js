@@ -153,6 +153,7 @@ export const handler = async (event) => {
   try {
     const deals = await fetchAll(apiKey, 'deals', [
       'dealname', 'project_id', 'dealstage', 'pipeline',
+      'total_estimates', 'accrual_revenue',
     ])
 
     if (deals.length > 0) {
@@ -163,6 +164,10 @@ export const handler = async (event) => {
         deal_name: d.properties.dealname || null,
         deal_stage: d.properties.dealstage || null,
         pipeline: d.properties.pipeline || null,
+        total_estimates: d.properties.total_estimates != null
+          ? parseFloat(d.properties.total_estimates) : null,
+        accrual_revenue: d.properties.accrual_revenue != null
+          ? parseFloat(d.properties.accrual_revenue) : null,
         synced_at: syncedAt,
       }))
 
