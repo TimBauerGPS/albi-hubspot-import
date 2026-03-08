@@ -38,7 +38,7 @@ export const handler = async (event) => {
 
   try {
     await hsPut(
-      `/crm/v4/objects/deals/${dealId}/associations/${objectType}/${objectId}/3`,
+      `/crm/v4/objects/deals/${dealId}/associations/${objectType}/${objectId}/${typeId}`,
       apiKey
     )
     return jsonResponse(200, { ok: true })
