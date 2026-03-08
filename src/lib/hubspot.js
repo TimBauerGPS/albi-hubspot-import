@@ -78,32 +78,25 @@ export async function createRequiredProperties(session) {
 }
 
 /**
- * Queues a HubSpot sync using Netlify Background Functions (free plan, 15-min timeout).
- * Fires three requests — contacts, companies, deals — each returning 202 immediately.
- * The actual fetching and caching runs server-side with no timeout constraint.
+ * Queues a full HubSpot sync using a single Netlify Background Function call.
+ * Returns 202 immediately; the function syncs contacts → companies → deals
+ * sequentially and writes hs_user_config.updated_at when all three are done.
  *
- * Because the function runs in the background, no counts are returned.
- * `onStep(type)` is called before each request so the UI can show which step is queuing.
+ * Using a single sequential call (vs three parallel calls) prevents HubSpot
+ * API rate-limit contention between concurrent function invocations.
  */
-export async function syncHubspotData(session, onStep) {
-  const types = ['contacts', 'companies', 'deals']
-
-  for (const type of types) {
-    onStep?.(type)
-    const res = await fetch(`/.netlify/functions/hs-sync-background`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${session.access_token}`,
-      },
-      body: JSON.stringify({ type }),
-    })
-    // Background functions always return 202 — any non-2xx means a network/config error
-    if (!res.ok && res.status !== 202) {
-      throw new Error(`Sync request failed: ${res.status}`)
-    }
+export async function syncHubspotData(session) {
+  const res = await fetch(`/.netlify/functions/hs-sync-background`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${session.access_token}`,
+    },
+    body: JSON.stringify({}),  // no type = sync all three in sequence
+  })
+  // Background functions always return 202 — any non-2xx means a network/config error
+  if (!res.ok && res.status !== 202) {
+    throw new Error(`Sync request failed: ${res.status}`)
   }
-
-  // Returns immediately — sync is running in the background
   return { background: true }
 }

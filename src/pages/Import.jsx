@@ -163,32 +163,31 @@ export default function Import({ session }) {
     setSyncStep(null)
     setSyncPolling(null)
 
-    const snapshotTime = new Date().toISOString()
+    // Read the CURRENT updated_at as our baseline BEFORE triggering the sync.
+    // We compare against this value (not the browser clock) to avoid any
+    // clock-skew false positives or negatives.
+    const { data: beforeSync } = await supabase
+      .from('hs_user_config')
+      .select('updated_at')
+      .eq('user_id', session.user.id)
+      .single()
+    const baselineUpdatedAt = beforeSync?.updated_at ?? '1970-01-01'
 
     try {
-      await syncHubspotData(session, step => setSyncStep(step))
+      await syncHubspotData(session)  // single sequential call — no type = all 3
     } catch (err) {
       setSyncing(false)
-      setSyncStep(null)
       setSyncPolling({ error: err.message })
       return
     }
 
     setSyncing(false)
-    setSyncStep(null)
 
-    // Poll Supabase every 3 s (up to 8 min) for rows newer than snapshotTime.
-    // When all 3 tables have updated rows we know the background sync finished.
+    // Show spinners for all 3 types while waiting
     setSyncPolling({ contacts: null, companies: null, deals: null, done: false, timedOut: false })
 
-    const doneByType = { contacts: false, companies: false, deals: false }
-    const SYNC_TABLES = [
-      { key: 'contacts',  table: 'hs_cached_contacts'  },
-      { key: 'companies', table: 'hs_cached_companies'  },
-      { key: 'deals',     table: 'hs_cached_deals'      },
-    ]
     const pollStart = Date.now()
-    const POLL_TIMEOUT_MS = 8 * 60 * 1000   // 8 min — enough for very large accounts
+    const POLL_TIMEOUT_MS = 15 * 60 * 1000  // 15 min — Netlify background function max
 
     pollIntervalRef.current = setInterval(async () => {
       if (Date.now() - pollStart > POLL_TIMEOUT_MS) {
@@ -197,30 +196,27 @@ export default function Import({ session }) {
         return
       }
 
-      for (const { key, table } of SYNC_TABLES) {
-        if (doneByType[key]) continue
-        const { data: latest } = await supabase
-          .from(table)
-          .select('synced_at')
-          .eq('user_id', session.user.id)
-          .gt('synced_at', snapshotTime)
-          .limit(1)
+      // The background function always writes hs_user_config.updated_at at the end,
+      // regardless of how many rows were cached. This is the reliable completion signal.
+      const { data: cfg } = await supabase
+        .from('hs_user_config')
+        .select('updated_at')
+        .eq('user_id', session.user.id)
+        .single()
 
-        if (latest && latest.length > 0) {
-          const { count } = await supabase
-            .from(table)
-            .select('*', { count: 'exact', head: true })
-            .eq('user_id', session.user.id)
-          doneByType[key] = true
-          setSyncPolling(prev => ({ ...prev, [key]: count ?? 0 }))
-        }
-      }
-
-      if (doneByType.contacts && doneByType.companies && doneByType.deals) {
+      if (cfg?.updated_at && cfg.updated_at > baselineUpdatedAt) {
         clearInterval(pollIntervalRef.current)
-        setSyncPolling(prev => ({ ...prev, done: true }))
+
+        // Fetch cached counts for all 3 types now that sync is done
+        const [{ count: cc }, { count: co }, { count: dc }] = await Promise.all([
+          supabase.from('hs_cached_contacts').select('*', { count: 'exact', head: true }).eq('user_id', session.user.id),
+          supabase.from('hs_cached_companies').select('*', { count: 'exact', head: true }).eq('user_id', session.user.id),
+          supabase.from('hs_cached_deals').select('*', { count: 'exact', head: true }).eq('user_id', session.user.id),
+        ])
+
+        setSyncPolling({ contacts: cc ?? 0, companies: co ?? 0, deals: dc ?? 0, done: true, timedOut: false })
         setCacheStatus('ready')
-        setLastSyncAt(new Date().toISOString())
+        setLastSyncAt(cfg.updated_at)
       }
     }, 3000)
   }
