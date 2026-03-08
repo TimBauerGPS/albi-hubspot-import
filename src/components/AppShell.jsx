@@ -7,6 +7,7 @@ import { supabase } from '../lib/supabase'
 const NAV_LINKS = [
   { to: '/dashboard', label: 'Dashboard' },
   { to: '/import', label: 'Import' },
+  { to: '/held-deals', label: 'Held Deals' },
   { to: '/configuration', label: 'Configuration' },
 ]
 

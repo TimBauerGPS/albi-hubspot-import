@@ -1,6 +1,7 @@
 /**
  * ImportProgress — displays live row-by-row status during the import pipeline.
- * Shows a progress bar, running totals (created/updated/errors), and per-row outcomes.
+ * Shows a progress bar, running totals (created/updated/skipped/held/errors),
+ * and per-row outcomes.
  */
 
 // Status badge for each row outcome
@@ -9,6 +10,7 @@ function RowBadge({ action }) {
     created: 'bg-green-100 text-green-700',
     updated: 'bg-blue-100 text-blue-700',
     skipped: 'bg-gray-100 text-gray-500',
+    held: 'bg-amber-100 text-amber-700',
     error: 'bg-red-100 text-red-700',
     pending: 'bg-gray-50 text-gray-400',
     processing: 'bg-yellow-100 text-yellow-700',
@@ -43,9 +45,18 @@ export default function ImportProgress({ rows, rowStatuses, completed, isRunning
   const created = summary?.created ?? 0
   const updated = summary?.updated ?? 0
   const skipped = summary?.skipped ?? 0
+  const held = summary?.held ?? 0
   const errors = summary?.errors ?? 0
 
   const isDone = !isRunning && completed === total && total > 0
+
+  const tiles = [
+    { label: 'Created', value: created, color: 'text-green-700 bg-green-50 border-green-200' },
+    { label: 'Updated', value: updated, color: 'text-blue-700 bg-blue-50 border-blue-200' },
+    { label: 'Skipped', value: skipped, color: 'text-gray-500 bg-gray-50 border-gray-200' },
+    { label: 'Held',    value: held,    color: held > 0 ? 'text-amber-700 bg-amber-50 border-amber-200' : 'text-gray-500 bg-gray-50 border-gray-200' },
+    { label: 'Errors',  value: errors,  color: errors > 0 ? 'text-red-700 bg-red-50 border-red-200' : 'text-gray-500 bg-gray-50 border-gray-200' },
+  ]
 
   return (
     <div className="space-y-4">
@@ -54,16 +65,11 @@ export default function ImportProgress({ rows, rowStatuses, completed, isRunning
         <ProgressBar completed={completed} total={total} />
       )}
 
-      {/* Totals */}
+      {/* Summary tiles */}
       {(isRunning || isDone) && (
-        <div className="grid grid-cols-4 gap-3">
-          {[
-            { label: 'Created', value: created, color: 'text-green-700 bg-green-50 border-green-200' },
-            { label: 'Updated', value: updated, color: 'text-blue-700 bg-blue-50 border-blue-200' },
-            { label: 'Skipped', value: skipped, color: 'text-gray-500 bg-gray-50 border-gray-200' },
-            { label: 'Errors',  value: errors,  color: errors > 0 ? 'text-red-700 bg-red-50 border-red-200' : 'text-gray-500 bg-gray-50 border-gray-200' },
-          ].map(({ label, value, color }) => (
-            <div key={label} className={`rounded-lg border px-4 py-3 text-center ${color}`}>
+        <div className="grid grid-cols-5 gap-3">
+          {tiles.map(({ label, value, color }) => (
+            <div key={label} className={`rounded-lg border px-3 py-3 text-center ${color}`}>
               <p className="text-2xl font-bold tabular-nums">{value}</p>
               <p className="text-xs font-medium mt-0.5">{label}</p>
             </div>
@@ -74,13 +80,18 @@ export default function ImportProgress({ rows, rowStatuses, completed, isRunning
       {/* Done message */}
       {isDone && (
         <div className={`rounded-lg border px-4 py-3 text-sm font-semibold ${
-          errors === 0
+          errors === 0 && held === 0
             ? 'bg-green-50 border-green-200 text-green-800'
-            : 'bg-yellow-50 border-yellow-200 text-yellow-800'
+            : errors > 0
+            ? 'bg-yellow-50 border-yellow-200 text-yellow-800'
+            : 'bg-amber-50 border-amber-200 text-amber-800'
         }`}>
-          {errors === 0
-            ? `Import complete — ${created} created, ${updated} updated${skipped > 0 ? `, ${skipped} unchanged/skipped` : ''}.`
-            : `Import complete with ${errors} error${errors !== 1 ? 's' : ''}. Download the error report below.`}
+          {errors === 0 && held === 0
+            ? `Import complete — ${created} created, ${updated} updated${skipped > 0 ? `, ${skipped} unchanged` : ''}.`
+            : errors > 0
+            ? `Import complete with ${errors} error${errors !== 1 ? 's' : ''}${held > 0 ? ` and ${held} held` : ''}. Download the error report below.`
+            : `Import complete — ${held} deal${held !== 1 ? 's' : ''} held (referrer not found in HubSpot). View them in Held Deals.`
+          }
         </div>
       )}
 
@@ -94,24 +105,32 @@ export default function ImportProgress({ rows, rowStatuses, completed, isRunning
                 <th className="text-left px-3 py-2 font-semibold text-gray-600">Deal Name</th>
                 <th className="text-left px-3 py-2 font-semibold text-gray-600">Result</th>
                 <th className="text-left px-3 py-2 font-semibold text-gray-600">HubSpot ID</th>
-                <th className="text-left px-3 py-2 font-semibold text-gray-600">Error</th>
+                <th className="text-left px-3 py-2 font-semibold text-gray-600">Note</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {rows.map((row, idx) => {
                 const s = rowStatuses[idx] || {}
                 return (
-                  <tr key={idx} className={s.action === 'error' ? 'bg-red-50/30' : ''}>
+                  <tr
+                    key={idx}
+                    className={
+                      s.action === 'error' ? 'bg-red-50/30' :
+                      s.action === 'held'  ? 'bg-amber-50/30' : ''
+                    }
+                  >
                     <td className="px-3 py-2 font-mono text-gray-700 whitespace-nowrap">{row.name}</td>
                     <td className="px-3 py-2 text-gray-700 truncate max-w-xs">{row.dealName}</td>
                     <td className="px-3 py-2 whitespace-nowrap">
-                      <RowBadge action={s.action || (idx < completed ? 'pending' : 'pending')} />
+                      <RowBadge action={s.action} />
                     </td>
                     <td className="px-3 py-2 font-mono text-gray-500 whitespace-nowrap text-xs">
                       {s.hubspotDealId || '—'}
                     </td>
-                    <td className="px-3 py-2 text-red-600 max-w-xs truncate">
-                      {s.error || ''}
+                    <td className="px-3 py-2 text-gray-500 max-w-xs truncate">
+                      {s.action === 'held'
+                        ? `Referrer not found: ${row.referrer}`
+                        : s.error || ''}
                     </td>
                   </tr>
                 )
