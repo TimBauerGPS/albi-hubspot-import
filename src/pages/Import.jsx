@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import {
@@ -50,6 +50,7 @@ export default function Import({ session }) {
   const [userConfig, setUserConfig] = useState(null)
   const [configStatus, setConfigStatus] = useState(null)
   const [loadingConfig, setLoadingConfig] = useState(true)
+  const [lastSyncAt, setLastSyncAt] = useState(null)
 
   // Sync gate state
   const [cacheStatus, setCacheStatus] = useState('checking') // 'checking' | 'empty' | 'ready'
@@ -65,6 +66,10 @@ export default function Import({ session }) {
   const [importId, setImportId] = useState(null)
   const [isDone, setIsDone] = useState(false)
 
+  // Stop import
+  const stopRequestedRef = useRef(false)
+  const [stopRequested, setStopRequested] = useState(false)
+
   useEffect(() => {
     loadUserConfig()
   }, [session])
@@ -78,13 +83,23 @@ export default function Import({ session }) {
     setUserConfig(data)
     setConfigStatus(data?.config_status ?? 'unchecked')
 
-    // Check if HubSpot data has ever been synced (cache tables populated)
     if (data?.config_status === 'valid') {
-      const { count } = await supabase
-        .from('hs_cached_contacts')
-        .select('*', { count: 'exact', head: true })
-        .eq('user_id', session.user.id)
+      // Check cache count AND most recent sync timestamp in one pass
+      const [{ count }, { data: latestSync }] = await Promise.all([
+        supabase
+          .from('hs_cached_contacts')
+          .select('*', { count: 'exact', head: true })
+          .eq('user_id', session.user.id),
+        supabase
+          .from('hs_cached_contacts')
+          .select('synced_at')
+          .eq('user_id', session.user.id)
+          .order('synced_at', { ascending: false })
+          .limit(1)
+          .maybeSingle(),
+      ])
       setCacheStatus((count ?? 0) > 0 ? 'ready' : 'empty')
+      setLastSyncAt(latestSync?.synced_at ?? null)
     } else {
       setCacheStatus('ready') // config not valid — let the configBlocked banner handle it
     }
@@ -97,17 +112,27 @@ export default function Import({ session }) {
     setSyncError(null)
     try {
       await syncHubspotData(session, () => {})
-      // 202 received — sync running in background. Allow import.
+      // 202 received — sync running in background. Allow import and clear stale warning.
       setCacheStatus('ready')
+      setLastSyncAt(new Date().toISOString())
     } catch (err) {
       setSyncError(err.message)
       setSyncQueued(false)
     }
   }
 
+  function handleStopImport() {
+    stopRequestedRef.current = true
+    setStopRequested(true)
+  }
+
   function updateRowStatus(idx, update) {
     setRowStatuses(prev => ({ ...prev, [idx]: { ...prev[idx], ...update } }))
   }
+
+  // 24-hour sync staleness warning
+  const syncAgeMs = lastSyncAt ? Date.now() - new Date(lastSyncAt).getTime() : null
+  const needsResync = syncAgeMs !== null && syncAgeMs > 24 * 60 * 60 * 1000
 
   async function runImport(parseResult) {
     const { rows, filename } = parseResult
@@ -117,14 +142,17 @@ export default function Import({ session }) {
     setRowStatuses({})
     setSummary(null)
     setIsDone(false)
+    stopRequestedRef.current = false
+    setStopRequested(false)
 
-    // ── Fetch pipeline/stage metadata (label → ID) ────────────────────────────
+    // ── Fetch pipeline/stage/owner metadata (label → ID) ─────────────────────
     // Mirrors the Google Script: build pipelineMap[label] = { id, stages: { label → id } }
-    // Keys are lowercased for case-insensitive matching (same as reference script).
-    let pipelineLabelToId = {}     // "water mitigation" → pipelineId
-    let stagesByPipeline = {}      // "water mitigation" → { "lead in" → stageId, ... }
+    // and ownerMap[name] = id. Keys are lowercased for case-insensitive matching.
+    let pipelineLabelToId = {}   // "water mitigation" → pipelineId
+    let stagesByPipeline = {}    // "water mitigation" → { "lead in" → stageId, ... }
+    let ownerNameToId = {}       // "john smith" → ownerId (matched against salesPerson)
     try {
-      const { pipelines } = await fetchPipelinesAndOwners(session)
+      const { pipelines, owners } = await fetchPipelinesAndOwners(session)
       for (const p of pipelines) {
         const pKey = p.label.toLowerCase().trim()
         pipelineLabelToId[pKey] = p.id
@@ -133,14 +161,29 @@ export default function Import({ session }) {
           stagesByPipeline[pKey][s.label.toLowerCase().trim()] = s.id
         }
       }
+      for (const o of owners) {
+        if (o.name) ownerNameToId[o.name.toLowerCase().trim()] = o.id
+        if (o.email) ownerNameToId[o.email.toLowerCase().trim()] = o.id
+      }
     } catch (err) {
-      console.warn('Could not fetch pipeline metadata — pipeline/stage will not be set:', err.message)
+      console.warn('Could not fetch pipeline/owner metadata:', err.message)
     }
 
     let created = 0
     let updated = 0
     let skipped = 0
     let errors = 0
+    let heldCount = 0
+
+    // ── Load unresolved held deals queue ──────────────────────────────────────
+    // Re-try referrer lookups for deals held from previous imports.
+    const { data: heldQueue } = await supabase
+      .from('hs_held_deals')
+      .select('*')
+      .eq('user_id', session.user.id)
+      .is('resolved_at', null)
+    const heldQueueMap = new Map((heldQueue || []).map(h => [h.job_id, h]))
+    const currentCsvJobIds = new Set(rows.map(r => r.name))
 
     // Create the import batch record
     const { data: importRecord, error: importErr } = await supabase
@@ -157,12 +200,13 @@ export default function Import({ session }) {
     const batchImportId = importRecord?.id
     setImportId(batchImportId)
 
-    if (importErr) {
-      console.error('Failed to create import record:', importErr)
-    }
+    if (importErr) console.error('Failed to create import record:', importErr)
 
-    // Process rows in batches of 10
+    // ── Main import loop ──────────────────────────────────────────────────────
     await processBatched(rows, async (row, idx) => {
+      // Respect stop request — leave row in pending state
+      if (stopRequestedRef.current) return
+
       updateRowStatus(idx, { action: 'processing' })
 
       let hubspotDealId = null
@@ -170,7 +214,10 @@ export default function Import({ session }) {
       let errorMsg = null
 
       try {
-        // Build the HubSpot properties object
+        // ── Build HubSpot properties object ──────────────────────────────────
+        // Mirrors the Google Script field names exactly:
+        //   dealname, project_id, total_estimates, accrual_revenue,
+        //   pipeline (ID), dealstage (ID), hubspot_owner_id
         const properties = {
           dealname: row.dealName,
           project_id: row.name,
@@ -178,8 +225,7 @@ export default function Import({ session }) {
           accrual_revenue: String(row.accrualRevenue),
         }
 
-        // Map pipeline label → HubSpot pipeline ID, stage label → stage ID.
-        // Mirrors the Google Script: lowercase both sides for case-insensitive matching.
+        // Map pipeline/stage labels → HubSpot IDs (lowercase matching, mirrors reference)
         const pKey = (row.pipeline || '').toLowerCase().trim()
         const sKey = (row.status || '').toLowerCase().trim()
         const pipelineId = pipelineLabelToId[pKey]
@@ -189,18 +235,43 @@ export default function Import({ session }) {
           if (stageId) properties.dealstage = stageId
         }
 
-        // Google leads (Referrer contains "Google") are inbound — no deal owner is assigned.
-        // Non-Google leads: owner would be set here via salesPerson → HubSpot owner lookup
-        // when that feature is added. For now, hubspot_owner_id is intentionally omitted.
+        // Map sales person name → HubSpot owner ID (mirrors reference's email → owner map)
+        const ownerKey = (row.salesPerson || '').toLowerCase().trim()
+        const ownerId = ownerNameToId[ownerKey]
+        if (ownerId) properties.hubspot_owner_id = ownerId
 
-        // 1. Search for existing deal by project_id (upsert key)
+        // ── Resolve referrer → contact/company (runs for ALL paths) ──────────
+        // Running BEFORE the deal search enables retroactive linking:
+        //   if a contact is added to HubSpot after the first import, syncing and
+        //   re-importing will find them and add the association to the existing deal.
+        // Google leads are inbound — skip referrer matching.
+        let resolvedContactId = null
+        let resolvedCompanyId = null
+        if (row.referrer && !row.isGoogleLead) {
+          const parts = row.referrer.trim().split(/\s+/)
+          const lastName  = parts.length > 1 ? parts[parts.length - 1] : parts[0]
+          const firstName = parts.length > 1 ? parts.slice(0, -1).join(' ') : ''
+
+          const { contactId, companyId: contactCompanyId } = await withRetry(() =>
+            searchContact(null, firstName, lastName, session)
+          )
+
+          if (contactId) {
+            resolvedContactId = contactId
+            resolvedCompanyId = contactCompanyId || null
+          } else {
+            const { companyId } = await withRetry(() => searchCompany(row.referrer, session))
+            resolvedCompanyId = companyId || null
+          }
+        }
+
+        // ── Search for existing deal by project_id ────────────────────────────
         const { deal: existingDeal } = await withRetry(() => searchDeal(row.name, session))
 
         if (existingDeal) {
           // ── Duplicate detection ───────────────────────────────────────────
-          // Skip update if stage + revenues all match (mirrors Google Script logic).
-          // Compare actual HubSpot stage ID (p.dealstage) to the expected stage ID
-          // derived from the row's pipeline + status labels via our metadata maps.
+          // Skip update only if stage + both revenue fields all match.
+          // Handles both increases and decreases (uses Math.abs).
           const p = existingDeal.properties || {}
           const expectedStageId = stagesByPipeline[pKey]?.[sKey] ?? ''
           const unchanged =
@@ -218,57 +289,90 @@ export default function Import({ session }) {
             action = 'updated'
             updated++
           }
-        } else {
-          // ── Create new deal with Referrer-based associations ─────────────
-          // Mirrors Google Script's matchReferrer():
-          //   Split referrer on last space → firstName/lastName → find contact.
-          //   If contact found, also associate their HubSpot company.
-          //   If no contact, try full referrer string as company name.
-          //   Google leads skip referrer matching (they're inbound, no referrer record).
-          const associations = []
 
-          if (row.referrer && !row.isGoogleLead) {
-            const parts = row.referrer.trim().split(/\s+/)
-            const lastName  = parts.length > 1 ? parts[parts.length - 1] : parts[0]
-            const firstName = parts.length > 1 ? parts.slice(0, -1).join(' ') : ''
-
-            const { contactId, companyId: contactCompanyId } = await withRetry(() =>
-              searchContact(null, firstName, lastName, session)
-            )
-
-            if (contactId) {
-              // Associate contact (deal → contact, type 3)
-              associations.push({
-                to: { id: contactId },
-                types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 3 }],
-              })
-              // Also associate the contact's company if we have it (deal → company, type 5)
-              if (contactCompanyId) {
-                associations.push({
-                  to: { id: contactCompanyId },
-                  types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 5 }],
-                })
-              }
-            } else {
-              // No contact — try full referrer string as a company name
-              const { companyId } = await withRetry(() =>
-                searchCompany(row.referrer, session)
-              )
-              if (companyId) {
-                associations.push({
-                  to: { id: companyId },
-                  types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 5 }],
-                })
-              }
-            }
+          // ── Retroactive association linking ───────────────────────────────
+          // HubSpot associations are idempotent — calling on an already-associated
+          // deal is a no-op. This means: after a new contact/company is added to
+          // HubSpot, sync + re-import will link previously-unmatched deals automatically.
+          let associationAdded = false
+          if (resolvedContactId) {
+            await withRetry(() => associateDeal(existingDeal.id, 'contacts', resolvedContactId, session))
+            associationAdded = true
+          }
+          if (resolvedCompanyId) {
+            await withRetry(() => associateDeal(existingDeal.id, 'companies', resolvedCompanyId, session))
+            associationAdded = true
+          }
+          // Flip skip → updated if a new association was added
+          if (action === 'skipped' && associationAdded) {
+            action = 'updated'
+            skipped--
+            updated++
           }
 
-          const { deal: newDeal } = await withRetry(() =>
-            createDeal(properties, associations, session)
-          )
-          hubspotDealId = newDeal.id
-          action = 'created'
-          created++
+          // Mark held queue entry as resolved if this deal was previously held
+          if (heldQueueMap.has(row.name)) {
+            await supabase
+              .from('hs_held_deals')
+              .update({ resolved_at: new Date().toISOString(), resolved_deal_id: hubspotDealId })
+              .eq('user_id', session.user.id)
+              .eq('job_id', row.name)
+          }
+        } else {
+          // ── Create new deal — or hold if referrer is unmatched ────────────
+          // A deal is held when: it has a non-Google referrer AND neither a matching
+          // contact nor company was found. Held deals are re-tried on each import.
+          const hasUnmatchedReferrer =
+            row.referrer && !row.isGoogleLead && !resolvedContactId && !resolvedCompanyId
+
+          if (hasUnmatchedReferrer) {
+            // Upsert to held queue (ON CONFLICT updates properties in case values changed)
+            await supabase.from('hs_held_deals').upsert({
+              user_id: session.user.id,
+              job_id: row.name,
+              deal_name: row.dealName,
+              referrer: row.referrer,
+              sales_person: row.salesPerson || null,
+              pipeline: row.pipeline || null,
+              dealstage: row.status || null,
+              estimated_revenue: row.estimatedRevenue || 0,
+              accrual_revenue: row.accrualRevenue || 0,
+              properties_json: properties,
+            }, { onConflict: 'user_id,job_id' })
+            action = 'held'
+            heldCount++
+          } else {
+            // Create deal with any resolved associations
+            const associations = []
+            if (resolvedContactId) {
+              associations.push({
+                to: { id: resolvedContactId },
+                types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 3 }],
+              })
+            }
+            if (resolvedCompanyId) {
+              associations.push({
+                to: { id: resolvedCompanyId },
+                types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 5 }],
+              })
+            }
+
+            const { deal: newDeal } = await withRetry(() =>
+              createDeal(properties, associations, session)
+            )
+            hubspotDealId = newDeal.id
+            action = 'created'
+            created++
+
+            // Mark held queue entry as resolved if this deal was previously held
+            if (heldQueueMap.has(row.name)) {
+              await supabase
+                .from('hs_held_deals')
+                .update({ resolved_at: new Date().toISOString(), resolved_deal_id: newDeal.id })
+                .eq('user_id', session.user.id)
+                .eq('job_id', row.name)
+            }
+          }
         }
       } catch (err) {
         action = 'error'
@@ -278,8 +382,8 @@ export default function Import({ session }) {
 
       updateRowStatus(idx, { action, hubspotDealId, error: errorMsg })
 
-      // Write result to hs_deals
-      if (batchImportId) {
+      // Write result to hs_deals — skip held rows (tracked in hs_held_deals instead)
+      if (batchImportId && action !== 'held') {
         await supabase.from('hs_deals').insert({
           user_id: session.user.id,
           import_id: batchImportId,
@@ -298,12 +402,96 @@ export default function Import({ session }) {
       setCompleted(prev => prev + 1)
     }, {
       batchSize: 10,
-      delayMs: 1100, // ~10 req/sec well within HubSpot's 100 req/10s limit
+      delayMs: 1100, // ~10 req/sec — well within HubSpot's 100 req/10s limit
       onProgress: (done, total) => setCompleted(done),
     })
 
-    // Finalize import record
-    const finalSummary = { created, updated, skipped, errors }
+    // ── Re-process held queue for deals NOT in current CSV ───────────────────
+    // After every import, retry referrer lookups for previously-held deals.
+    // If the contact/company is now in HubSpot (post-sync), create the deal.
+    // If the job is now blacklisted, mark resolved without creating.
+    if (!stopRequestedRef.current) {
+      const blacklist = userConfig?.blacklist || []
+      for (const heldDeal of heldQueue || []) {
+        if (stopRequestedRef.current) break
+        if (currentCsvJobIds.has(heldDeal.job_id)) continue // handled in main loop above
+
+        // Blacklisted — remove from queue
+        if (blacklist.includes(heldDeal.job_id)) {
+          await supabase
+            .from('hs_held_deals')
+            .update({ resolved_at: new Date().toISOString() })
+            .eq('id', heldDeal.id)
+          continue
+        }
+
+        // Retry referrer lookup
+        try {
+          const parts = heldDeal.referrer.trim().split(/\s+/)
+          const lastName  = parts.length > 1 ? parts[parts.length - 1] : parts[0]
+          const firstName = parts.length > 1 ? parts.slice(0, -1).join(' ') : ''
+
+          const { contactId, companyId: contactCompanyId } = await withRetry(() =>
+            searchContact(null, firstName, lastName, session)
+          )
+
+          let resolvedContactId = null
+          let resolvedCompanyId = null
+          if (contactId) {
+            resolvedContactId = contactId
+            resolvedCompanyId = contactCompanyId || null
+          } else {
+            const { companyId } = await withRetry(() => searchCompany(heldDeal.referrer, session))
+            resolvedCompanyId = companyId || null
+          }
+
+          if (resolvedContactId || resolvedCompanyId) {
+            // Referrer found — create the deal now
+            const associations = []
+            if (resolvedContactId) {
+              associations.push({
+                to: { id: resolvedContactId },
+                types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 3 }],
+              })
+            }
+            if (resolvedCompanyId) {
+              associations.push({
+                to: { id: resolvedCompanyId },
+                types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 5 }],
+              })
+            }
+
+            const { deal: newDeal } = await withRetry(() =>
+              createDeal(heldDeal.properties_json || {}, associations, session)
+            )
+            await supabase
+              .from('hs_held_deals')
+              .update({ resolved_at: new Date().toISOString(), resolved_deal_id: newDeal.id })
+              .eq('id', heldDeal.id)
+            created++
+
+            if (batchImportId) {
+              await supabase.from('hs_deals').insert({
+                user_id: session.user.id,
+                import_id: batchImportId,
+                job_id: heldDeal.job_id,
+                job_name: heldDeal.deal_name,
+                job_status: heldDeal.dealstage,
+                deal_value: heldDeal.estimated_revenue,
+                accrual_revenue: heldDeal.accrual_revenue,
+                hubspot_deal_id: newDeal.id,
+                action_taken: 'created',
+              })
+            }
+          }
+        } catch (err) {
+          console.warn('Failed to re-process held deal', heldDeal.job_id, ':', err.message)
+        }
+      }
+    }
+
+    // ── Finalize ──────────────────────────────────────────────────────────────
+    const finalSummary = { created, updated, skipped, errors, held: heldCount }
     setSummary(finalSummary)
 
     if (batchImportId) {
@@ -357,8 +545,34 @@ export default function Import({ session }) {
           </div>
         )}
 
+        {/* 24-hour sync staleness warning */}
+        {!configBlocked && cacheStatus === 'ready' && needsResync && !isRunning && !isDone && (
+          <div className="mb-6 bg-amber-50 border border-amber-200 rounded-xl px-5 py-4 flex items-start justify-between gap-4">
+            <div>
+              <p className="text-sm font-semibold text-amber-800">HubSpot data may be stale</p>
+              <p className="text-sm text-amber-700 mt-0.5">
+                Last synced {Math.floor(syncAgeMs / (60 * 60 * 1000))} hours ago. Syncing before
+                importing ensures referrer matches and duplicate detection are accurate.
+              </p>
+            </div>
+            {!syncQueued ? (
+              <button
+                onClick={handleQueueSync}
+                className="shrink-0 px-3 py-1.5 bg-amber-600 text-white text-xs font-medium rounded-lg hover:bg-amber-700 transition-colors"
+              >
+                Sync Now
+              </button>
+            ) : (
+              <div className="flex items-center gap-2 text-xs text-amber-700 shrink-0 pt-0.5">
+                <span className="animate-spin rounded-full h-3 w-3 border-b-2 border-amber-600" />
+                Syncing in background…
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="bg-white rounded-xl border border-gray-200 p-6 space-y-6">
-          {/* Sync gate — prompt to sync HubSpot data before first import */}
+          {/* Sync gate — first-time prompt (cache empty) */}
           {!isRunning && !isDone && !configBlocked && cacheStatus === 'empty' && (
             <div className="flex flex-col items-start gap-4 py-2">
               <div>
@@ -387,7 +601,7 @@ export default function Import({ session }) {
             </div>
           )}
 
-          {/* Uploader — only show if not yet running and cache is ready */}
+          {/* Uploader — only show if cache ready (or config blocked, which shows its own banner) */}
           {!isRunning && !isDone && (cacheStatus === 'ready' || configBlocked) && (
             <CSVUploader
               userConfig={userConfig}
@@ -407,15 +621,36 @@ export default function Import({ session }) {
             />
           )}
 
+          {/* Stop import button */}
+          {isRunning && (
+            <div className="flex justify-end pt-2 border-t border-gray-100">
+              <button
+                onClick={handleStopImport}
+                disabled={stopRequested}
+                className="px-4 py-2 border border-red-300 text-red-600 text-sm font-medium rounded-lg hover:bg-red-50 disabled:opacity-50 transition-colors"
+              >
+                {stopRequested ? 'Stopping after current batch…' : 'Stop Import'}
+              </button>
+            </div>
+          )}
+
           {/* Post-import actions */}
           {isDone && (
-            <div className="flex items-center gap-3 pt-2 border-t border-gray-100">
+            <div className="flex flex-wrap items-center gap-3 pt-2 border-t border-gray-100">
               {summary?.errors > 0 && (
                 <button
                   onClick={() => downloadErrorCSV(importFile.rows, rowStatuses)}
                   className="px-4 py-2 border border-gray-300 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-50 transition-colors"
                 >
                   Download Error Report
+                </button>
+              )}
+              {summary?.held > 0 && (
+                <button
+                  onClick={() => navigate('/held-deals')}
+                  className="px-4 py-2 border border-amber-300 text-amber-700 text-sm font-medium rounded-lg hover:bg-amber-50 transition-colors"
+                >
+                  View {summary.held} Held Deal{summary.held !== 1 ? 's' : ''}
                 </button>
               )}
               <button
@@ -427,6 +662,7 @@ export default function Import({ session }) {
                   setSummary(null)
                   setIsDone(false)
                   setImportId(null)
+                  setStopRequested(false)
                 }}
                 className="px-4 py-2 bg-brand-600 text-white text-sm font-medium rounded-lg hover:bg-brand-700 transition-colors"
               >

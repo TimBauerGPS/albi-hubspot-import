@@ -185,6 +185,47 @@ CREATE INDEX IF NOT EXISTS idx_cached_companies_name ON hs_cached_companies (use
 CREATE INDEX IF NOT EXISTS idx_cached_deals_project ON hs_cached_deals (user_id, project_id);
 
 -- ============================================================
+-- hs_held_deals
+-- Deals that could not be imported because their referrer was not found
+-- in HubSpot contacts or companies. Re-tried on each import run.
+-- Resolved when referrer is found (deal created) or job is blacklisted.
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS hs_held_deals (
+  id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id           uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+
+  -- From Albi CSV
+  job_id            text NOT NULL,           -- Albi Name field (project_id)
+  deal_name         text NOT NULL,           -- Customer + " - " + Name
+  referrer          text NOT NULL,           -- The unmatched referrer string
+  sales_person      text,                    -- Sales Person name from Albi CSV
+  pipeline          text,                    -- Albi pipeline label
+  dealstage         text,                    -- Albi status label
+  estimated_revenue numeric(12, 2) DEFAULT 0,
+  accrual_revenue   numeric(12, 2) DEFAULT 0,
+
+  -- Full HubSpot properties snapshot (for re-create when referrer is found)
+  properties_json   jsonb DEFAULT '{}'::jsonb,
+
+  -- Lifecycle
+  created_at        timestamptz NOT NULL DEFAULT now(),
+  resolved_at       timestamptz,            -- Set when resolved (deal created or blacklisted)
+  resolved_deal_id  text,                   -- HubSpot deal ID if resolved via deal creation
+
+  UNIQUE (user_id, job_id)
+);
+
+ALTER TABLE hs_held_deals ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "hs_held_deals: own rows" ON hs_held_deals
+  FOR ALL USING (auth.uid() = user_id);
+
+CREATE INDEX IF NOT EXISTS idx_held_deals_user_unresolved
+  ON hs_held_deals (user_id, resolved_at)
+  WHERE resolved_at IS NULL;
+
+-- ============================================================
 -- Default config row — insert on first config page visit
 -- (done client-side via upsert, this is just reference)
 -- ============================================================

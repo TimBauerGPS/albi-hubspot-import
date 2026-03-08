@@ -5,6 +5,7 @@ import Login from './pages/Login'
 import Configuration from './pages/Configuration'
 import Import from './pages/Import'
 import Dashboard from './pages/Dashboard'
+import HeldDeals from './pages/HeldDeals'
 
 function Spinner() {
   return (
@@ -182,6 +183,14 @@ export default function App() {
           element={
             <ProtectedRoute session={session} configStatus={configStatus}>
               <Dashboard session={session} configStatus={configStatus} />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/held-deals"
+          element={
+            <ProtectedRoute session={session} configStatus={configStatus}>
+              <HeldDeals session={session} />
             </ProtectedRoute>
           }
         />
