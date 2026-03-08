@@ -4,17 +4,14 @@
  * Associates a Deal with a Contact or Company in HubSpot.
  * Body: { dealId: string, objectType: 'contacts' | 'companies', objectId: string }
  *
- * Association type IDs (HUBSPOT_DEFINED):
- *   deal → contact: 3
- *   deal → company: 5
+ * Uses the CRM v4 "default" association endpoint which creates the standard
+ * HUBSPOT_DEFINED association without needing to specify a typeId in the URL.
+ * Endpoint: PUT /crm/v4/objects/deals/{id}/associations/default/{toType}/{toId}
  */
 
 import { getHubspotKey, jsonResponse, hsPut } from './_getHubspotKey.js'
 
-const ASSOCIATION_TYPE_IDS = {
-  contacts: 3,
-  companies: 5,
-}
+const VALID_OBJECT_TYPES = new Set(['contacts', 'companies'])
 
 export const handler = async (event) => {
   if (event.httpMethod !== 'POST') return jsonResponse(405, { error: 'Method not allowed' })
@@ -30,15 +27,15 @@ export const handler = async (event) => {
   if (!dealId || !objectType || !objectId) {
     return jsonResponse(400, { error: 'dealId, objectType, and objectId are required' })
   }
-
-  const typeId = ASSOCIATION_TYPE_IDS[objectType]
-  if (!typeId) return jsonResponse(400, { error: `Unknown objectType: ${objectType}` })
+  if (!VALID_OBJECT_TYPES.has(objectType)) {
+    return jsonResponse(400, { error: `Unknown objectType: ${objectType}` })
+  }
 
   const { hubspot_api_key: apiKey } = config
 
   try {
     await hsPut(
-      `/crm/v4/objects/deals/${dealId}/associations/${objectType}/${objectId}/${typeId}`,
+      `/crm/v4/objects/deals/${dealId}/associations/default/${objectType}/${objectId}`,
       apiKey
     )
     return jsonResponse(200, { ok: true })

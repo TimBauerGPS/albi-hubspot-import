@@ -323,6 +323,21 @@ export default function Import({ session }) {
       for (const c of companyRows ?? []) {
         if (c.name) cachedCompanies.set(c.name.toLowerCase().trim(), c.hubspot_id)
       }
+
+      // DEBUG — remove after troubleshooting
+      console.log('[Import] Cache built:', {
+        deals: cachedDeals.size,
+        contactBuckets: contactsByLastName.size,
+        companies: cachedCompanies.size,
+      })
+      // Show the first 10 non-empty last-name keys so we can see what's indexed
+      const sampleKeys = [...contactsByLastName.keys()].filter(Boolean).slice(0, 10)
+      console.log('[Import] Sample contact last-name keys:', sampleKeys)
+      // Show any contacts that ended up under the empty-string key (name not split correctly)
+      const unkeyed = contactsByLastName.get('') ?? []
+      if (unkeyed.length > 0) {
+        console.warn('[Import] Contacts with no indexable last name (' + unkeyed.length + '):', unkeyed.slice(0, 5).map(c => ({ first_name: c.first_name, last_name: c.last_name })))
+      }
     } catch (err) {
       console.warn('Could not prefetch cache tables — import will proceed without local lookup cache:', err.message)
     }
@@ -407,6 +422,11 @@ export default function Import({ session }) {
           } else {
             const companyId = findCachedCompany(cachedCompanies, row.referrer)
             resolvedCompanyId = companyId || null
+            // DEBUG — log every unmatched referrer so we can see what key was tried
+            if (!companyId) {
+              const lnKey = lastName.toLowerCase().trim()
+              console.log(`[Import] No match for referrer "${row.referrer}" | lastName key="${lnKey}" | bucket=${JSON.stringify((contactsByLastName.get(lnKey) ?? []).map(c => ({ fn: c.first_name, ln: c.last_name })))} | company check="${row.referrer.toLowerCase().trim()}" found=${!!companyId}`)
+            }
           }
         }
 
