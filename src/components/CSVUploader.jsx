@@ -68,8 +68,8 @@ export default function CSVUploader({ userConfig, onConfirm, disabled }) {
     setResult(null)
 
     try {
-      const { rows, missingColumns, excludedCount, filteredCount } = await parseAlbiCSV(file, userConfig)
-      setResult({ rows, missingColumns, excludedCount, filteredCount, filename: file.name })
+      const { rows, missingColumns, excludedCount, filteredCount, unmappedSuffixes } = await parseAlbiCSV(file, userConfig)
+      setResult({ rows, missingColumns, excludedCount, filteredCount, unmappedSuffixes, filename: file.name })
     } catch (err) {
       setError('Failed to parse CSV: ' + err.message)
     }
@@ -187,12 +187,14 @@ export default function CSVUploader({ userConfig, onConfirm, disabled }) {
           )}
 
           {/* Rows with no pipeline mapping warning */}
-          {result.rows.some(r => !r.pipeline) && (
+          {result.unmappedSuffixes?.length > 0 && (
             <div className="bg-yellow-50 border border-yellow-200 rounded-lg px-4 py-3">
               <p className="text-sm font-semibold text-yellow-800">Some rows have no pipeline mapping</p>
               <p className="text-xs text-yellow-700 mt-1">
-                {result.rows.filter(r => !r.pipeline).length} job(s) use a suffix not in your pipeline mapping.
-                These rows will be imported without a pipeline assigned. Update your pipeline mapping in Settings to fix this.
+                {result.rows.filter(r => !r.pipeline).length} job(s) use the suffix{result.unmappedSuffixes.length > 1 ? 'es' : ''}{' '}
+                <strong>{result.unmappedSuffixes.join(', ')}</strong> which {result.unmappedSuffixes.length > 1 ? 'are' : 'is'} not in your pipeline mapping.
+                These rows will be imported without a pipeline assigned.
+                Add {result.unmappedSuffixes.length > 1 ? 'these suffixes' : 'this suffix'} in Settings → Pipeline Mapping to fix this.
               </p>
             </div>
           )}

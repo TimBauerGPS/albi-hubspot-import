@@ -131,6 +131,10 @@ export default function Import({ session }) {
         if (row.pipeline) properties.pipeline_label = row.pipeline
         if (row.status) properties.dealstage_label = row.status
 
+        // Google leads (Referrer contains "Google") are inbound — no deal owner is assigned.
+        // Non-Google leads: owner would be set here via salesPerson → HubSpot owner lookup
+        // when that feature is added. For now, hubspot_owner_id is intentionally omitted.
+
         // 1. Search for existing deal by project_id (upsert key)
         const { deal: existingDeal } = await withRetry(() => searchDeal(row.name, session))
 

@@ -78,6 +78,11 @@ export const handler = async (event) => {
     return jsonResponse(401, { error: err.message })
   }
 
+  // Accept an optional `type` param so the frontend can call each object type
+  // separately, avoiding Netlify's 10-second function timeout on large accounts.
+  // type: 'contacts' | 'companies' | 'deals' | undefined (all — kept for compat)
+  const { type } = JSON.parse(event.body || '{}')
+
   const { hubspot_api_key: apiKey } = config
   const userId = user.id
   const syncedAt = new Date().toISOString()
@@ -88,6 +93,7 @@ export const handler = async (event) => {
   // ─── Contacts ─────────────────────────────────────────────────────────────
   // Uses the GET list endpoint (not search) so we can request associations=companies.
   // The search API doesn't support associations; the list endpoint does.
+  if (!type || type === 'contacts') {
   try {
     const contacts = await fetchAllContacts(apiKey)
 
@@ -118,8 +124,10 @@ export const handler = async (event) => {
   } catch (err) {
     errors.push('contacts: ' + err.message)
   }
+  } // end contacts
 
   // ─── Companies ────────────────────────────────────────────────────────────
+  if (!type || type === 'companies') {
   try {
     const companies = await fetchAll(apiKey, 'companies', ['name'])
 
@@ -142,8 +150,10 @@ export const handler = async (event) => {
   } catch (err) {
     errors.push('companies: ' + err.message)
   }
+  } // end companies
 
   // ─── Deals ────────────────────────────────────────────────────────────────
+  if (!type || type === 'deals') {
   try {
     const deals = await fetchAll(apiKey, 'deals', [
       'dealname', 'project_id', 'dealstage', 'pipeline',
@@ -171,6 +181,7 @@ export const handler = async (event) => {
   } catch (err) {
     errors.push('deals: ' + err.message)
   }
+  } // end deals
 
   // ─── Update last sync time in user config ─────────────────────────────────
   await supabase
