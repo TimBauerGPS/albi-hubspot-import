@@ -37,7 +37,7 @@ export const handler = async (event) => {
       ],
       // Include revenue + stage properties so Import.jsx can detect duplicates
       // (skip update if stage + revenues match the row — mirrors Google Script logic)
-      properties: ['project_id', 'dealname', 'dealstage', 'pipeline', 'total_estimates', 'accrual_revenue', 'dealstage_label'],
+      properties: ['project_id', 'dealname', 'dealstage', 'pipeline', 'total_estimates', 'accrual_revenue'],
       limit: 1,
     }, apiKey)
 
