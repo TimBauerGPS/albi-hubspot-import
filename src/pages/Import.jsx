@@ -422,17 +422,40 @@ export default function Import({ session }) {
               })
             }
 
-            const { deal: newDeal } = await withRetry(() =>
-              createDeal(properties, associations, session)
-            )
-            hubspotDealId = newDeal.id
-            action = 'created'
-            created++
+            let resolvedDealId
+            try {
+              const { deal: newDeal } = await withRetry(() =>
+                createDeal(properties, associations, session)
+              )
+              resolvedDealId = newDeal.id
+              action = 'created'
+              created++
+            } catch (createErr) {
+              // HubSpot unique property conflict: the deal already exists in HubSpot
+              // but wasn't in our local cache (stale sync). The error message contains
+              // the existing deal ID — parse it and fall back to an update instead.
+              const match = createErr.message.match(/(\d+) already has that value/)
+              if (!match) throw createErr  // non-recoverable — rethrow to outer catch
 
-            // Add to in-memory cache so subsequent rows in the same CSV don't
-            // re-create this deal if it appears again (e.g. duplicate CSV rows)
+              resolvedDealId = match[1]
+              await withRetry(() => updateDeal(resolvedDealId, properties, session))
+              // associations were bundled into the create attempt; apply them
+              // separately on the existing deal (associateDeal is idempotent)
+              if (resolvedContactId) {
+                await withRetry(() => associateDeal(resolvedDealId, 'contacts', resolvedContactId, session))
+              }
+              if (resolvedCompanyId) {
+                await withRetry(() => associateDeal(resolvedDealId, 'companies', resolvedCompanyId, session))
+              }
+              action = 'updated'
+              updated++
+            }
+
+            hubspotDealId = resolvedDealId
+
+            // Add/refresh in-memory cache so the same project_id isn't re-processed
             cachedDeals.set(row.name, {
-              hubspot_id: newDeal.id,
+              hubspot_id: resolvedDealId,
               project_id: row.name,
               deal_stage: properties.dealstage ?? null,
               total_estimates: row.estimatedRevenue,
@@ -442,7 +465,7 @@ export default function Import({ session }) {
             if (heldQueueMap.has(row.name)) {
               await supabase
                 .from('hs_held_deals')
-                .update({ resolved_at: new Date().toISOString(), resolved_deal_id: newDeal.id })
+                .update({ resolved_at: new Date().toISOString(), resolved_deal_id: resolvedDealId })
                 .eq('user_id', session.user.id)
                 .eq('job_id', row.name)
             }
@@ -525,14 +548,29 @@ export default function Import({ session }) {
               })
             }
 
-            const { deal: newDeal } = await withRetry(() =>
-              createDeal(heldDeal.properties_json || {}, associations, session)
-            )
+            let resolvedHeldDealId
+            try {
+              const { deal: newDeal } = await withRetry(() =>
+                createDeal(heldDeal.properties_json || {}, associations, session)
+              )
+              resolvedHeldDealId = newDeal.id
+              created++
+            } catch (createErr) {
+              // Same stale-cache recovery as the main loop: if the deal already
+              // exists in HubSpot, parse its ID from the error and update instead.
+              const match = createErr.message.match(/(\d+) already has that value/)
+              if (!match) throw createErr
+              resolvedHeldDealId = match[1]
+              await withRetry(() => updateDeal(resolvedHeldDealId, heldDeal.properties_json || {}, session))
+              if (resolvedContactId) await withRetry(() => associateDeal(resolvedHeldDealId, 'contacts', resolvedContactId, session))
+              if (resolvedCompanyId) await withRetry(() => associateDeal(resolvedHeldDealId, 'companies', resolvedCompanyId, session))
+              updated++
+            }
+
             await supabase
               .from('hs_held_deals')
-              .update({ resolved_at: new Date().toISOString(), resolved_deal_id: newDeal.id })
+              .update({ resolved_at: new Date().toISOString(), resolved_deal_id: resolvedHeldDealId })
               .eq('id', heldDeal.id)
-            created++
 
             if (batchImportId) {
               await supabase.from('hs_deals').insert({
