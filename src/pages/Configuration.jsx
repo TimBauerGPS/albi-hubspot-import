@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { syncHubspotData } from '../lib/hubspot'
@@ -10,6 +10,16 @@ import AppShell from '../components/AppShell'
 
 const TABS = ['Setup', 'Settings']
 
+// Poll every 3 s, give up after 3 minutes
+const POLL_INTERVAL_MS = 3000
+const POLL_TIMEOUT_MS  = 3 * 60 * 1000
+
+const SYNC_TABLES = [
+  { key: 'contacts',  table: 'hs_cached_contacts'  },
+  { key: 'companies', table: 'hs_cached_companies'  },
+  { key: 'deals',     table: 'hs_cached_deals'      },
+]
+
 export default function Configuration({ session, onConfigValid }) {
   const navigate = useNavigate()
   const [tab, setTab] = useState('Setup')
@@ -19,6 +29,13 @@ export default function Configuration({ session, onConfigValid }) {
   const [syncing, setSyncing] = useState(false)
   const [syncStep, setSyncStep] = useState(null) // 'contacts' | 'companies' | 'deals'
   const [syncResult, setSyncResult] = useState(null)
+
+  // Polling state: null | { contacts: number|null, companies: number|null, deals: number|null, done: bool, timedOut: bool }
+  const [syncPolling, setSyncPolling] = useState(null)
+  const pollIntervalRef = useRef(null)
+
+  // Clean up the polling interval when the component unmounts
+  useEffect(() => () => clearInterval(pollIntervalRef.current), [])
 
   useEffect(() => {
     loadConfig()
@@ -63,20 +80,73 @@ export default function Configuration({ session, onConfigValid }) {
   }
 
   async function handleSync() {
+    // Cancel any previous poll
+    clearInterval(pollIntervalRef.current)
     setSyncing(true)
     setSyncStep(null)
     setSyncResult(null)
+    setSyncPolling(null)
+
+    // Snapshot the current time so we can detect rows written AFTER this moment
+    const snapshotTime = new Date().toISOString()
+
     try {
       await syncHubspotData(session, step => setSyncStep(step))
-      // Background function: 202 returned immediately, sync runs server-side.
-      // Reload config to refresh the updated_at timestamp once sync has queued.
-      setSyncResult({ ok: true })
-      await loadConfig()
     } catch (err) {
       setSyncResult({ ok: false, error: err.message })
+      setSyncStep(null)
+      setSyncing(false)
+      return
     }
+
     setSyncStep(null)
     setSyncing(false)
+
+    // ── Begin polling ──────────────────────────────────────────────────────
+    // Each background function writes synced_at on every cache row it inserts.
+    // When we see a row with synced_at > snapshotTime we know that type is done.
+    setSyncPolling({ contacts: null, companies: null, deals: null, done: false, timedOut: false })
+
+    const doneByType = { contacts: false, companies: false, deals: false }
+    const pollStart = Date.now()
+
+    pollIntervalRef.current = setInterval(async () => {
+      // Bail out after POLL_TIMEOUT_MS with a soft warning
+      if (Date.now() - pollStart > POLL_TIMEOUT_MS) {
+        clearInterval(pollIntervalRef.current)
+        setSyncPolling(prev => ({ ...prev, timedOut: true }))
+        return
+      }
+
+      for (const { key, table } of SYNC_TABLES) {
+        if (doneByType[key]) continue
+
+        // Check for any row written after snapshotTime
+        const { data: latest } = await supabase
+          .from(table)
+          .select('synced_at')
+          .eq('user_id', session.user.id)
+          .gt('synced_at', snapshotTime)
+          .limit(1)
+
+        if (latest && latest.length > 0) {
+          // This type finished — fetch its total cached count
+          const { count } = await supabase
+            .from(table)
+            .select('*', { count: 'exact', head: true })
+            .eq('user_id', session.user.id)
+
+          doneByType[key] = true
+          setSyncPolling(prev => ({ ...prev, [key]: count ?? 0 }))
+        }
+      }
+
+      if (doneByType.contacts && doneByType.companies && doneByType.deals) {
+        clearInterval(pollIntervalRef.current)
+        setSyncPolling(prev => ({ ...prev, done: true }))
+        await loadConfig()   // refresh "Last synced" timestamp
+      }
+    }, POLL_INTERVAL_MS)
   }
 
   const hasApiKey = !!config?.hubspot_api_key
@@ -181,34 +251,89 @@ export default function Configuration({ session, onConfigValid }) {
                   </div>
                   <button
                     onClick={handleSync}
-                    disabled={syncing}
+                    disabled={syncing || (syncPolling && !syncPolling.done && !syncPolling.timedOut)}
                     className="ml-4 shrink-0 px-4 py-2 border border-gray-300 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-50 disabled:opacity-50 transition-colors"
                   >
                     {syncing ? (
                       <span className="flex items-center gap-2">
                         <span className="animate-spin rounded-full h-3 w-3 border-b-2 border-gray-500" />
-                        {syncStep ? `Syncing ${syncStep}…` : 'Syncing…'}
+                        {syncStep ? `Queuing ${syncStep}…` : 'Queuing…'}
                       </span>
                     ) : 'Sync Now'}
                   </button>
                 </div>
 
-                {/* Last synced timestamp */}
-                {config?.updated_at && !syncResult && (
+                {/* Last synced timestamp — hide while a sync is in progress */}
+                {config?.updated_at && !syncPolling && !syncResult && (
                   <p className="text-xs text-gray-400 mt-2">
                     Last synced: {new Date(config.updated_at).toLocaleString()}
                   </p>
                 )}
 
-                {syncResult && (
-                  <div className={`mt-3 text-xs rounded-lg px-3 py-2 ${
-                    syncResult.ok
-                      ? 'bg-green-50 border border-green-200 text-green-800'
-                      : 'bg-red-50 border border-red-200 text-red-700'
-                  }`}>
-                    {syncResult.ok
-                      ? 'Sync queued — contacts, companies, and deals are being fetched in the background. This usually completes within 30 seconds.'
-                      : `Sync failed: ${syncResult.error}`}
+                {/* Error */}
+                {syncResult && !syncResult.ok && (
+                  <div className="mt-3 text-xs rounded-lg px-3 py-2 bg-red-50 border border-red-200 text-red-700">
+                    Sync failed: {syncResult.error}
+                  </div>
+                )}
+
+                {/* Live polling status */}
+                {syncPolling && (
+                  <div className="mt-4 space-y-2">
+                    {/* Per-type rows */}
+                    {[
+                      { key: 'contacts',  label: 'Contacts'  },
+                      { key: 'companies', label: 'Companies' },
+                      { key: 'deals',     label: 'Deals'     },
+                    ].map(({ key, label }) => {
+                      const count = syncPolling[key]
+                      const done  = count !== null
+                      return (
+                        <div key={key} className="flex items-center gap-2 text-sm">
+                          {done ? (
+                            <svg className="w-4 h-4 text-green-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                            </svg>
+                          ) : (
+                            <span className="w-4 h-4 shrink-0 flex items-center justify-center">
+                              <span className="animate-spin rounded-full h-3 w-3 border-b-2 border-gray-400" />
+                            </span>
+                          )}
+                          <span className={done ? 'text-gray-700' : 'text-gray-400'}>
+                            {label}
+                            {done && (
+                              <span className="ml-1.5 text-gray-400 font-normal">
+                                — {count.toLocaleString()} cached
+                              </span>
+                            )}
+                          </span>
+                        </div>
+                      )
+                    })}
+
+                    {/* Done banner */}
+                    {syncPolling.done && (
+                      <div className="mt-1 flex items-center gap-2 rounded-lg px-3 py-2 bg-green-50 border border-green-200 text-green-800 text-xs font-medium">
+                        <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                        </svg>
+                        Sync complete — cache is up to date. Last synced: {config?.updated_at ? new Date(config.updated_at).toLocaleString() : 'just now'}
+                      </div>
+                    )}
+
+                    {/* Timed-out soft warning */}
+                    {syncPolling.timedOut && !syncPolling.done && (
+                      <div className="mt-1 rounded-lg px-3 py-2 bg-amber-50 border border-amber-200 text-amber-800 text-xs">
+                        The sync is still running in the background — this can take a few minutes for large accounts. You can start your import once it finishes; the import page will warn you if the cache is stale.
+                      </div>
+                    )}
+
+                    {/* Waiting hint (not yet done/timed-out) */}
+                    {!syncPolling.done && !syncPolling.timedOut && (
+                      <p className="text-xs text-gray-400 pt-0.5">
+                        Fetching data from HubSpot in the background — this usually takes 15–60 seconds.
+                      </p>
+                    )}
                   </div>
                 )}
               </div>
