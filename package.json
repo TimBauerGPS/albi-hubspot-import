@@ -5,10 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "dev:local": "netlify dev",
+    "dev:local": "concurrently --names \"vite,fns\" --prefix-colors \"blue,green\" \"npm run dev\" \"npm run functions\"",
     "build": "vite build",
     "preview": "vite preview",
-    "functions": "netlify functions:serve"
+    "functions": "netlify functions:serve --port 9999"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",
@@ -20,6 +20,7 @@
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.1",
     "autoprefixer": "^10.4.20",
+    "concurrently": "^9.2.1",
     "netlify-cli": "^24.0.1",
     "postcss": "^8.4.47",
     "tailwindcss": "^3.4.13",
