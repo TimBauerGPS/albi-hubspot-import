@@ -10,6 +10,9 @@
 # Netlify production deployments (Netlify auto-includes external modules).
 [functions]
   external_node_modules = ["@supabase/supabase-js"]
+  # Note: background functions (-background suffix) get a 900-second timeout locally
+  # by default (netlify functions:serve uses BACKGROUND_FUNCTION_TIMEOUT = 900).
+  # Regular functions get 30 seconds. hs-sync-background therefore has plenty of headroom.
 
 [build.environment]
   # The Supabase anon key is the public browser key (eyJ... JWT format).
@@ -19,8 +22,9 @@
 
 # ── Local development ─────────────────────────────────────────────────────────
 # Run `npm run dev:local` to start everything with one command.
-# Vite runs on 5173; netlify dev proxies it + the functions through port 8888.
-# Env vars are loaded automatically from .env in the project root.
+# Vite runs on 5173; netlify functions:serve handles functions on 9999.
+# Vite's proxy routes /.netlify/functions/* → localhost:9999.
+# dotenv-cli (via `npm run functions`) loads .env for the function process.
 [dev]
   command = "npm run dev"
   targetPort = 5173

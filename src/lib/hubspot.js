@@ -78,12 +78,19 @@ export async function createRequiredProperties(session) {
 }
 
 /**
- * Queues a full HubSpot sync using a single Netlify Background Function call.
- * Returns 202 immediately; the function syncs contacts → companies → deals
- * sequentially and writes hs_user_config.updated_at when all three are done.
+ * Triggers a full HubSpot sync (contacts → companies → deals) and writes
+ * hs_user_config.updated_at when complete — the caller polls for that change.
  *
- * Using a single sequential call (vs three parallel calls) prevents HubSpot
- * API rate-limit contention between concurrent function invocations.
+ * Always calls hs-sync-background, which works in both environments:
+ *
+ * Production: Netlify returns 202 immediately; handler runs in the background
+ * for up to 15 minutes, then writes updated_at to signal completion.
+ *
+ * Local dev (netlify functions:serve): the current CLI executes the handler
+ * synchronously (await invoke), then returns 202. updated_at is already set
+ * by the time the 202 arrives, so the first poll tick detects completion.
+ * Background functions also get a 900-second timeout locally (vs 30s for
+ * regular functions), so large accounts don't hit the timeout.
  */
 export async function syncHubspotData(session) {
   const res = await fetch(`/.netlify/functions/hs-sync-background`, {

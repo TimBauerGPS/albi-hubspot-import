@@ -1,14 +1,13 @@
 /**
  * POST /.netlify/functions/hs-sync
  *
- * Pulls contacts, companies, and existing deals from the user's HubSpot account
- * and upserts them into Supabase cache tables (hs_cached_contacts, hs_cached_companies,
- * hs_cached_deals). Only fields needed for import lookups are stored.
+ * Regular (synchronous) sync function — holds the connection and returns 200 when done.
+ * Used in local development (import.meta.env.DEV) because netlify functions:serve
+ * returns 202 for background functions without executing the handler.
  *
- * This runs server-side and is invisible to users — call it before each import batch
- * or on-demand from the Configuration page.
- *
- * Reference: Import Hubspot Data.js in _reference/ (syncAllHubSpotData)
+ * hs-sync-background.js re-exports this handler so both endpoints share the same logic.
+ * In production the client calls hs-sync-background (15-minute background timeout).
+ * In local dev the client calls this endpoint and awaits the response directly.
  */
 
 import { getHubspotKey, jsonResponse, hsGet, hsPost } from './_getHubspotKey.js'
@@ -90,12 +89,16 @@ export const handler = async (event) => {
   const results = { contacts: 0, companies: 0, deals: 0 }
   const errors = []
 
+  console.log(`[sync] Starting (type=${type || 'all'}) for user ${userId}`)
+
   // ─── Contacts ─────────────────────────────────────────────────────────────
   // Uses the GET list endpoint (not search) so we can request associations=companies.
   // The search API doesn't support associations; the list endpoint does.
   if (!type || type === 'contacts') {
   try {
+    console.log('[sync] Fetching contacts...')
     const contacts = await fetchAllContacts(apiKey)
+    console.log(`[sync] ${contacts.length} contacts fetched`)
 
     if (contacts.length > 0) {
       const rows = contacts.map(c => {
@@ -121,7 +124,9 @@ export const handler = async (event) => {
 
       results.contacts = contacts.length
     }
+    console.log(`[sync] Contacts done: ${results.contacts} cached`)
   } catch (err) {
+    console.error('[sync] Contacts error:', err.message)
     errors.push('contacts: ' + err.message)
   }
   } // end contacts
@@ -129,6 +134,7 @@ export const handler = async (event) => {
   // ─── Companies ────────────────────────────────────────────────────────────
   if (!type || type === 'companies') {
   try {
+    console.log('[sync] Fetching companies...')
     const companies = await fetchAll(apiKey, 'companies', ['name'])
 
     if (companies.length > 0) {
@@ -147,7 +153,9 @@ export const handler = async (event) => {
 
       results.companies = companies.length
     }
+    console.log(`[sync] Companies done: ${results.companies} cached`)
   } catch (err) {
+    console.error('[sync] Companies error:', err.message)
     errors.push('companies: ' + err.message)
   }
   } // end companies
@@ -155,8 +163,10 @@ export const handler = async (event) => {
   // ─── Deals ────────────────────────────────────────────────────────────────
   if (!type || type === 'deals') {
   try {
+    console.log('[sync] Fetching deals...')
     const deals = await fetchAll(apiKey, 'deals', [
       'dealname', 'project_id', 'dealstage', 'pipeline',
+      'total_estimates', 'accrual_revenue',
     ])
 
     if (deals.length > 0) {
@@ -167,6 +177,10 @@ export const handler = async (event) => {
         deal_name: d.properties.dealname || null,
         deal_stage: d.properties.dealstage || null,
         pipeline: d.properties.pipeline || null,
+        total_estimates: d.properties.total_estimates != null
+          ? parseFloat(d.properties.total_estimates) : null,
+        accrual_revenue: d.properties.accrual_revenue != null
+          ? parseFloat(d.properties.accrual_revenue) : null,
         synced_at: syncedAt,
       }))
 
@@ -178,7 +192,9 @@ export const handler = async (event) => {
 
       results.deals = deals.length
     }
+    console.log(`[sync] Deals done: ${results.deals} cached`)
   } catch (err) {
+    console.error('[sync] Deals error:', err.message)
     errors.push('deals: ' + err.message)
   }
   } // end deals
@@ -188,6 +204,8 @@ export const handler = async (event) => {
     .from('hs_user_config')
     .update({ updated_at: syncedAt })
     .eq('user_id', userId)
+
+  console.log('[sync] Complete:', results, errors.length ? errors : '')
 
   return jsonResponse(200, {
     synced: results,
