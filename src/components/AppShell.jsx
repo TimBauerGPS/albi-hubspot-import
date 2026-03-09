@@ -1,17 +1,17 @@
 /**
- * AppShell — shared navigation wrapper used by Import and Dashboard pages.
+ * AppShell — shared navigation wrapper used by all app pages.
  */
 import { useNavigate, useLocation } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 
 const NAV_LINKS = [
-  { to: '/dashboard', label: 'Dashboard' },
-  { to: '/import', label: 'Import' },
-  { to: '/held-deals', label: 'Held Deals' },
+  { to: '/dashboard',     label: 'Dashboard' },
+  { to: '/import',        label: 'Import' },
+  { to: '/held-deals',    label: 'Held Deals' },
   { to: '/configuration', label: 'Configuration' },
 ]
 
-export default function AppShell({ session, children }) {
+export default function AppShell({ session, isAdmin, companyName, children }) {
   const navigate = useNavigate()
   const location = useLocation()
 
@@ -44,10 +44,28 @@ export default function AppShell({ session, children }) {
               </button>
             )
           })}
+          {isAdmin && (
+            <button
+              onClick={() => navigate('/admin')}
+              className={`px-3 py-4 text-sm font-medium border-b-2 transition-colors ${
+                location.pathname === '/admin'
+                  ? 'border-brand-600 text-brand-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-800'
+              }`}
+            >
+              Admin
+            </button>
+          )}
         </div>
 
+        {/* User info */}
         <div className="ml-auto flex items-center gap-4">
-          <span className="text-xs text-gray-400">{session?.user?.email}</span>
+          <div className="text-right">
+            <p className="text-xs text-gray-600">{session?.user?.email}</p>
+            {companyName && (
+              <p className="text-xs text-gray-400">{companyName}</p>
+            )}
+          </div>
           <button
             onClick={handleSignOut}
             className="text-xs text-gray-400 hover:text-gray-700 transition-colors"

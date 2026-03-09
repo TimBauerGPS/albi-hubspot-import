@@ -9,7 +9,7 @@ import AppShell from '../components/AppShell'
 
 const TABS = ['Setup', 'Settings']
 
-export default function Configuration({ session, onConfigValid }) {
+export default function Configuration({ session, isAdmin, companyName: companyNameProp, onConfigValid, onCompanyNameChange }) {
   const navigate = useNavigate()
   const [tab, setTab] = useState('Setup')
   const [config, setConfig] = useState(null)
@@ -58,6 +58,29 @@ export default function Configuration({ session, onConfigValid }) {
     }
   }
 
+  const [companyName, setCompanyName] = useState(companyNameProp ?? '')
+  const [savingCompany, setSavingCompany] = useState(false)
+  const [companySaved, setCompanySaved] = useState(false)
+
+  // Sync prop → local state when config loads
+  useEffect(() => {
+    if (config?.company_name != null) setCompanyName(config.company_name)
+  }, [config])
+
+  async function handleSaveCompanyName(e) {
+    e.preventDefault()
+    if (!companyName.trim()) return
+    setSavingCompany(true)
+    setCompanySaved(false)
+    await supabase
+      .from('hs_user_config')
+      .upsert({ user_id: session.user.id, company_name: companyName.trim() }, { onConflict: 'user_id' })
+    onCompanyNameChange?.(companyName.trim())
+    setCompanySaved(true)
+    setSavingCompany(false)
+    setTimeout(() => setCompanySaved(false), 2500)
+  }
+
   const hasApiKey = !!config?.hubspot_api_key
   const isValid = configStatus === 'valid'
 
@@ -70,7 +93,7 @@ export default function Configuration({ session, onConfigValid }) {
   }
 
   return (
-    <AppShell session={session}>
+    <AppShell session={session} isAdmin={isAdmin} companyName={companyNameProp}>
 
       <div className="max-w-3xl mx-auto px-6 py-8">
         {/* Page header */}
@@ -132,6 +155,35 @@ export default function Configuration({ session, onConfigValid }) {
 
         {tab === 'Setup' && (
           <div className="space-y-4">
+            {/* Company name */}
+            <div className="bg-white rounded-xl border border-gray-200 p-6">
+              <h3 className="font-semibold text-gray-900 mb-1">Company Name</h3>
+              <p className="text-sm text-gray-500 mb-4">
+                Used to identify this account in the admin panel.
+              </p>
+              <form onSubmit={handleSaveCompanyName} className="flex gap-2">
+                <input
+                  type="text"
+                  value={companyName}
+                  onChange={e => setCompanyName(e.target.value)}
+                  placeholder="Allied Restoration – Denver"
+                  className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
+                />
+                <button
+                  type="submit"
+                  disabled={savingCompany || !companyName.trim()}
+                  className="px-4 py-2 bg-brand-600 text-white text-sm font-medium rounded-lg hover:bg-brand-700 disabled:opacity-50 transition-colors whitespace-nowrap"
+                >
+                  {savingCompany ? 'Saving…' : 'Save'}
+                </button>
+              </form>
+              {companySaved && (
+                <p className="mt-2 text-xs text-green-700 bg-green-50 border border-green-200 rounded px-2 py-1">
+                  Company name saved.
+                </p>
+              )}
+            </div>
+
             {/* Setup guide — open by default for new users without an API key */}
             <SetupGuide defaultOpen={!hasApiKey} />
 

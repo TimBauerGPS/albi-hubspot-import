@@ -2,10 +2,12 @@ import { useEffect, useState } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { supabase } from './lib/supabase'
 import Login from './pages/Login'
+import Signup from './pages/Signup'
 import Configuration from './pages/Configuration'
 import Import from './pages/Import'
 import Dashboard from './pages/Dashboard'
 import HeldDeals from './pages/HeldDeals'
+import Admin from './pages/Admin'
 
 function Spinner() {
   return (
@@ -91,55 +93,62 @@ function SetNewPasswordModal({ onDone }) {
 
 /**
  * Protected route — redirects to /login if unauthenticated.
- * If authenticated but config is unchecked/invalid, redirects to /configuration.
  */
-function ProtectedRoute({ session, configStatus, children }) {
+function ProtectedRoute({ session, children }) {
   if (session === undefined) return <Spinner />
   if (!session) return <Navigate to="/login" replace />
   return children
 }
 
 /**
- * Redirects authenticated users away from /configuration if config is already valid,
- * unless they are explicitly navigating there.
+ * Admin-only route — redirects to / if not an admin.
+ * Shows spinner while isAdmin is still loading (null).
  */
-function ConfigRoute({ session, configStatus, children }) {
-  if (session === undefined) return <Spinner />
+function AdminRoute({ session, isAdmin, children }) {
+  if (session === undefined || isAdmin === null) return <Spinner />
   if (!session) return <Navigate to="/login" replace />
+  if (!isAdmin) return <Navigate to="/" replace />
   return children
 }
 
 export default function App() {
   const [session, setSession] = useState(undefined)
-  const [configStatus, setConfigStatus] = useState(null) // null | 'unchecked' | 'valid' | 'invalid'
+  const [configStatus, setConfigStatus] = useState(null)
+  const [isAdmin, setIsAdmin] = useState(null)       // null = loading, true/false = loaded
+  const [companyName, setCompanyName] = useState(null)
   const [showResetModal, setShowResetModal] = useState(false)
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session)
-      if (session) loadConfigStatus(session.user.id)
+      if (session) loadUserConfig(session.user.id)
     })
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       setSession(session)
       if (event === 'PASSWORD_RECOVERY') setShowResetModal(true)
-      if (session) loadConfigStatus(session.user.id)
-      else setConfigStatus(null)
+      if (session) loadUserConfig(session.user.id)
+      else {
+        setConfigStatus(null)
+        setIsAdmin(null)
+        setCompanyName(null)
+      }
     })
 
     return () => subscription.unsubscribe()
   }, [])
 
-  async function loadConfigStatus(userId) {
+  async function loadUserConfig(userId) {
     const { data } = await supabase
       .from('hs_user_config')
-      .select('config_status')
+      .select('config_status, is_admin, company_name')
       .eq('user_id', userId)
       .maybeSingle()
     setConfigStatus(data?.config_status ?? 'unchecked')
+    setIsAdmin(data?.is_admin ?? false)
+    setCompanyName(data?.company_name ?? null)
   }
 
-  // After login, decide where to send the user
   function getDefaultRedirect() {
     if (configStatus === 'valid') return '/dashboard'
     return '/configuration'
@@ -151,6 +160,7 @@ export default function App() {
         <SetNewPasswordModal onDone={() => setShowResetModal(false)} />
       )}
       <Routes>
+        {/* Public — no auth required */}
         <Route
           path="/login"
           element={
@@ -159,41 +169,60 @@ export default function App() {
               : <Login />
           }
         />
+
+        {/* Invite landing — must be accessible before account is fully set up */}
+        <Route path="/signup" element={<Signup />} />
+
+        {/* Protected app routes */}
         <Route
           path="/configuration"
           element={
-            <ConfigRoute session={session} configStatus={configStatus}>
+            <ProtectedRoute session={session}>
               <Configuration
                 session={session}
+                isAdmin={isAdmin}
+                companyName={companyName}
                 onConfigValid={() => setConfigStatus('valid')}
+                onCompanyNameChange={name => setCompanyName(name)}
               />
-            </ConfigRoute>
+            </ProtectedRoute>
           }
         />
         <Route
           path="/import"
           element={
-            <ProtectedRoute session={session} configStatus={configStatus}>
-              <Import session={session} />
+            <ProtectedRoute session={session}>
+              <Import session={session} isAdmin={isAdmin} companyName={companyName} />
             </ProtectedRoute>
           }
         />
         <Route
           path="/dashboard"
           element={
-            <ProtectedRoute session={session} configStatus={configStatus}>
-              <Dashboard session={session} configStatus={configStatus} />
+            <ProtectedRoute session={session}>
+              <Dashboard session={session} configStatus={configStatus} isAdmin={isAdmin} companyName={companyName} />
             </ProtectedRoute>
           }
         />
         <Route
           path="/held-deals"
           element={
-            <ProtectedRoute session={session} configStatus={configStatus}>
-              <HeldDeals session={session} />
+            <ProtectedRoute session={session}>
+              <HeldDeals session={session} isAdmin={isAdmin} companyName={companyName} />
             </ProtectedRoute>
           }
         />
+
+        {/* Admin-only */}
+        <Route
+          path="/admin"
+          element={
+            <AdminRoute session={session} isAdmin={isAdmin}>
+              <Admin session={session} isAdmin={isAdmin} companyName={companyName} />
+            </AdminRoute>
+          }
+        />
+
         <Route
           path="/"
           element={<Navigate to={session ? getDefaultRedirect() : '/login'} replace />}

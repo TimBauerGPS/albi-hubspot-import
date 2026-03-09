@@ -89,7 +89,7 @@ function downloadErrorCSV(rows, rowStatuses) {
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
-export default function Import({ session }) {
+export default function Import({ session, isAdmin, companyName }) {
   const navigate = useNavigate()
   const [userConfig, setUserConfig] = useState(null)
   const [configStatus, setConfigStatus] = useState(null)
@@ -738,7 +738,7 @@ export default function Import({ session }) {
   const configBlocked = configStatus !== 'valid'
 
   return (
-    <AppShell session={session}>
+    <AppShell session={session} isAdmin={isAdmin} companyName={companyName}>
       <div className="max-w-4xl mx-auto px-6 py-8">
         <div className="mb-6">
           <h1 className="text-xl font-bold text-gray-900">Import Deals</h1>

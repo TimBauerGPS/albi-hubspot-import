@@ -159,7 +159,7 @@ function ImportRow({ imp, userId }) {
   )
 }
 
-export default function Dashboard({ session, configStatus }) {
+export default function Dashboard({ session, configStatus, isAdmin, companyName }) {
   const navigate = useNavigate()
   const [imports, setImports] = useState([])
   const [loading, setLoading] = useState(true)
@@ -183,7 +183,7 @@ export default function Dashboard({ session, configStatus }) {
   const totalErrors = imports.reduce((sum, i) => sum + (i.error_count || 0), 0)
 
   return (
-    <AppShell session={session}>
+    <AppShell session={session} isAdmin={isAdmin} companyName={companyName}>
       <div className="max-w-5xl mx-auto px-6 py-8">
         {/* Header */}
         <div className="flex items-center justify-between mb-6">
