@@ -30,8 +30,11 @@ export async function processBatched(items, processFn, {
 
     results.push(...batchResults)
 
-    // Delay between batches (skip after last batch)
-    if (i + batchSize < items.length) {
+    // Delay between batches only when HubSpot API calls were made.
+    // processFn returns true when it hits the API, false/undefined for skipped/held rows.
+    // This lets all-skipped or all-held batches proceed instantly.
+    const needsDelay = batchResults.some(Boolean)
+    if (needsDelay && i + batchSize < items.length) {
       await sleep(delayMs)
     }
   }

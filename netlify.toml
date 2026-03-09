@@ -3,11 +3,34 @@
   publish = "dist"
   functions = "netlify/functions"
 
+# esbuild (the default bundler) resolves node_modules relative to where it runs,
+# which can be the git root rather than the worktree in a worktree setup.
+# Marking @supabase/supabase-js as external tells esbuild to skip bundling it
+# and let Node resolve it at runtime — works correctly for both local dev and
+# Netlify production deployments (Netlify auto-includes external modules).
+[functions]
+  external_node_modules = ["@supabase/supabase-js"]
+  # Note: background functions (-background suffix) get a 900-second timeout locally
+  # by default (netlify functions:serve uses BACKGROUND_FUNCTION_TIMEOUT = 900).
+  # Regular functions get 30 seconds. hs-sync-background therefore has plenty of headroom.
+
 [build.environment]
   # The Supabase anon key is the public browser key (eyJ... JWT format).
   # It is intentionally embedded in the Vite bundle — this is safe.
   # Security is enforced by Supabase RLS policies, not by keeping this key secret.
   SECRETS_SCAN_ENABLED = "false"
+
+# ── Local development ─────────────────────────────────────────────────────────
+# Run `npm run dev:local` to start everything with one command.
+# Vite runs on 5173; netlify functions:serve handles functions on 9999.
+# Vite's proxy routes /.netlify/functions/* → localhost:9999.
+# dotenv-cli (via `npm run functions`) loads .env for the function process.
+[dev]
+  command = "npm run dev"
+  targetPort = 5173
+  port = 8888
+  publish = "dist"
+  autoLaunch = false
 
 [[headers]]
   for = "/index.html"

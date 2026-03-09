@@ -103,7 +103,9 @@ export default function HeldDeals({ session }) {
   const [heldDeals, setHeldDeals] = useState([])
   const [salesTeam, setSalesTeam] = useState([])
   const [loading, setLoading] = useState(true)
-  const [blacklisting, setBlacklisting] = useState(null) // job_id being blacklisted
+  const [blacklisting, setBlacklisting] = useState(null)   // job_id being single-blacklisted
+  const [bulkBlacklisting, setBulkBlacklisting] = useState(false)
+  const [selectedIds, setSelectedIds] = useState(new Set()) // Set of held deal IDs (uuid)
   const [emailModal, setEmailModal] = useState(null) // array of drafts | null
 
   useEffect(() => {
@@ -160,6 +162,64 @@ export default function HeldDeals({ session }) {
       alert('Failed to blacklist deal: ' + err.message)
     }
     setBlacklisting(null)
+  }
+
+  // ── Selection helpers ──────────────────────────────────────────────────────
+  const allSelected = heldDeals.length > 0 && selectedIds.size === heldDeals.length
+  const someSelected = selectedIds.size > 0 && !allSelected
+
+  function toggleSelectAll() {
+    if (allSelected) {
+      setSelectedIds(new Set())
+    } else {
+      setSelectedIds(new Set(heldDeals.map(d => d.id)))
+    }
+  }
+
+  function toggleSelect(id) {
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
+  }
+
+  // ── Bulk blacklist ─────────────────────────────────────────────────────────
+  async function handleBulkBlacklist() {
+    const count = selectedIds.size
+    if (!window.confirm(`Blacklist ${count} deal${count !== 1 ? 's' : ''}? They will be excluded from all future imports.`)) return
+    setBulkBlacklisting(true)
+    try {
+      const selectedDeals = heldDeals.filter(d => selectedIds.has(d.id))
+      const jobIds = selectedDeals.map(d => d.job_id)
+
+      // Fetch current blacklist and merge
+      const { data: config } = await supabase
+        .from('hs_user_config')
+        .select('blacklist')
+        .eq('user_id', session.user.id)
+        .single()
+      const current = config?.blacklist || []
+      const merged = [...new Set([...current, ...jobIds])]
+      await supabase
+        .from('hs_user_config')
+        .update({ blacklist: merged })
+        .eq('user_id', session.user.id)
+
+      // Mark all selected held deals as resolved
+      const now = new Date().toISOString()
+      await supabase
+        .from('hs_held_deals')
+        .update({ resolved_at: now })
+        .eq('user_id', session.user.id)
+        .in('id', [...selectedIds])
+
+      setSelectedIds(new Set())
+      await loadData()
+    } catch (err) {
+      alert('Failed to blacklist deals: ' + err.message)
+    }
+    setBulkBlacklisting(false)
   }
 
   function handleEmailRequest() {
@@ -255,12 +315,23 @@ Thank you!`
             </p>
           </div>
           {heldDeals.length > 0 && (
-            <button
-              onClick={handleEmailRequest}
-              className="shrink-0 px-4 py-2 bg-brand-600 text-white text-sm font-medium rounded-lg hover:bg-brand-700 transition-colors"
-            >
-              Email Referrer Requests
-            </button>
+            <div className="flex items-center gap-2 shrink-0">
+              {selectedIds.size > 0 && (
+                <button
+                  onClick={handleBulkBlacklist}
+                  disabled={bulkBlacklisting}
+                  className="px-4 py-2 bg-red-600 text-white text-sm font-medium rounded-lg hover:bg-red-700 disabled:opacity-50 transition-colors"
+                >
+                  {bulkBlacklisting ? 'Blacklisting…' : `Blacklist Selected (${selectedIds.size})`}
+                </button>
+              )}
+              <button
+                onClick={handleEmailRequest}
+                className="px-4 py-2 bg-brand-600 text-white text-sm font-medium rounded-lg hover:bg-brand-700 transition-colors"
+              >
+                Email Referrer Requests
+              </button>
+            </div>
           )}
         </div>
 
@@ -282,6 +353,15 @@ Thank you!`
                 <table className="min-w-full text-sm">
                   <thead className="bg-gray-50 border-b border-gray-200">
                     <tr>
+                      <th className="px-4 py-3 w-8">
+                        <input
+                          type="checkbox"
+                          checked={allSelected}
+                          ref={el => { if (el) el.indeterminate = someSelected }}
+                          onChange={toggleSelectAll}
+                          className="rounded border-gray-300 text-brand-600 focus:ring-brand-500 cursor-pointer"
+                        />
+                      </th>
                       <th className="text-left px-4 py-3 text-xs font-semibold text-gray-600 whitespace-nowrap">Job ID</th>
                       <th className="text-left px-4 py-3 text-xs font-semibold text-gray-600">Deal Name</th>
                       <th className="text-left px-4 py-3 text-xs font-semibold text-gray-600 whitespace-nowrap">Referrer (Missing in HubSpot)</th>
@@ -294,7 +374,19 @@ Thank you!`
                   </thead>
                   <tbody className="divide-y divide-gray-100">
                     {heldDeals.map(deal => (
-                      <tr key={deal.id} className="hover:bg-gray-50">
+                      <tr
+                        key={deal.id}
+                        className={`hover:bg-gray-50 cursor-pointer ${selectedIds.has(deal.id) ? 'bg-brand-50' : ''}`}
+                        onClick={() => toggleSelect(deal.id)}
+                      >
+                        <td className="px-4 py-3 w-8" onClick={e => e.stopPropagation()}>
+                          <input
+                            type="checkbox"
+                            checked={selectedIds.has(deal.id)}
+                            onChange={() => toggleSelect(deal.id)}
+                            className="rounded border-gray-300 text-brand-600 focus:ring-brand-500 cursor-pointer"
+                          />
+                        </td>
                         <td className="px-4 py-3 font-mono text-xs text-gray-700 whitespace-nowrap">
                           {deal.job_id}
                         </td>
@@ -319,13 +411,13 @@ Thank you!`
                         <td className="px-4 py-3 text-gray-500 whitespace-nowrap text-xs">
                           {formatDate(deal.created_at)}
                         </td>
-                        <td className="px-4 py-3 text-right whitespace-nowrap">
+                        <td className="px-4 py-3 text-right whitespace-nowrap" onClick={e => e.stopPropagation()}>
                           <button
                             onClick={() => handleBlacklist(deal)}
                             disabled={blacklisting === deal.job_id}
                             className="text-xs text-red-500 hover:text-red-700 font-medium disabled:opacity-50 transition-colors"
                           >
-                            {blacklisting === deal.job_id ? 'Blacklisting…' : 'Blacklist Deal'}
+                            {blacklisting === deal.job_id ? 'Blacklisting…' : 'Blacklist'}
                           </button>
                         </td>
                       </tr>

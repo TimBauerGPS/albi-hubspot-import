@@ -271,34 +271,43 @@ export default function Import({ session }) {
     // Eliminates 2-3 Netlify/HubSpot API calls per row (contact search, company
     // search, deal search) and replaces them with O(1) in-memory Map lookups.
     // Supabase queries are ~10ms vs ~300-500ms per Netlify→HubSpot roundtrip.
+    //
+    // Supabase's JS client defaults to 1,000 rows per query. Accounts with more
+    // than 1,000 contacts/deals/companies must be paginated or contacts beyond
+    // row 1,000 will silently be absent from the lookup maps.
+    async function fetchAllCacheRows(table, columns) {
+      const PAGE = 1000
+      const all = []
+      let from = 0
+      while (true) {
+        const { data, error } = await supabase
+          .from(table)
+          .select(columns)
+          .eq('user_id', session.user.id)
+          .range(from, from + PAGE - 1)
+        if (error) throw error
+        if (data?.length) all.push(...data)
+        if (!data || data.length < PAGE) break
+        from += PAGE
+      }
+      return all
+    }
+
     let cachedDeals = new Map()           // project_id → cached deal row
     let contactsByLastName = new Map()    // lowercase lastName → [contacts]
     let cachedCompanies = new Map()       // lowercase company name → hubspot_id
 
     try {
-      const [
-        { data: dealRows },
-        { data: contactRows },
-        { data: companyRows },
-      ] = await Promise.all([
-        supabase
-          .from('hs_cached_deals')
-          .select('hubspot_id, project_id, deal_stage, total_estimates, accrual_revenue')
-          .eq('user_id', session.user.id),
-        supabase
-          .from('hs_cached_contacts')
-          .select('hubspot_id, first_name, last_name, company_hubspot_id')
-          .eq('user_id', session.user.id),
-        supabase
-          .from('hs_cached_companies')
-          .select('hubspot_id, name')
-          .eq('user_id', session.user.id),
+      const [dealRows, contactRows, companyRows] = await Promise.all([
+        fetchAllCacheRows('hs_cached_deals',    'hubspot_id, project_id, deal_stage, total_estimates, accrual_revenue'),
+        fetchAllCacheRows('hs_cached_contacts', 'hubspot_id, first_name, last_name, company_hubspot_id'),
+        fetchAllCacheRows('hs_cached_companies','hubspot_id, name'),
       ])
 
-      for (const d of dealRows ?? []) {
+      for (const d of dealRows) {
         if (d.project_id) cachedDeals.set(d.project_id, d)
       }
-      for (const c of contactRows ?? []) {
+      for (const c of contactRows) {
         // Normalize names: some HubSpot contacts store the full "First Last" in
         // firstname with an empty lastname (e.g. when created via a "Name" field).
         // Detect and split those so last-name lookups still work correctly.
@@ -320,24 +329,10 @@ export default function Import({ session }) {
           : { ...c, first_name: indexFirst, last_name: indexLast }
         contactsByLastName.get(key).push(entry)
       }
-      for (const c of companyRows ?? []) {
+      for (const c of companyRows) {
         if (c.name) cachedCompanies.set(c.name.toLowerCase().trim(), c.hubspot_id)
       }
 
-      // DEBUG — remove after troubleshooting
-      console.log('[Import] Cache built:', {
-        deals: cachedDeals.size,
-        contactBuckets: contactsByLastName.size,
-        companies: cachedCompanies.size,
-      })
-      // Show the first 10 non-empty last-name keys so we can see what's indexed
-      const sampleKeys = [...contactsByLastName.keys()].filter(Boolean).slice(0, 10)
-      console.log('[Import] Sample contact last-name keys:', sampleKeys)
-      // Show any contacts that ended up under the empty-string key (name not split correctly)
-      const unkeyed = contactsByLastName.get('') ?? []
-      if (unkeyed.length > 0) {
-        console.warn('[Import] Contacts with no indexable last name (' + unkeyed.length + '):', unkeyed.slice(0, 5).map(c => ({ first_name: c.first_name, last_name: c.last_name })))
-      }
     } catch (err) {
       console.warn('Could not prefetch cache tables — import will proceed without local lookup cache:', err.message)
     }
@@ -422,11 +417,6 @@ export default function Import({ session }) {
           } else {
             const companyId = findCachedCompany(cachedCompanies, row.referrer)
             resolvedCompanyId = companyId || null
-            // DEBUG — log every unmatched referrer so we can see what key was tried
-            if (!companyId) {
-              const lnKey = lastName.toLowerCase().trim()
-              console.log(`[Import] No match for referrer "${row.referrer}" | lastName key="${lnKey}" | bucket=${JSON.stringify((contactsByLastName.get(lnKey) ?? []).map(c => ({ fn: c.first_name, ln: c.last_name })))} | company check="${row.referrer.toLowerCase().trim()}" found=${!!companyId}`)
-            }
           }
         }
 
@@ -473,22 +463,36 @@ export default function Import({ session }) {
 
           if (!createFallback) {
             // ── Retroactive association linking ─────────────────────────────
-            // HubSpot associations are idempotent — safe to call on every run.
+            // Only link (and count as an update) when resolving a previously held
+            // deal. Deals created with associations already have them; re-calling
+            // associateDeal every run is idempotent but incorrectly flips
+            // action from 'skipped' → 'updated' on every subsequent import.
+            const wasHeld = heldQueueMap.has(row.name)
             let associationAdded = false
-            if (resolvedContactId) {
-              await withRetry(() => associateDeal(cachedDeal.hubspot_id, 'contacts', resolvedContactId, session))
-              associationAdded = true
-            }
-            if (resolvedCompanyId) {
-              await withRetry(() => associateDeal(cachedDeal.hubspot_id, 'companies', resolvedCompanyId, session))
-              associationAdded = true
-            }
-            if (action === 'skipped' && associationAdded) {
-              action = 'updated'; skipped--; updated++
-            }
 
-            // Mark as resolved in held queue if this deal was previously held
-            if (heldQueueMap.has(row.name)) {
+            if (wasHeld) {
+              // Wrap each call so a failure doesn't abort held deal resolution.
+              if (resolvedContactId) {
+                try {
+                  await withRetry(() => associateDeal(cachedDeal.hubspot_id, 'contacts', resolvedContactId, session))
+                  associationAdded = true
+                } catch (assocErr) {
+                  console.warn(`[Import] Contact association failed for ${row.name}:`, assocErr.message)
+                }
+              }
+              if (resolvedCompanyId) {
+                try {
+                  await withRetry(() => associateDeal(cachedDeal.hubspot_id, 'companies', resolvedCompanyId, session))
+                  associationAdded = true
+                } catch (assocErr) {
+                  console.warn(`[Import] Company association failed for ${row.name}:`, assocErr.message)
+                }
+              }
+              if (action === 'skipped' && associationAdded) {
+                action = 'updated'; skipped--; updated++
+              }
+
+              // Mark as resolved — runs regardless of association outcome.
               await supabase
                 .from('hs_held_deals')
                 .update({ resolved_at: new Date().toISOString(), resolved_deal_id: hubspotDealId })
@@ -608,6 +612,11 @@ export default function Import({ session }) {
       }
 
       setCompleted(prev => prev + 1)
+
+      // Signal whether a HubSpot API call was made this row.
+      // rateLimiter only inserts the 1.1s delay when at least one row in a batch returns true.
+      // Skipped and held rows return false so all-skip/all-held batches are instant.
+      return action === 'created' || action === 'updated' || action === 'error'
     }, {
       batchSize: 10,
       delayMs: 1100,
