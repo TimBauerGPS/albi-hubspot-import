@@ -9,6 +9,17 @@
   # Security is enforced by Supabase RLS policies, not by keeping this key secret.
   SECRETS_SCAN_ENABLED = "false"
 
+# ── Local development ─────────────────────────────────────────────────────────
+# Run `npm run dev:local` to start everything with one command.
+# Vite runs on 5173; netlify dev proxies it + the functions through port 8888.
+# Env vars are loaded automatically from .env in the project root.
+[dev]
+  command = "npm run dev"
+  targetPort = 5173
+  port = 8888
+  publish = "dist"
+  autoLaunch = false
+
 [[headers]]
   for = "/index.html"
   [headers.values]
