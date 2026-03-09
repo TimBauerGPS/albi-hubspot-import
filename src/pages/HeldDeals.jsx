@@ -99,7 +99,7 @@ function EmailModal({ drafts, onClose }) {
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 
-export default function HeldDeals({ session }) {
+export default function HeldDeals({ session, isAdmin, companyName }) {
   const [heldDeals, setHeldDeals] = useState([])
   const [salesTeam, setSalesTeam] = useState([])
   const [loading, setLoading] = useState(true)
@@ -294,7 +294,7 @@ Thank you!`
 
   if (loading) {
     return (
-      <AppShell session={session}>
+      <AppShell session={session} isAdmin={isAdmin} companyName={companyName}>
         <div className="min-h-screen flex items-center justify-center">
           <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-brand-600" />
         </div>
