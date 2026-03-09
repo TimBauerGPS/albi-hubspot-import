@@ -36,14 +36,16 @@ export const handler = async (event) => {
   const { email, company_name } = body
   if (!email || !company_name) return jsonResponse(400, { error: 'email and company_name are required' })
 
-  // Determine the app origin for the redirectTo URL
-  const origin = event.headers['origin']
-    || (event.headers['referer'] ? new URL(event.headers['referer']).origin : null)
-    || `https://${event.headers['host']}`
+  // SITE_URL must be set in Netlify environment variables (e.g. https://your-app.netlify.app).
+  // It must also be added to Supabase Auth → URL Configuration → Redirect URLs.
+  const siteUrl = process.env.SITE_URL?.replace(/\/$/, '')
+  if (!siteUrl) {
+    return jsonResponse(500, { error: 'Server misconfiguration: SITE_URL environment variable is not set.' })
+  }
 
   const { data, error: inviteError } = await supabase.auth.admin.inviteUserByEmail(email, {
     data: { company_name },
-    redirectTo: `${origin}/signup`,
+    redirectTo: `${siteUrl}/signup`,
   })
 
   if (inviteError) return jsonResponse(400, { error: inviteError.message })
