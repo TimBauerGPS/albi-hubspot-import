@@ -5,12 +5,15 @@ import { supabase } from '../lib/supabase'
 /**
  * Invite landing page.
  *
- * When a new company receives an invite email, the link is:
+ * When a new user receives an invite email, the link is:
  *   https://app.com/signup#access_token=...&type=invite
  *
  * Supabase processes the hash on mount, fires SIGNED_IN, and the user is
- * authenticated. This page prompts them to set a company name and password,
- * then redirects to /configuration for the HubSpot API key setup.
+ * authenticated. This page prompts them to set a password, then redirects
+ * to /configuration for the HubSpot API key setup.
+ *
+ * Company assignment is handled server-side (admin-invite-user creates the
+ * company_members row before the invite email is sent).
  *
  * If this page is visited without an invite token in the hash, the user is
  * redirected to /login.
@@ -18,16 +21,14 @@ import { supabase } from '../lib/supabase'
 export default function Signup() {
   const navigate = useNavigate()
   const [session, setSession] = useState(null)
-  const [ready, setReady] = useState(false)          // true once we've checked for invite token
-  const [companyName, setCompanyName] = useState('')
+  const [companyId, setCompanyId] = useState(null)
+  const [ready, setReady] = useState(false)
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
 
   useEffect(() => {
-    // Invite links contain type=invite in the URL hash.
-    // Non-invite visits should be sent to /login.
     const hash = window.location.hash
     if (!hash.includes('type=invite')) {
       navigate('/login', { replace: true })
@@ -36,28 +37,34 @@ export default function Signup() {
 
     setReady(true)
 
-    // Supabase will have already processed the hash and fired SIGNED_IN.
-    // Grab the current session (may be set already or arrive via the listener).
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (session) {
         setSession(session)
-        setCompanyName(session.user?.user_metadata?.company_name ?? '')
+        loadCompanyId(session.user.id)
       }
     })
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       if (event === 'SIGNED_IN' && session) {
         setSession(session)
-        setCompanyName(session.user?.user_metadata?.company_name ?? '')
+        loadCompanyId(session.user.id)
       }
     })
 
     return () => subscription.unsubscribe()
   }, [])
 
+  async function loadCompanyId(userId) {
+    const { data } = await supabase
+      .from('company_members')
+      .select('company_id')
+      .eq('user_id', userId)
+      .maybeSingle()
+    setCompanyId(data?.company_id ?? null)
+  }
+
   async function handleSubmit(e) {
     e.preventDefault()
-    if (!companyName.trim()) { setError('Company name is required'); return }
     if (password !== confirm) { setError('Passwords do not match'); return }
     if (password.length < 8) { setError('Password must be at least 8 characters'); return }
 
@@ -68,13 +75,13 @@ export default function Signup() {
     const { error: pwError } = await supabase.auth.updateUser({ password })
     if (pwError) { setError(pwError.message); setLoading(false); return }
 
-    // Create their hs_user_config row with company name + default settings
+    // Create their hs_user_config row with company_id + default settings
     const { error: configError } = await supabase
       .from('hs_user_config')
       .upsert(
         {
           user_id: session.user.id,
-          company_name: companyName.trim(),
+          company_id: companyId,
           config_status: 'unchecked',
           config_errors: [],
           pipeline_mapping: {
@@ -92,7 +99,6 @@ export default function Signup() {
 
     if (configError) { setError(configError.message); setLoading(false); return }
 
-    // Send to configuration to enter their HubSpot API key
     navigate('/configuration', { replace: true })
   }
 
@@ -110,24 +116,11 @@ export default function Signup() {
         <div className="mb-6">
           <h1 className="text-xl font-bold text-gray-900">Welcome</h1>
           <p className="text-sm text-gray-500 mt-1">
-            Set up your account to start importing deals.
+            Set a password to activate your account.
           </p>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label className="block text-xs font-medium text-gray-700 mb-1">Company name</label>
-            <input
-              type="text"
-              value={companyName}
-              onChange={e => setCompanyName(e.target.value)}
-              required
-              autoFocus
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
-              placeholder="Allied Restoration – Denver"
-            />
-          </div>
-
           <div>
             <label className="block text-xs font-medium text-gray-700 mb-1">Password</label>
             <input
@@ -136,6 +129,7 @@ export default function Signup() {
               onChange={e => setPassword(e.target.value)}
               required
               minLength={8}
+              autoFocus
               className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
               placeholder="Minimum 8 characters"
             />

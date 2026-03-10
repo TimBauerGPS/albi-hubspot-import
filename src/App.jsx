@@ -114,39 +114,65 @@ function AdminRoute({ session, isAdmin, children }) {
 export default function App() {
   const [session, setSession] = useState(undefined)
   const [configStatus, setConfigStatus] = useState(null)
-  const [isAdmin, setIsAdmin] = useState(null)       // null = loading, true/false = loaded
+  const [isAdmin, setIsAdmin] = useState(null)         // null = loading, true/false = loaded
+  const [isSuperAdmin, setIsSuperAdmin] = useState(false)
   const [companyName, setCompanyName] = useState(null)
+  const [companyId, setCompanyId] = useState(null)
   const [showResetModal, setShowResetModal] = useState(false)
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session)
-      if (session) loadUserConfig(session.user.id)
+      if (session) loadMembership(session.user.id)
     })
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       setSession(session)
       if (event === 'PASSWORD_RECOVERY') setShowResetModal(true)
-      if (session) loadUserConfig(session.user.id)
+      if (session) loadMembership(session.user.id)
       else {
         setConfigStatus(null)
         setIsAdmin(null)
+        setIsSuperAdmin(false)
         setCompanyName(null)
+        setCompanyId(null)
       }
     })
 
     return () => subscription.unsubscribe()
   }, [])
 
-  async function loadUserConfig(userId) {
-    const { data } = await supabase
-      .from('hs_user_config')
-      .select('config_status, is_admin, company_name')
-      .eq('user_id', userId)
-      .maybeSingle()
-    setConfigStatus(data?.config_status ?? 'unchecked')
-    setIsAdmin(data?.is_admin ?? false)
-    setCompanyName(data?.company_name ?? null)
+  async function loadMembership(userId) {
+    const [memberRes, superRes] = await Promise.all([
+      supabase
+        .from('company_members')
+        .select('company_id, role, companies(name)')
+        .eq('user_id', userId)
+        .maybeSingle(),
+      supabase
+        .from('super_admins')
+        .select('user_id')
+        .eq('user_id', userId)
+        .maybeSingle(),
+    ])
+    const member = memberRes.data
+    const companyId = member?.company_id ?? null
+
+    // Check user's own config + any valid config in the company (in parallel).
+    // The company query returns results after the RLS migration (Step 3) is applied;
+    // until then it falls back gracefully to the user's own row.
+    const [{ data: userConfig }, { data: companyValid }] = await Promise.all([
+      supabase.from('hs_user_config').select('config_status').eq('user_id', userId).maybeSingle(),
+      companyId
+        ? supabase.from('hs_user_config').select('config_status').eq('company_id', companyId).eq('config_status', 'valid').maybeSingle()
+        : Promise.resolve({ data: null }),
+    ])
+
+    setCompanyId(companyId)
+    setCompanyName(member?.companies?.name ?? null)
+    setIsSuperAdmin(!!superRes.data)
+    setIsAdmin(!!superRes.data || member?.role === 'admin')
+    setConfigStatus(companyValid ? 'valid' : (userConfig?.config_status ?? 'unchecked'))
   }
 
   function getDefaultRedirect() {
@@ -182,8 +208,8 @@ export default function App() {
                 session={session}
                 isAdmin={isAdmin}
                 companyName={companyName}
+                companyId={companyId}
                 onConfigValid={() => setConfigStatus('valid')}
-                onCompanyNameChange={name => setCompanyName(name)}
               />
             </ProtectedRoute>
           }
@@ -192,7 +218,7 @@ export default function App() {
           path="/import"
           element={
             <ProtectedRoute session={session}>
-              <Import session={session} isAdmin={isAdmin} companyName={companyName} />
+              <Import session={session} isAdmin={isAdmin} companyName={companyName} companyId={companyId} />
             </ProtectedRoute>
           }
         />
@@ -218,7 +244,7 @@ export default function App() {
           path="/admin"
           element={
             <AdminRoute session={session} isAdmin={isAdmin}>
-              <Admin session={session} isAdmin={isAdmin} companyName={companyName} />
+              <Admin session={session} isAdmin={isAdmin} isSuperAdmin={isSuperAdmin} companyName={companyName} companyId={companyId} />
             </AdminRoute>
           }
         />

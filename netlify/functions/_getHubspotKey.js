@@ -46,11 +46,31 @@ export async function getHubspotKey(authHeader) {
     throw new Error('Failed to load HubSpot config: ' + configError.message)
   }
 
-  if (!config?.hubspot_api_key) {
-    throw new Error('HubSpot API key not configured. Please set it up in Configuration.')
+  if (config?.hubspot_api_key) {
+    return { user, config, supabase }
   }
 
-  return { user, config, supabase }
+  // No personal config — fall back to the company's config (shared key)
+  const { data: member } = await supabase
+    .from('company_members')
+    .select('company_id')
+    .eq('user_id', user.id)
+    .maybeSingle()
+
+  if (member?.company_id) {
+    const { data: companyConfig } = await supabase
+      .from('hs_user_config')
+      .select('hubspot_api_key, hubspot_partner_id, config_status, pipeline_mapping, excluded_suffixes, sales_team, blacklist')
+      .eq('company_id', member.company_id)
+      .not('hubspot_api_key', 'is', null)
+      .maybeSingle()
+
+    if (companyConfig?.hubspot_api_key) {
+      return { user, config: companyConfig, supabase }
+    }
+  }
+
+  throw new Error('HubSpot API key not configured. Please set it up in Configuration.')
 }
 
 export function jsonResponse(statusCode, body) {
