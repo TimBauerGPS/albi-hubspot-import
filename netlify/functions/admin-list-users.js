@@ -45,7 +45,7 @@ export const handler = async (event) => {
 
   const [{ data: members }, { data: configs }, { data: { users: authUsers } }] = await Promise.all([
     membersQuery,
-    supabase.from('hs_user_config').select('user_id, config_status, updated_at'),
+    supabase.from('hs_user_config').select('user_id, company_id, config_status, updated_at'),
     supabase.auth.admin.listUsers({ perPage: 1000 }),
   ])
 
@@ -59,9 +59,20 @@ export const handler = async (event) => {
   const configMap = new Map((configs || []).map(c => [c.user_id, c]))
   const authMap = new Map((authUsers || []).map(u => [u.id, u]))
 
+  // Set of company_ids that have at least one valid config row — members inherit this
+  const companyValidSet = new Set(
+    (configs || [])
+      .filter(c => c.config_status === 'valid' && c.company_id)
+      .map(c => c.company_id)
+  )
+
   const users = (members || []).map(m => {
     const auth = authMap.get(m.user_id)
     const config = configMap.get(m.user_id)
+    const ownStatus = config?.config_status || 'unchecked'
+    const effectiveStatus = ownStatus === 'valid' || companyValidSet.has(m.company_id)
+      ? 'valid'
+      : ownStatus
     return {
       id: m.user_id,
       email: auth?.email,
@@ -69,7 +80,7 @@ export const handler = async (event) => {
       company_name: m.companies?.name,
       role: m.role,
       is_super_admin: superAdminIds.has(m.user_id),
-      config_status: config?.config_status || 'unchecked',
+      config_status: effectiveStatus,
       last_import: config?.updated_at || null,
       created_at: auth?.created_at,
     }
