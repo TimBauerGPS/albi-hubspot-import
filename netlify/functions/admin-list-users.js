@@ -59,12 +59,17 @@ export const handler = async (event) => {
   const configMap = new Map((configs || []).map(c => [c.user_id, c]))
   const authMap = new Map((authUsers || []).map(u => [u.id, u]))
 
-  // Set of company_ids that have at least one valid config row — members inherit this
-  const companyValidSet = new Set(
-    (configs || [])
-      .filter(c => c.config_status === 'valid' && c.company_id)
-      .map(c => c.company_id)
-  )
+  // Map user_id → company_id from the members list (covers rows where config.company_id is still null)
+  const memberCompanyMap = new Map((members || []).map(m => [m.user_id, m.company_id]))
+
+  // Set of company_ids that have at least one valid config — members inherit this.
+  // Uses config.company_id when set; falls back to company_members lookup otherwise.
+  const companyValidSet = new Set()
+  for (const c of (configs || [])) {
+    if (c.config_status !== 'valid') continue
+    const companyId = c.company_id || memberCompanyMap.get(c.user_id)
+    if (companyId) companyValidSet.add(companyId)
+  }
 
   const users = (members || []).map(m => {
     const auth = authMap.get(m.user_id)
