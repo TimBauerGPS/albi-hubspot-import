@@ -4,4 +4,6 @@ dist
 .env.local
 
 # Local Netlify folder
-.netlify
+.netlify/
+.DS_Store
+deno.lock

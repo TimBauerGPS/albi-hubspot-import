@@ -303,7 +303,7 @@ Thank you!`
   }
 
   return (
-    <AppShell session={session}>
+    <AppShell session={session} isAdmin={isAdmin} companyName={companyName}>
       <div className="max-w-6xl mx-auto px-6 py-8">
         {/* Header */}
         <div className="mb-6 flex items-start justify-between gap-4">

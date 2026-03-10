@@ -89,7 +89,7 @@ function downloadErrorCSV(rows, rowStatuses) {
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
-export default function Import({ session, isAdmin, companyName }) {
+export default function Import({ session, isAdmin, companyName, companyId }) {
   const navigate = useNavigate()
   const [userConfig, setUserConfig] = useState(null)
   const [configStatus, setConfigStatus] = useState(null)
@@ -357,6 +357,7 @@ export default function Import({ session, isAdmin, companyName }) {
       .from('hs_imports')
       .insert({
         user_id: session.user.id,
+        company_id: companyId ?? null,
         filename,
         total_rows: rows.length,
         status: 'processing',
@@ -510,6 +511,7 @@ export default function Import({ session, isAdmin, companyName }) {
           if (hasUnmatchedReferrer) {
             await supabase.from('hs_held_deals').upsert({
               user_id: session.user.id,
+              company_id: companyId ?? null,
               job_id: row.name,
               deal_name: row.dealName,
               referrer: row.referrer,
@@ -598,6 +600,7 @@ export default function Import({ session, isAdmin, companyName }) {
       if (batchImportId && action !== 'held') {
         await supabase.from('hs_deals').insert({
           user_id: session.user.id,
+          company_id: companyId ?? null,
           import_id: batchImportId,
           job_id: row.name,
           job_name: row.dealName,
@@ -695,13 +698,14 @@ export default function Import({ session, isAdmin, companyName }) {
             if (batchImportId) {
               await supabase.from('hs_deals').insert({
                 user_id: session.user.id,
+                company_id: companyId ?? null,
                 import_id: batchImportId,
                 job_id: heldDeal.job_id,
                 job_name: heldDeal.deal_name,
                 job_status: heldDeal.dealstage,
                 deal_value: heldDeal.estimated_revenue,
                 accrual_revenue: heldDeal.accrual_revenue,
-                hubspot_deal_id: newDeal.id,
+                hubspot_deal_id: resolvedHeldDealId,
                 action_taken: 'created',
               })
             }
