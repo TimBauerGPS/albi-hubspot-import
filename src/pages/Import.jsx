@@ -5,6 +5,7 @@ import {
   createDeal,
   updateDeal,
   associateDeal,
+  createCompany,
   syncHubspotData,
   fetchPipelinesAndOwners,
 } from '../lib/hubspot'
@@ -406,7 +407,7 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
         // Runs for ALL paths (create/update/skip) to enable retroactive linking.
         let resolvedContactId = null
         let resolvedCompanyId = null
-        if (row.referrer && !row.isGoogleLead) {
+        if (row.referrer) {
           const parts = row.referrer.trim().split(/\s+/)
           const lastName  = parts.length > 1 ? parts[parts.length - 1] : parts[0]
           const firstName = parts.length > 1 ? parts.slice(0, -1).join(' ') : ''
@@ -418,6 +419,20 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
           } else {
             const companyId = findCachedCompany(cachedCompanies, row.referrer)
             resolvedCompanyId = companyId || null
+          }
+        }
+
+        // ── Google leads: find or create the matching HubSpot company ─────────
+        // If the cache has no match, create the company in HubSpot and add it
+        // to the in-memory cache so subsequent rows with the same referrer skip
+        // the API call (e.g. "Google PPC" appears on hundreds of rows).
+        if (row.isGoogleLead && !resolvedCompanyId) {
+          try {
+            const { companyId: newId } = await withRetry(() => createCompany(row.referrer, session))
+            resolvedCompanyId = newId
+            cachedCompanies.set(row.referrer.toLowerCase().trim(), newId)
+          } catch (err) {
+            console.warn(`[Import] Could not find/create Google company "${row.referrer}":`, err.message)
           }
         }
 
@@ -470,6 +485,21 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
             // action from 'skipped' → 'updated' on every subsequent import.
             const wasHeld = heldQueueMap.has(row.name)
             let associationAdded = false
+
+            // Google leads: always ensure the company association exists.
+            // Handles deals imported before this feature was added (retroactive).
+            // associateDeal is idempotent in HubSpot so re-running is safe.
+            if (row.isGoogleLead && resolvedCompanyId) {
+              try {
+                await withRetry(() => associateDeal(cachedDeal.hubspot_id, 'companies', resolvedCompanyId, session))
+                associationAdded = true
+              } catch (assocErr) {
+                console.warn(`[Import] Google company association failed for ${row.name}:`, assocErr.message)
+              }
+              if (action === 'skipped' && associationAdded) {
+                action = 'updated'; skipped--; updated++
+              }
+            }
 
             if (wasHeld) {
               // Wrap each call so a failure doesn't abort held deal resolution.

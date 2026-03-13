@@ -51,6 +51,10 @@ export async function searchCompany(name, session) {
   return call('hs-company-search', { name }, session)
 }
 
+export async function createCompany(name, session) {
+  return call('hs-company-create', { name }, session)
+}
+
 export async function fetchPipelinesAndOwners(session) {
   return call('hs-meta', {}, session)
 }
