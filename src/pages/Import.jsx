@@ -386,6 +386,7 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
           dealname: row.dealName,
           project_id: row.name,
           total_estimates: String(row.estimatedRevenue),
+          amount: String(row.estimatedRevenue),
           accrual_revenue: String(row.accrualRevenue),
         }
 
