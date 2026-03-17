@@ -300,7 +300,7 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
 
     try {
       const [dealRows, contactRows, companyRows] = await Promise.all([
-        fetchAllCacheRows('hs_cached_deals',    'hubspot_id, project_id, deal_stage, total_estimates, accrual_revenue'),
+        fetchAllCacheRows('hs_cached_deals',    'hubspot_id, project_id, deal_stage, total_estimates, accrual_revenue, amount'),
         fetchAllCacheRows('hs_cached_contacts', 'hubspot_id, first_name, last_name, company_hubspot_id'),
         fetchAllCacheRows('hs_cached_companies','hubspot_id, name'),
       ])
@@ -451,7 +451,8 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
           const unchanged =
             (cachedDeal.deal_stage || '') === expectedStageId &&
             Math.abs((cachedDeal.total_estimates ?? 0) - row.estimatedRevenue) < 0.01 &&
-            Math.abs((cachedDeal.accrual_revenue  ?? 0) - row.accrualRevenue)  < 0.01
+            Math.abs((cachedDeal.accrual_revenue  ?? 0) - row.accrualRevenue)  < 0.01 &&
+            Math.abs((cachedDeal.amount          ?? -1) - row.estimatedRevenue) < 0.01
 
           if (unchanged) {
             hubspotDealId = cachedDeal.hubspot_id
