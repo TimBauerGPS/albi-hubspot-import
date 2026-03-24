@@ -92,21 +92,24 @@ function SetNewPasswordModal({ onDone }) {
 }
 
 /**
- * Protected route — redirects to /login if unauthenticated.
+ * Protected route — redirects to /login if unauthenticated, /no-access if app access denied.
+ * Shows spinner while session or app access is still resolving.
  */
-function ProtectedRoute({ session, children }) {
-  if (session === undefined) return <Spinner />
+function ProtectedRoute({ session, hasAppAccess, children }) {
+  if (session === undefined || hasAppAccess === null) return <Spinner />
   if (!session) return <Navigate to="/login" replace />
+  if (!hasAppAccess) return <Navigate to="/no-access" replace />
   return children
 }
 
 /**
  * Admin-only route — redirects to / if not an admin.
- * Shows spinner while isAdmin is still loading (null).
+ * Shows spinner while isAdmin or app access is still loading (null).
  */
-function AdminRoute({ session, isAdmin, children }) {
-  if (session === undefined || isAdmin === null) return <Spinner />
+function AdminRoute({ session, isAdmin, hasAppAccess, children }) {
+  if (session === undefined || isAdmin === null || hasAppAccess === null) return <Spinner />
   if (!session) return <Navigate to="/login" replace />
+  if (!hasAppAccess) return <Navigate to="/no-access" replace />
   if (!isAdmin) return <Navigate to="/" replace />
   return children
 }
@@ -116,6 +119,7 @@ export default function App() {
   const [configStatus, setConfigStatus] = useState(null)
   const [isAdmin, setIsAdmin] = useState(null)         // null = loading, true/false = loaded
   const [isSuperAdmin, setIsSuperAdmin] = useState(false)
+  const [hasAppAccess, setHasAppAccess] = useState(null) // null = loading, true/false = resolved
   const [companyName, setCompanyName] = useState(null)
   const [companyId, setCompanyId] = useState(null)
   const [showResetModal, setShowResetModal] = useState(false)
@@ -134,6 +138,7 @@ export default function App() {
         setConfigStatus(null)
         setIsAdmin(null)
         setIsSuperAdmin(false)
+        setHasAppAccess(null)
         setCompanyName(null)
         setCompanyId(null)
       }
@@ -168,10 +173,17 @@ export default function App() {
         : Promise.resolve({ data: null }),
     ])
 
+    const { data: access } = await supabase
+      .from('user_app_access')
+      .select('role')
+      .eq('app_name', 'albi-hubspot-import')
+      .maybeSingle()
+
     setCompanyId(companyId)
     setCompanyName(member?.companies?.name ?? null)
     setIsSuperAdmin(!!superRes.data)
     setIsAdmin(!!superRes.data || member?.role === 'admin')
+    setHasAppAccess(!!access)
     setConfigStatus(companyValid ? 'valid' : (userConfig?.config_status ?? 'unchecked'))
   }
 
@@ -199,11 +211,24 @@ export default function App() {
         {/* Invite landing — must be accessible before account is fully set up */}
         <Route path="/signup" element={<Signup />} />
 
+        {/* No app access */}
+        <Route
+          path="/no-access"
+          element={
+            <div className="min-h-screen flex items-center justify-center bg-gray-50">
+              <div className="bg-white rounded-2xl shadow p-8 max-w-sm w-full text-center">
+                <p className="text-gray-900 font-semibold mb-1">Access Not Granted</p>
+                <p className="text-sm text-gray-500">Your account doesn't have access to this app. Contact your administrator.</p>
+              </div>
+            </div>
+          }
+        />
+
         {/* Protected app routes */}
         <Route
           path="/configuration"
           element={
-            <ProtectedRoute session={session}>
+            <ProtectedRoute session={session} hasAppAccess={hasAppAccess}>
               <Configuration
                 session={session}
                 isAdmin={isAdmin}
@@ -217,7 +242,7 @@ export default function App() {
         <Route
           path="/import"
           element={
-            <ProtectedRoute session={session}>
+            <ProtectedRoute session={session} hasAppAccess={hasAppAccess}>
               <Import session={session} isAdmin={isAdmin} companyName={companyName} companyId={companyId} />
             </ProtectedRoute>
           }
@@ -225,7 +250,7 @@ export default function App() {
         <Route
           path="/dashboard"
           element={
-            <ProtectedRoute session={session}>
+            <ProtectedRoute session={session} hasAppAccess={hasAppAccess}>
               <Dashboard session={session} configStatus={configStatus} isAdmin={isAdmin} companyName={companyName} />
             </ProtectedRoute>
           }
@@ -233,7 +258,7 @@ export default function App() {
         <Route
           path="/held-deals"
           element={
-            <ProtectedRoute session={session}>
+            <ProtectedRoute session={session} hasAppAccess={hasAppAccess}>
               <HeldDeals session={session} isAdmin={isAdmin} companyName={companyName} />
             </ProtectedRoute>
           }
@@ -243,7 +268,7 @@ export default function App() {
         <Route
           path="/admin"
           element={
-            <AdminRoute session={session} isAdmin={isAdmin}>
+            <AdminRoute session={session} isAdmin={isAdmin} hasAppAccess={hasAppAccess}>
               <Admin session={session} isAdmin={isAdmin} isSuperAdmin={isSuperAdmin} companyName={companyName} companyId={companyId} />
             </AdminRoute>
           }

@@ -73,7 +73,7 @@ export const handler = async (event) => {
 
   const { data: inviteData, error: inviteError } = await supabase.auth.admin.inviteUserByEmail(
     email.trim(),
-    { redirectTo: `${siteUrl}/signup` }
+    { redirectTo: `${siteUrl}/signup`, data: { signup_app: 'albi-hubspot-import' } }
   )
 
   if (inviteError) {
