@@ -285,9 +285,18 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
       setSheetImportStatus({ state: 'queued', message: 'Queuing Google Sheet import…' })
       await queueGoogleSheetImport(trimmed, session)
 
-      let pollCount = 0
+      const pollStartedAt = Date.now()
+      const POLL_TIMEOUT_MS = 30 * 60 * 1000
       sheetPollIntervalRef.current = setInterval(async () => {
-        pollCount++
+        if (Date.now() - pollStartedAt > POLL_TIMEOUT_MS) {
+          clearInterval(sheetPollIntervalRef.current)
+          setSheetImportStatus({
+            state: 'error',
+            message: 'The Google Sheet import is taking longer than expected. It may still be running; check Import History in a few minutes.',
+          })
+          return
+        }
+
         const { data: latest } = await supabase
           .from('hs_imports')
           .select('id, imported_at, status, filename, created_count, updated_count, error_count')
@@ -299,13 +308,6 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
 
         const isNewImport = latest?.id && latest?.id !== latestBefore?.id
         if (!isNewImport) {
-          if (pollCount >= 40) {
-            clearInterval(sheetPollIntervalRef.current)
-            setSheetImportStatus({
-              state: 'error',
-              message: 'The import did not start in time. Check the sheet link and server configuration, then try again.',
-            })
-          }
           return
         }
 

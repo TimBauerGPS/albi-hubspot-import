@@ -97,6 +97,7 @@ export async function runImportRows({
   rows,
   filename,
   skipIfRecent = false,
+  importId: existingImportId = null,
 }) {
   if (skipIfRecent) {
     const { data: latestImport } = await supabase
@@ -114,22 +115,35 @@ export async function runImportRows({
     }
   }
 
-  let importId = null
+  let importId = existingImportId
 
-  const { data: importRecord, error: importErr } = await supabase
-    .from('hs_imports')
-    .insert({
-      user_id: userId,
-      company_id: companyId ?? null,
-      filename,
-      total_rows: rows.length,
-      status: 'processing',
-    })
-    .select('id')
-    .single()
+  if (importId) {
+    const { error: updateImportErr } = await supabase
+      .from('hs_imports')
+      .update({
+        filename,
+        total_rows: rows.length,
+        status: 'processing',
+      })
+      .eq('id', importId)
 
-  if (importErr) throw new Error(`Failed to create import record: ${importErr.message}`)
-  importId = importRecord.id
+    if (updateImportErr) throw new Error(`Failed to update import record: ${updateImportErr.message}`)
+  } else {
+    const { data: importRecord, error: importErr } = await supabase
+      .from('hs_imports')
+      .insert({
+        user_id: userId,
+        company_id: companyId ?? null,
+        filename,
+        total_rows: rows.length,
+        status: 'processing',
+      })
+      .select('id')
+      .single()
+
+    if (importErr) throw new Error(`Failed to create import record: ${importErr.message}`)
+    importId = importRecord.id
+  }
 
   try {
     let pipelineLabelToId = {}

@@ -93,14 +93,17 @@ ALTER TABLE hs_imports ENABLE ROW LEVEL SECURITY;
 ALTER TABLE hs_deals ENABLE ROW LEVEL SECURITY;
 
 -- hs_user_config: users see only their own row
+DROP POLICY IF EXISTS "hs_user_config: own row" ON hs_user_config;
 CREATE POLICY "hs_user_config: own row" ON hs_user_config
   FOR ALL USING (auth.uid() = user_id);
 
 -- hs_imports: users see only their own imports
+DROP POLICY IF EXISTS "hs_imports: own rows" ON hs_imports;
 CREATE POLICY "hs_imports: own rows" ON hs_imports
   FOR ALL USING (auth.uid() = user_id);
 
 -- hs_deals: users see only their own deal rows
+DROP POLICY IF EXISTS "hs_deals: own rows" ON hs_deals;
 CREATE POLICY "hs_deals: own rows" ON hs_deals
   FOR ALL USING (auth.uid() = user_id);
 
@@ -114,6 +117,8 @@ BEGIN
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS hs_user_config_updated_at ON hs_user_config;
 
 CREATE TRIGGER hs_user_config_updated_at
   BEFORE UPDATE ON hs_user_config
@@ -177,12 +182,15 @@ ALTER TABLE hs_cached_contacts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE hs_cached_companies ENABLE ROW LEVEL SECURITY;
 ALTER TABLE hs_cached_deals ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "hs_cached_contacts: own rows" ON hs_cached_contacts;
 CREATE POLICY "hs_cached_contacts: own rows" ON hs_cached_contacts
   FOR ALL USING (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "hs_cached_companies: own rows" ON hs_cached_companies;
 CREATE POLICY "hs_cached_companies: own rows" ON hs_cached_companies
   FOR ALL USING (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "hs_cached_deals: own rows" ON hs_cached_deals;
 CREATE POLICY "hs_cached_deals: own rows" ON hs_cached_deals
   FOR ALL USING (auth.uid() = user_id);
 
@@ -225,6 +233,7 @@ CREATE TABLE IF NOT EXISTS hs_held_deals (
 
 ALTER TABLE hs_held_deals ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "hs_held_deals: own rows" ON hs_held_deals;
 CREATE POLICY "hs_held_deals: own rows" ON hs_held_deals
   FOR ALL USING (auth.uid() = user_id);
 

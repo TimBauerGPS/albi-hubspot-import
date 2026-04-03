@@ -52,6 +52,7 @@ export const handler = async (event) => {
   }
 
   const body = JSON.parse(event.body || '{}')
+  let importId = null
 
   try {
     const ctx = await resolveUserRequestContext(event, body)
@@ -68,10 +69,32 @@ export const handler = async (event) => {
       return jsonResponse(400, { error: 'No Google Sheet URL is saved for this user.' })
     }
 
+    const { data: importRecord, error: importErr } = await ctx.supabase
+      .from('hs_imports')
+      .insert({
+        user_id: ctx.userId,
+        company_id: ctx.companyId ?? null,
+        filename: 'Google Sheet: queued',
+        total_rows: 0,
+        status: 'pending',
+      })
+      .select('id')
+      .single()
+
+    if (importErr) {
+      return jsonResponse(500, { error: `Failed to create import record: ${importErr.message}` })
+    }
+    importId = importRecord.id
+
     const sheet = await fetchGoogleSheetValues(ctx.sheetUrl)
     const parsed = parseAlbiSheetValues(sheet.values, ctx.effectiveConfig || {})
 
     if (parsed.missingColumns.length > 0) {
+      await ctx.supabase
+        .from('hs_imports')
+        .update({ status: 'error', error_count: 1 })
+        .eq('id', importId)
+
       return jsonResponse(400, {
         error: `Missing required columns: ${parsed.missingColumns.join(', ')}`,
       })
@@ -86,6 +109,7 @@ export const handler = async (event) => {
       rows: parsed.rows,
       filename: `Google Sheet: ${sheet.spreadsheetTitle} / ${sheet.sheetTitle}`,
       skipIfRecent: ctx.skipIfRecent,
+      importId,
     })
 
     return jsonResponse(200, {
@@ -96,6 +120,17 @@ export const handler = async (event) => {
       excludedCount: parsed.excludedCount,
     })
   } catch (err) {
+    if (importId) {
+      try {
+        const supabase = getAdminSupabase()
+        await supabase
+          .from('hs_imports')
+          .update({ status: 'error', error_count: 1 })
+          .eq('id', importId)
+      } catch {
+        // Best effort so the UI can show progress/failure for queued imports.
+      }
+    }
     return jsonResponse(500, { error: err.message })
   }
 }
