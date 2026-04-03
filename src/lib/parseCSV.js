@@ -99,6 +99,107 @@ export function isGoogleLead(referrer) {
   return String(referrer).toLowerCase().includes('google')
 }
 
+export function parseAlbiRecords(data, headers = [], userConfig = {}) {
+  const {
+    excluded_suffixes: excludedSuffixes = [],
+    pipeline_mapping: pipelineMapping = {},
+    sales_team: salesTeam = [],
+    blacklist: blacklist = [],
+  } = userConfig
+
+  const normalizedHeaders = headers.map(h => String(h || '').trim())
+  const salesTeamNames = new Set(salesTeam.map(p => String(p.name || '').trim().toLowerCase()))
+  const blacklistSet = new Set(blacklist.map(b => String(b).trim()))
+  const headerLower = normalizedHeaders.map(h => h.toLowerCase())
+  const missingColumns = REQUIRED_COLUMNS.filter(
+    req => !headerLower.includes(req.toLowerCase())
+  )
+
+  let excludedCount = 0
+  let filteredCount = 0
+  const rows = []
+  const unmappedSuffixes = new Set()
+
+  data.forEach((raw, idx) => {
+    const get = key => {
+      const col = COLUMN_MAP[key]
+      if (raw?.[col] !== undefined) return String(raw[col] || '').trim()
+      const found = normalizedHeaders.find(h => h.toLowerCase() === col.toLowerCase())
+      return found ? String(raw?.[found] || '').trim() : ''
+    }
+
+    const name = get('name')
+    if (!name) return
+
+    if (isExcluded(name, excludedSuffixes) || blacklistSet.has(name)) {
+      excludedCount++
+      return
+    }
+
+    const referrer = get('referrer')
+    const salesPerson = get('salesPerson')
+
+    if (salesTeamNames.size > 0) {
+      const spInTeam = salesTeamNames.has(salesPerson.toLowerCase())
+      const googleLead = isGoogleLead(referrer)
+      if (!spInTeam && !googleLead) {
+        filteredCount++
+        return
+      }
+    }
+
+    const customer = get('customer')
+    const pipeline = getPipelineFromName(name, pipelineMapping)
+    if (!pipeline) unmappedSuffixes.add(extractSuffix(name))
+
+    rows.push({
+      _rowIndex: idx,
+      name,
+      customer,
+      referrer,
+      salesPerson,
+      status: get('status'),
+      estimatedRevenue: parseFloat(String(get('estimatedRevenue')).replace(/[^0-9.]/g, '')) || 0,
+      accrualRevenue: parseFloat(String(get('accrualRevenue')).replace(/[^0-9.]/g, '')) || 0,
+      createdAt: get('createdAt'),
+      customerEmail: get('customerEmail'),
+      address1: get('address1'),
+      city: get('city'),
+      state: get('state'),
+      zipCode: get('zipCode'),
+      insuranceCompany: get('insuranceCompany'),
+      insuranceClaimNumber: get('insuranceClaimNumber'),
+      propertyType: get('propertyType'),
+      projectManager: get('projectManager'),
+      deductible: parseFloat(String(get('deductible')).replace(/[^0-9.]/g, '')) || 0,
+      pipeline,
+      dealName: `${customer} - ${name}`,
+      isGoogleLead: isGoogleLead(referrer),
+    })
+  })
+
+  return {
+    rows,
+    missingColumns,
+    excludedCount,
+    filteredCount,
+    unmappedSuffixes: [...unmappedSuffixes],
+  }
+}
+
+export function parseAlbiSheetValues(values, userConfig = {}) {
+  const [headerRow = [], ...bodyRows] = values || []
+  const headers = headerRow.map(h => String(h || '').trim())
+  const records = bodyRows.map(row => {
+    const record = {}
+    headers.forEach((header, idx) => {
+      record[header] = row?.[idx] ?? ''
+    })
+    return record
+  })
+  return parseAlbiRecords(records, headers, userConfig)
+}
+
 /**
  * Parse an Albi CSV file with per-user config applied.
  *
@@ -115,103 +216,13 @@ export function isGoogleLead(referrer) {
  * @returns {Promise<{ rows, missingColumns, excludedCount, filteredCount, unmatchedCount }>}
  */
 export function parseAlbiCSV(file, userConfig = {}) {
-  const {
-    excluded_suffixes: excludedSuffixes = [],
-    pipeline_mapping: pipelineMapping = {},
-    sales_team: salesTeam = [],
-    blacklist: blacklist = [],
-  } = userConfig
-
-  // Build a Set of configured sales person names (lowercase for matching)
-  const salesTeamNames = new Set(salesTeam.map(p => String(p.name || '').trim().toLowerCase()))
-  const blacklistSet = new Set(blacklist.map(b => String(b).trim()))
-
   return new Promise((resolve, reject) => {
     Papa.parse(file, {
       header: true,
       skipEmptyLines: true,
       transformHeader: h => h.trim(),
       complete({ data, meta }) {
-        const headers = meta.fields || []
-
-        // Column order doesn't matter — we always look up by header name.
-        // Papaparse (header: true) creates objects keyed by header string,
-        // and get() falls back to case-insensitive matching if the exact
-        // header differs slightly (e.g. extra spaces already stripped by transformHeader).
-        const headerLower = headers.map(h => h.toLowerCase())
-        const missingColumns = REQUIRED_COLUMNS.filter(
-          req => !headerLower.includes(req.toLowerCase())
-        )
-
-        let excludedCount = 0   // excluded suffix / blacklist
-        let filteredCount = 0   // failed sales person filter
-        const rows = []
-        const unmappedSuffixes = new Set() // suffixes with no pipeline mapping
-
-        data.forEach((raw, idx) => {
-          const get = key => {
-            const col = COLUMN_MAP[key]
-            if (raw[col] !== undefined) return String(raw[col] || '').trim()
-            const found = headers.find(h => h.toLowerCase() === col.toLowerCase())
-            return found ? String(raw[found] || '').trim() : ''
-          }
-
-          const name = get('name')
-          if (!name) return
-
-          // ── Exclusion: suffix or blacklist ────────────────────────────────
-          if (isExcluded(name, excludedSuffixes) || blacklistSet.has(name)) {
-            excludedCount++
-            return
-          }
-
-          const referrer = get('referrer')
-          const salesPerson = get('salesPerson')
-
-          // ── Sales person filter ────────────────────────────────────────────
-          // Only include if: salesperson is in configured team OR referrer is a Google lead.
-          // If the sales team list is empty (not yet configured), allow all rows through.
-          if (salesTeamNames.size > 0) {
-            const spInTeam = salesTeamNames.has(salesPerson.toLowerCase())
-            const googleLead = isGoogleLead(referrer)
-            if (!spInTeam && !googleLead) {
-              filteredCount++
-              return
-            }
-          }
-
-          const customer = get('customer')
-          const pipeline = getPipelineFromName(name, pipelineMapping)
-          if (!pipeline) unmappedSuffixes.add(extractSuffix(name))
-
-          rows.push({
-            _rowIndex: idx,
-            name,
-            customer,
-            referrer,                 // Used for HubSpot contact/company association matching
-            salesPerson,
-            status: get('status'),
-            estimatedRevenue: parseFloat(String(get('estimatedRevenue')).replace(/[^0-9.]/g, '')) || 0,
-            accrualRevenue: parseFloat(String(get('accrualRevenue')).replace(/[^0-9.]/g, '')) || 0,
-            createdAt: get('createdAt'),
-            customerEmail: get('customerEmail'),
-            address1: get('address1'),
-            city: get('city'),
-            state: get('state'),
-            zipCode: get('zipCode'),
-            insuranceCompany: get('insuranceCompany'),
-            insuranceClaimNumber: get('insuranceClaimNumber'),
-            propertyType: get('propertyType'),
-            projectManager: get('projectManager'),
-            deductible: parseFloat(String(get('deductible')).replace(/[^0-9.]/g, '')) || 0,
-            pipeline,
-            dealName: `${customer} - ${name}`,
-            // Google leads don't need a referrer match to get into HubSpot
-            isGoogleLead: isGoogleLead(referrer),
-          })
-        })
-
-        resolve({ rows, missingColumns, excludedCount, filteredCount, unmappedSuffixes: [...unmappedSuffixes] })
+        resolve(parseAlbiRecords(data, meta.fields || [], userConfig))
       },
       error(err) {
         reject(new Error(err.message))

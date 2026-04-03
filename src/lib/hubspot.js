@@ -111,3 +111,21 @@ export async function syncHubspotData(session) {
   }
   return { background: true }
 }
+
+export async function queueGoogleSheetImport(sheetUrl, session) {
+  const res = await fetch(`/.netlify/functions/google-sheet-import-background`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${session.access_token}`,
+    },
+    body: JSON.stringify({ sheetUrl }),
+  })
+
+  if (!res.ok && res.status !== 202) {
+    const data = await res.json().catch(() => ({}))
+    throw new Error(data.error || `Google Sheet import request failed: ${res.status}`)
+  }
+
+  return { background: true }
+}

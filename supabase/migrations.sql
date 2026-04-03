@@ -239,3 +239,9 @@ CREATE INDEX IF NOT EXISTS idx_held_deals_user_unresolved
 -- INSERT INTO hs_user_config (user_id, pipeline_mapping, excluded_suffixes)
 -- VALUES (auth.uid(), '{"WTR":"Water Mitigation","EMS":"Water Mitigation","FIRE":"Fire Mitigation","CON":"Contents","RBL":"Rebuild"}', '["WTY","LTR","SUB","BDUP","LUX"]')
 -- ON CONFLICT (user_id) DO NOTHING;
+
+-- ============================================================
+-- Allied Google Sheet import support
+-- ============================================================
+ALTER TABLE hs_user_config
+  ADD COLUMN IF NOT EXISTS google_sheet_url text;

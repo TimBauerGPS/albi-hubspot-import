@@ -7,6 +7,7 @@ import {
   associateDeal,
   createCompany,
   syncHubspotData,
+  queueGoogleSheetImport,
   fetchPipelinesAndOwners,
 } from '../lib/hubspot'
 import { processBatched, withRetry } from '../lib/rateLimiter'
@@ -105,6 +106,7 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
   const [syncStep,    setSyncStep]    = useState(null)
   const [syncPolling, setSyncPolling] = useState(null)
   const pollIntervalRef = useRef(null)
+  const sheetPollIntervalRef = useRef(null)
 
   // Import state
   const [importFile, setImportFile] = useState(null)
@@ -118,13 +120,21 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
   // Stop import
   const stopRequestedRef = useRef(false)
   const [stopRequested, setStopRequested] = useState(false)
+  const [googleSheetUrl, setGoogleSheetUrl] = useState('')
+  const [savingGoogleSheet, setSavingGoogleSheet] = useState(false)
+  const [sheetImportStatus, setSheetImportStatus] = useState(null)
+
+  const isAlliedCompany = companyName === 'Allied Restoration Services'
 
   useEffect(() => {
     loadUserConfig()
   }, [session])
 
   // Clean up any running poll interval on unmount
-  useEffect(() => () => clearInterval(pollIntervalRef.current), [])
+  useEffect(() => () => {
+    clearInterval(pollIntervalRef.current)
+    clearInterval(sheetPollIntervalRef.current)
+  }, [])
 
   async function loadUserConfig() {
     const { data } = await supabase
@@ -133,6 +143,7 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
       .eq('user_id', session.user.id)
       .maybeSingle()
     setUserConfig(data)
+    setGoogleSheetUrl(data?.google_sheet_url ?? '')
     setConfigStatus(data?.config_status ?? 'unchecked')
 
     if (data?.config_status === 'valid') {
@@ -229,6 +240,107 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
 
   function updateRowStatus(idx, update) {
     setRowStatuses(prev => ({ ...prev, [idx]: { ...prev[idx], ...update } }))
+  }
+
+  async function saveGoogleSheetUrl(nextUrl) {
+    setSavingGoogleSheet(true)
+    const trimmed = nextUrl.trim()
+
+    const { error } = await supabase
+      .from('hs_user_config')
+      .upsert({ user_id: session.user.id, google_sheet_url: trimmed || null }, { onConflict: 'user_id' })
+
+    setSavingGoogleSheet(false)
+
+    if (error) throw error
+
+    setUserConfig(prev => ({ ...(prev || {}), user_id: session.user.id, google_sheet_url: trimmed || null }))
+    setGoogleSheetUrl(trimmed)
+  }
+
+  async function handleGoogleSheetImport() {
+    const trimmed = googleSheetUrl.trim()
+    if (!trimmed) {
+      setSheetImportStatus({ state: 'error', message: 'Enter a Google Sheets link first.' })
+      return
+    }
+
+    clearInterval(sheetPollIntervalRef.current)
+    setSheetImportStatus({ state: 'saving', message: 'Saving sheet link…' })
+
+    try {
+      const { data: latestBefore } = await supabase
+        .from('hs_imports')
+        .select('id, imported_at, status, filename, created_count, updated_count, error_count')
+        .eq('user_id', session.user.id)
+        .like('filename', 'Google Sheet:%')
+        .order('imported_at', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+
+      if (trimmed !== (userConfig?.google_sheet_url ?? '')) {
+        await saveGoogleSheetUrl(trimmed)
+      }
+
+      setSheetImportStatus({ state: 'queued', message: 'Queuing Google Sheet import…' })
+      await queueGoogleSheetImport(trimmed, session)
+
+      let pollCount = 0
+      sheetPollIntervalRef.current = setInterval(async () => {
+        pollCount++
+        const { data: latest } = await supabase
+          .from('hs_imports')
+          .select('id, imported_at, status, filename, created_count, updated_count, error_count')
+          .eq('user_id', session.user.id)
+          .like('filename', 'Google Sheet:%')
+          .order('imported_at', { ascending: false })
+          .limit(1)
+          .maybeSingle()
+
+        const isNewImport = latest?.id && latest?.id !== latestBefore?.id
+        if (!isNewImport) {
+          if (pollCount >= 40) {
+            clearInterval(sheetPollIntervalRef.current)
+            setSheetImportStatus({
+              state: 'error',
+              message: 'The import did not start in time. Check the sheet link and server configuration, then try again.',
+            })
+          }
+          return
+        }
+
+        if (latest.status === 'processing' || latest.status === 'pending') {
+          setSheetImportStatus({ state: 'running', message: 'Google Sheet import is running in the background…' })
+          return
+        }
+
+        clearInterval(sheetPollIntervalRef.current)
+
+        if (latest.status === 'complete') {
+          setSheetImportStatus({
+            state: 'complete',
+            message: `Google Sheet import finished: ${latest.created_count || 0} created, ${latest.updated_count || 0} updated${latest.error_count ? `, ${latest.error_count} error${latest.error_count === 1 ? '' : 's'}` : ''}.`,
+          })
+        } else {
+          setSheetImportStatus({
+            state: 'error',
+            message: 'Google Sheet import finished with an error. Check Import History for details.',
+          })
+        }
+      }, 3000)
+    } catch (err) {
+      clearInterval(sheetPollIntervalRef.current)
+      setSheetImportStatus({ state: 'error', message: err.message })
+    }
+  }
+
+  async function handleSaveGoogleSheet() {
+    try {
+      await saveGoogleSheetUrl(googleSheetUrl)
+      setSheetImportStatus({ state: 'saved', message: 'Google Sheet link saved for future manual and nightly imports.' })
+    } catch (err) {
+      setSheetImportStatus({ state: 'error', message: err.message })
+    }
   }
 
   // 24-hour sync staleness check
@@ -893,6 +1005,63 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
         )}
 
         <div className="bg-white rounded-xl border border-gray-200 p-6 space-y-6">
+          {isAlliedCompany && !isRunning && !isDone && (
+            <div className="rounded-xl border border-blue-200 bg-blue-50/50 p-5 space-y-4">
+              <div>
+                <h2 className="text-sm font-semibold text-gray-900">Google Sheet Import</h2>
+                <p className="text-xs text-gray-600 mt-1">
+                  Allied Restoration Services users can save a Google Sheet link here and import from it instead of uploading a CSV.
+                  The saved link is also used for the nightly 8pm import.
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <label className="block text-xs font-medium text-gray-700">Google Sheet link</label>
+                <input
+                  type="url"
+                  value={googleSheetUrl}
+                  onChange={e => setGoogleSheetUrl(e.target.value)}
+                  placeholder="https://docs.google.com/spreadsheets/d/..."
+                  disabled={configBlocked || savingGoogleSheet}
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 disabled:bg-gray-100"
+                />
+              </div>
+
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  onClick={handleGoogleSheetImport}
+                  disabled={configBlocked || savingGoogleSheet || cacheStatus === 'empty' && !syncPolling?.done}
+                  className="px-4 py-2 bg-brand-600 text-white text-sm font-medium rounded-lg hover:bg-brand-700 disabled:opacity-50 transition-colors"
+                >
+                  {savingGoogleSheet
+                    ? 'Saving…'
+                    : sheetImportStatus?.state === 'running'
+                      ? 'Import Running…'
+                      : 'Import From Google Sheet'}
+                </button>
+                <button
+                  onClick={handleSaveGoogleSheet}
+                  disabled={configBlocked || savingGoogleSheet || !googleSheetUrl.trim()}
+                  className="px-4 py-2 border border-gray-300 text-gray-700 text-sm font-medium rounded-lg hover:bg-white disabled:opacity-50 transition-colors"
+                >
+                  Save Link
+                </button>
+              </div>
+
+              {sheetImportStatus?.message && (
+                <p className={`text-xs ${
+                  sheetImportStatus.state === 'error'
+                    ? 'text-red-600'
+                    : sheetImportStatus.state === 'complete'
+                      ? 'text-green-700'
+                      : 'text-gray-600'
+                }`}>
+                  {sheetImportStatus.message}
+                </p>
+              )}
+            </div>
+          )}
+
           {/* Uploader — blocked until first sync completes */}
           {!isRunning && !isDone && (
             <>

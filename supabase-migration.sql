@@ -81,3 +81,7 @@ CREATE POLICY "company_isolated_access" ON hs_user_config
 ALTER TABLE hs_user_config DROP COLUMN IF EXISTS is_admin;
 ALTER TABLE hs_user_config DROP COLUMN IF EXISTS company_name;
 */
+
+-- Allied Google Sheet import support
+ALTER TABLE hs_user_config
+  ADD COLUMN IF NOT EXISTS google_sheet_url text;
