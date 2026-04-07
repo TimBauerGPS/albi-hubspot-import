@@ -453,6 +453,7 @@ export async function runImportRows({
           deal_value: row.estimatedRevenue,
           accrual_revenue: row.accrualRevenue,
           contact_name: row.customer,
+          project_url: row.projectLink || null,
           hubspot_deal_id: hubspotDealId,
           action_taken: action,
           error_message: errorMsg,

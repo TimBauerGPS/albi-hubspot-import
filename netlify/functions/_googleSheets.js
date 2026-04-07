@@ -92,6 +92,33 @@ async function googleGetJson(path, accessToken) {
   return data
 }
 
+function columnIndexToLetter(index) {
+  let result = ''
+  let current = index + 1
+  while (current > 0) {
+    const remainder = (current - 1) % 26
+    result = String.fromCharCode(65 + remainder) + result
+    current = Math.floor((current - 1) / 26)
+  }
+  return result
+}
+
+async function fetchSheetHyperlinks(spreadsheetId, sheetTitle, accessToken, values) {
+  const headerRow = values?.[0] || []
+  const linkColumnIndex = headerRow.findIndex(value => String(value || '').trim().toLowerCase() === 'link to project')
+  if (linkColumnIndex === -1) return []
+
+  const columnLetter = columnIndexToLetter(linkColumnIndex)
+  const range = encodeURIComponent(`'${sheetTitle}'!${columnLetter}:${columnLetter}`)
+  const data = await googleGetJson(
+    `spreadsheets/${spreadsheetId}?includeGridData=true&ranges=${range}&fields=sheets(data(rowData(values(formattedValue,hyperlink))))`,
+    accessToken
+  )
+
+  const rowData = data.sheets?.[0]?.data?.[0]?.rowData || []
+  return rowData.map(row => row.values?.[0]?.hyperlink || '')
+}
+
 export async function fetchGoogleSheetValues(sheetUrl) {
   const { spreadsheetId, gid } = parseSheetUrl(sheetUrl)
   const accessToken = await getAccessToken()
@@ -114,11 +141,14 @@ export async function fetchGoogleSheetValues(sheetUrl) {
     `spreadsheets/${spreadsheetId}/values/${range}`,
     accessToken
   )
+  const values = valuesRes.values || []
+  const hyperlinks = await fetchSheetHyperlinks(spreadsheetId, sheetTitle, accessToken, values)
 
   return {
     spreadsheetId,
     spreadsheetTitle: metadata.properties?.title || 'Google Sheet',
     sheetTitle,
-    values: valuesRes.values || [],
+    values,
+    hyperlinks,
   }
 }

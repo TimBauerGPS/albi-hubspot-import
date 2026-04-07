@@ -37,19 +37,43 @@ function ActionBadge({ action }) {
 function DealRowDetail({ importId, userId }) {
   const [deals, setDeals] = useState(null)
   const [loading, setLoading] = useState(true)
-  const [filter, setFilter] = useState('all')
+  const [filter, setFilter] = useState(null)
 
   useEffect(() => {
-    supabase
-      .from('hs_deals')
-      .select('*')
-      .eq('user_id', userId)
-      .eq('import_id', importId)
-      .order('processed_at', { ascending: true })
-      .then(({ data }) => {
-        setDeals(data || [])
-        setLoading(false)
-      })
+    async function loadAllDeals() {
+      const PAGE = 1000
+      const all = []
+      let from = 0
+
+      while (true) {
+        const { data } = await supabase
+          .from('hs_deals')
+          .select('*')
+          .eq('user_id', userId)
+          .eq('import_id', importId)
+          .neq('action_taken', 'skipped')
+          .order('processed_at', { ascending: true })
+          .range(from, from + PAGE - 1)
+
+        const page = data || []
+        all.push(...page)
+        if (page.length < PAGE) break
+        from += PAGE
+      }
+
+      setDeals(all)
+
+      const counts = {
+        created: all.filter(d => d.action_taken === 'created').length,
+        error: all.filter(d => d.action_taken === 'error').length,
+        updated: all.filter(d => d.action_taken === 'updated').length,
+      }
+      const defaultFilter = ['created', 'error', 'updated'].find(key => counts[key] > 0) || 'created'
+      setFilter(defaultFilter)
+      setLoading(false)
+    }
+
+    loadAllDeals()
   }, [importId])
 
   if (loading) {
@@ -60,21 +84,30 @@ function DealRowDetail({ importId, userId }) {
     )
   }
 
-  const filtered = filter === 'all' ? deals : deals.filter(d => d.action_taken === filter)
+  const counts = {
+    created: deals.filter(d => d.action_taken === 'created').length,
+    error: deals.filter(d => d.action_taken === 'error').length,
+    updated: deals.filter(d => d.action_taken === 'updated').length,
+  }
+  const filtered = deals.filter(d => d.action_taken === filter)
 
   return (
     <div className="border-t border-gray-100 bg-gray-50/50">
       {/* Filter tabs */}
       <div className="flex gap-1 px-6 pt-3 pb-2">
-        {['all', 'created', 'updated', 'error'].map(f => (
+        {[
+          { key: 'created', label: 'Created' },
+          { key: 'error', label: 'Error' },
+          { key: 'updated', label: 'Updated' },
+        ].map(({ key, label }) => (
           <button
-            key={f}
-            onClick={() => setFilter(f)}
+            key={key}
+            onClick={() => setFilter(key)}
             className={`px-2 py-1 text-xs font-medium rounded capitalize transition-colors ${
-              filter === f ? 'bg-brand-600 text-white' : 'bg-white border border-gray-200 text-gray-500 hover:text-gray-800'
+              filter === key ? 'bg-brand-600 text-white' : 'bg-white border border-gray-200 text-gray-500 hover:text-gray-800'
             }`}
           >
-            {f === 'all' ? `All (${deals.length})` : `${f} (${deals.filter(d => d.action_taken === f).length})`}
+            {label} ({counts[key]})
           </button>
         ))}
       </div>
@@ -93,7 +126,20 @@ function DealRowDetail({ importId, userId }) {
           <tbody className="divide-y divide-gray-100">
             {filtered.map(deal => (
               <tr key={deal.id} className={deal.action_taken === 'error' ? 'bg-red-50/30' : ''}>
-                <td className="py-2 pr-4 font-mono text-gray-700 whitespace-nowrap">{deal.job_id}</td>
+                <td className="py-2 pr-4 font-mono text-gray-700 whitespace-nowrap">
+                  {deal.project_url
+                    ? (
+                      <a
+                        href={deal.project_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-brand-600 hover:underline"
+                      >
+                        {deal.job_id}
+                      </a>
+                    )
+                    : deal.job_id}
+                </td>
                 <td className="py-2 pr-4 text-gray-700 truncate max-w-xs">{deal.job_name}</td>
                 <td className="py-2 pr-4 whitespace-nowrap"><ActionBadge action={deal.action_taken} /></td>
                 <td className="py-2 pr-4 font-mono text-gray-500 whitespace-nowrap">

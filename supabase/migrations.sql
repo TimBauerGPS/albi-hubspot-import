@@ -75,6 +75,7 @@ CREATE TABLE IF NOT EXISTS hs_deals (
   close_date        date,
   contact_name      text,               -- Customer field
   company_name      text,
+  project_url       text,               -- Albi "Link to Project" URL when available
 
   -- HubSpot result
   hubspot_deal_id   text,               -- Set after create/update
@@ -254,3 +255,6 @@ CREATE INDEX IF NOT EXISTS idx_held_deals_user_unresolved
 -- ============================================================
 ALTER TABLE hs_user_config
   ADD COLUMN IF NOT EXISTS google_sheet_url text;
+
+ALTER TABLE hs_deals
+  ADD COLUMN IF NOT EXISTS project_url text;

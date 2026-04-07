@@ -87,7 +87,7 @@ export const handler = async (event) => {
     importId = importRecord.id
 
     const sheet = await fetchGoogleSheetValues(ctx.sheetUrl)
-    const parsed = parseAlbiSheetValues(sheet.values, ctx.effectiveConfig || {})
+    const parsed = parseAlbiSheetValues(sheet.values, ctx.effectiveConfig || {}, sheet.hyperlinks || [])
 
     if (parsed.missingColumns.length > 0) {
       await ctx.supabase

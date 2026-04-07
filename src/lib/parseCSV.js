@@ -6,6 +6,7 @@ export const REQUIRED_COLUMNS = ['Name', 'Customer', 'Status', 'Estimated Revenu
 // Internal key → Albi CSV column header
 export const COLUMN_MAP = {
   name: 'Name',                       // Albi job number — upsert key (→ project_id)
+  projectLink: 'Link to Project',
   customer: 'Customer',               // Customer name (used in deal name prefix)
   status: 'Status',                   // Deal stage value
   estimatedRevenue: 'Estimated Revenue',
@@ -99,6 +100,17 @@ export function isGoogleLead(referrer) {
   return String(referrer).toLowerCase().includes('google')
 }
 
+function extractProjectLink(value) {
+  const raw = String(value || '').trim()
+  if (!raw) return ''
+
+  const hrefMatch = raw.match(/href\s*=\s*"([^"]+)"/i) || raw.match(/href\s*=\s*'([^']+)'/i)
+  if (hrefMatch?.[1]) return hrefMatch[1]
+
+  if (/^https?:\/\//i.test(raw)) return raw
+  return ''
+}
+
 export function parseAlbiRecords(data, headers = [], userConfig = {}) {
   const {
     excluded_suffixes: excludedSuffixes = [],
@@ -167,6 +179,7 @@ export function parseAlbiRecords(data, headers = [], userConfig = {}) {
       city: get('city'),
       state: get('state'),
       zipCode: get('zipCode'),
+      projectLink: extractProjectLink(get('projectLink')),
       insuranceCompany: get('insuranceCompany'),
       insuranceClaimNumber: get('insuranceClaimNumber'),
       propertyType: get('propertyType'),
@@ -187,7 +200,7 @@ export function parseAlbiRecords(data, headers = [], userConfig = {}) {
   }
 }
 
-export function parseAlbiSheetValues(values, userConfig = {}) {
+export function parseAlbiSheetValues(values, userConfig = {}, linkMap = []) {
   const [headerRow = [], ...bodyRows] = values || []
   const headers = headerRow.map(h => String(h || '').trim())
   const records = bodyRows.map(row => {
@@ -197,7 +210,13 @@ export function parseAlbiSheetValues(values, userConfig = {}) {
     })
     return record
   })
-  return parseAlbiRecords(records, headers, userConfig)
+
+  const parsed = parseAlbiRecords(records, headers, userConfig)
+  parsed.rows = parsed.rows.map(row => ({
+    ...row,
+    projectLink: row.projectLink || linkMap[row._rowIndex + 1] || '',
+  }))
+  return parsed
 }
 
 /**

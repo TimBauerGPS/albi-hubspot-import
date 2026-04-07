@@ -85,3 +85,6 @@ ALTER TABLE hs_user_config DROP COLUMN IF EXISTS company_name;
 -- Allied Google Sheet import support
 ALTER TABLE hs_user_config
   ADD COLUMN IF NOT EXISTS google_sheet_url text;
+
+ALTER TABLE hs_deals
+  ADD COLUMN IF NOT EXISTS project_url text;
