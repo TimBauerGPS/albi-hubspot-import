@@ -24,6 +24,40 @@ function findCachedCompany(cachedCompanies, name) {
   return cachedCompanies.get(name.toLowerCase().trim()) ?? null
 }
 
+function buildCachedDealRow(userId, dealId, properties, row) {
+  return {
+    user_id: userId,
+    hubspot_id: dealId,
+    project_id: row.name,
+    deal_name: properties.dealname ?? row.dealName,
+    deal_stage: properties.dealstage ?? null,
+    pipeline: properties.pipeline ?? null,
+    total_estimates: row.estimatedRevenue,
+    accrual_revenue: row.accrualRevenue,
+    amount: row.estimatedRevenue,
+    synced_at: new Date().toISOString(),
+  }
+}
+
+async function persistCachedDeal(supabase, cachedDeals, userId, cacheRow) {
+  cachedDeals.set(cacheRow.project_id, cacheRow)
+
+  const { error } = await supabase
+    .from('hs_cached_deals')
+    .upsert(cacheRow, { onConflict: 'user_id,hubspot_id' })
+
+  if (error) {
+    console.warn(`Failed to persist cached deal ${cacheRow.project_id}:`, error.message)
+  }
+}
+
+function logUpdatedDeal(jobId, details) {
+  console.log('[hs-import] deal updated', {
+    jobId,
+    ...details,
+  })
+}
+
 async function createDeal(properties, associations, apiKey) {
   const payload = { properties }
   if (associations?.length > 0) payload.associations = associations
@@ -218,6 +252,13 @@ export async function runImportRows({
     let skipped = 0
     let errors = 0
     let heldCount = 0
+    const updateReasons = {
+      field_diff: 0,
+      google_association: 0,
+      held_association: 0,
+      duplicate_create_fallback: 0,
+      held_duplicate_fallback: 0,
+    }
 
     await processBatched(rows, async row => {
       let hubspotDealId = null
@@ -289,17 +330,40 @@ export async function runImportRows({
             skipped++
           } else {
             try {
+              const changedFields = []
+              if ((cachedDeal.deal_stage || '') !== expectedStageId) changedFields.push('dealstage')
+              if (Math.abs((cachedDeal.total_estimates ?? 0) - row.estimatedRevenue) >= 0.01) changedFields.push('total_estimates')
+              if (Math.abs((cachedDeal.accrual_revenue ?? 0) - row.accrualRevenue) >= 0.01) changedFields.push('accrual_revenue')
+              if (Math.abs((cachedDeal.amount ?? -1) - row.estimatedRevenue) >= 0.01) changedFields.push('amount')
+
               await withRetry(() => updateDeal(cachedDeal.hubspot_id, properties, apiKey))
               hubspotDealId = cachedDeal.hubspot_id
               action = 'updated'
               updated++
-              cachedDeals.set(row.name, {
-                ...cachedDeal,
-                deal_stage: properties.dealstage ?? cachedDeal.deal_stage,
-                total_estimates: row.estimatedRevenue,
-                accrual_revenue: row.accrualRevenue,
-                amount: row.estimatedRevenue,
+              updateReasons.field_diff++
+              logUpdatedDeal(row.name, {
+                reason: 'field_diff',
+                hubspotDealId,
+                changedFields,
+                cached: {
+                  dealstage: cachedDeal.deal_stage || '',
+                  total_estimates: cachedDeal.total_estimates ?? null,
+                  accrual_revenue: cachedDeal.accrual_revenue ?? null,
+                  amount: cachedDeal.amount ?? null,
+                },
+                incoming: {
+                  dealstage: expectedStageId,
+                  total_estimates: row.estimatedRevenue,
+                  accrual_revenue: row.accrualRevenue,
+                  amount: row.estimatedRevenue,
+                },
               })
+              await persistCachedDeal(
+                supabase,
+                cachedDeals,
+                userId,
+                buildCachedDealRow(userId, cachedDeal.hubspot_id, properties, row)
+              )
             } catch (updateErr) {
               if (!updateErr.message.includes('404')) throw updateErr
               cachedDeals.delete(row.name)
@@ -322,6 +386,12 @@ export async function runImportRows({
                 action = 'updated'
                 skipped--
                 updated++
+                updateReasons.google_association++
+                logUpdatedDeal(row.name, {
+                  reason: 'google_association',
+                  hubspotDealId: cachedDeal.hubspot_id,
+                  companyId: resolvedCompanyId,
+                })
               }
             }
 
@@ -348,6 +418,13 @@ export async function runImportRows({
                 action = 'updated'
                 skipped--
                 updated++
+                updateReasons.held_association++
+                logUpdatedDeal(row.name, {
+                  reason: 'held_association',
+                  hubspotDealId: cachedDeal.hubspot_id,
+                  contactId: resolvedContactId,
+                  companyId: resolvedCompanyId,
+                })
               }
 
               await supabase
@@ -415,17 +492,23 @@ export async function runImportRows({
               }
               action = 'updated'
               updated++
+              updateReasons.duplicate_create_fallback++
+              logUpdatedDeal(row.name, {
+                reason: 'duplicate_create_fallback',
+                hubspotDealId: resolvedDealId,
+                matchedExistingDealId: resolvedDealId,
+                contactId: resolvedContactId,
+                companyId: resolvedCompanyId,
+              })
             }
 
             hubspotDealId = resolvedDealId
-            cachedDeals.set(row.name, {
-              hubspot_id: resolvedDealId,
-              project_id: row.name,
-              deal_stage: properties.dealstage ?? null,
-              total_estimates: row.estimatedRevenue,
-              accrual_revenue: row.accrualRevenue,
-              amount: row.estimatedRevenue,
-            })
+            await persistCachedDeal(
+              supabase,
+              cachedDeals,
+              userId,
+              buildCachedDealRow(userId, resolvedDealId, properties, row)
+            )
 
             if (heldQueueMap.has(row.name)) {
               await supabase
@@ -520,6 +603,14 @@ export async function runImportRows({
             if (resolvedContactId) await withRetry(() => associateDeal(resolvedHeldDealId, 'contacts', resolvedContactId, apiKey))
             if (resolvedCompanyId) await withRetry(() => associateDeal(resolvedHeldDealId, 'companies', resolvedCompanyId, apiKey))
             updated++
+            updateReasons.held_duplicate_fallback++
+            logUpdatedDeal(heldDeal.job_id, {
+              reason: 'held_duplicate_fallback',
+              hubspotDealId: resolvedHeldDealId,
+              matchedExistingDealId: resolvedHeldDealId,
+              contactId: resolvedContactId,
+              companyId: resolvedCompanyId,
+            })
           }
 
           await supabase
@@ -546,6 +637,13 @@ export async function runImportRows({
     }
 
     const summary = { created, updated, skipped, errors, held: heldCount }
+    console.log('[hs-import] import summary', {
+      importId,
+      userId,
+      filename,
+      summary,
+      updateReasons,
+    })
 
     await supabase
       .from('hs_imports')
