@@ -58,6 +58,40 @@ function findCachedCompany(cachedCompanies, name) {
   return cachedCompanies.get(name.toLowerCase().trim()) ?? null
 }
 
+function buildCachedDealRow(userId, dealId, properties, row) {
+  return {
+    user_id: userId,
+    hubspot_id: dealId,
+    project_id: row.name,
+    deal_name: properties.dealname ?? row.dealName,
+    deal_stage: properties.dealstage ?? null,
+    pipeline: properties.pipeline ?? null,
+    total_estimates: row.estimatedRevenue,
+    accrual_revenue: row.accrualRevenue,
+    amount: row.estimatedRevenue,
+    synced_at: new Date().toISOString(),
+  }
+}
+
+async function persistCachedDeal(supabaseClient, cachedDeals, cacheRow) {
+  cachedDeals.set(cacheRow.project_id, cacheRow)
+
+  const { error } = await supabaseClient
+    .from('hs_cached_deals')
+    .upsert(cacheRow, { onConflict: 'user_id,hubspot_id' })
+
+  if (error) {
+    console.warn(`[Import] Failed to persist cached deal ${cacheRow.project_id}:`, error.message)
+  }
+}
+
+function logUpdatedDeal(jobId, details) {
+  console.log('[hs-import] deal updated', {
+    jobId,
+    ...details,
+  })
+}
+
 // ── CSV error download ─────────────────────────────────────────────────────────
 
 function downloadErrorCSV(rows, rowStatuses) {
@@ -457,6 +491,13 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
     let skipped = 0
     let errors  = 0
     let heldCount = 0
+    const updateReasons = {
+      field_diff: 0,
+      google_association: 0,
+      held_association: 0,
+      duplicate_create_fallback: 0,
+      held_duplicate_fallback: 0,
+    }
 
     // ── Load unresolved held deals queue ──────────────────────────────────────
     const { data: heldQueue } = await supabase
@@ -574,16 +615,39 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
             skipped++
           } else {
             try {
+              const changedFields = []
+              if ((cachedDeal.deal_stage || '') !== expectedStageId) changedFields.push('dealstage')
+              if (Math.abs((cachedDeal.total_estimates ?? 0) - row.estimatedRevenue) >= 0.01) changedFields.push('total_estimates')
+              if (Math.abs((cachedDeal.accrual_revenue ?? 0) - row.accrualRevenue) >= 0.01) changedFields.push('accrual_revenue')
+              if (Math.abs((cachedDeal.amount ?? -1) - row.estimatedRevenue) >= 0.01) changedFields.push('amount')
+
               await withRetry(() => updateDeal(cachedDeal.hubspot_id, properties, session))
               hubspotDealId = cachedDeal.hubspot_id
               action = 'updated'
               updated++
-              cachedDeals.set(row.name, {
-                ...cachedDeal,
-                deal_stage: properties.dealstage ?? cachedDeal.deal_stage,
-                total_estimates: row.estimatedRevenue,
-                accrual_revenue: row.accrualRevenue,
+              updateReasons.field_diff++
+              logUpdatedDeal(row.name, {
+                reason: 'field_diff',
+                hubspotDealId,
+                changedFields,
+                cached: {
+                  dealstage: cachedDeal.deal_stage || '',
+                  total_estimates: cachedDeal.total_estimates ?? null,
+                  accrual_revenue: cachedDeal.accrual_revenue ?? null,
+                  amount: cachedDeal.amount ?? null,
+                },
+                incoming: {
+                  dealstage: expectedStageId,
+                  total_estimates: row.estimatedRevenue,
+                  accrual_revenue: row.accrualRevenue,
+                  amount: row.estimatedRevenue,
+                },
               })
+              await persistCachedDeal(
+                supabase,
+                cachedDeals,
+                buildCachedDealRow(session.user.id, cachedDeal.hubspot_id, properties, row)
+              )
             } catch (updateErr) {
               // 404: cached deal ID deleted/merged in HubSpot — drop stale entry
               // and let the create path handle it (with its own 400 recovery).
@@ -614,6 +678,12 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
               }
               if (action === 'skipped' && associationAdded) {
                 action = 'updated'; skipped--; updated++
+                updateReasons.google_association++
+                logUpdatedDeal(row.name, {
+                  reason: 'google_association',
+                  hubspotDealId: cachedDeal.hubspot_id,
+                  companyId: resolvedCompanyId,
+                })
               }
             }
 
@@ -637,6 +707,13 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
               }
               if (action === 'skipped' && associationAdded) {
                 action = 'updated'; skipped--; updated++
+                updateReasons.held_association++
+                logUpdatedDeal(row.name, {
+                  reason: 'held_association',
+                  hubspotDealId: cachedDeal.hubspot_id,
+                  contactId: resolvedContactId,
+                  companyId: resolvedCompanyId,
+                })
               }
 
               // Mark as resolved — runs regardless of association outcome.
@@ -712,18 +789,23 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
               }
               action = 'updated'
               updated++
+              updateReasons.duplicate_create_fallback++
+              logUpdatedDeal(row.name, {
+                reason: 'duplicate_create_fallback',
+                hubspotDealId: resolvedDealId,
+                matchedExistingDealId: resolvedDealId,
+                contactId: resolvedContactId,
+                companyId: resolvedCompanyId,
+              })
             }
 
             hubspotDealId = resolvedDealId
 
-            // Add/refresh in-memory cache so the same project_id isn't re-processed
-            cachedDeals.set(row.name, {
-              hubspot_id: resolvedDealId,
-              project_id: row.name,
-              deal_stage: properties.dealstage ?? null,
-              total_estimates: row.estimatedRevenue,
-              accrual_revenue: row.accrualRevenue,
-            })
+            await persistCachedDeal(
+              supabase,
+              cachedDeals,
+              buildCachedDealRow(session.user.id, resolvedDealId, properties, row)
+            )
 
             if (heldQueueMap.has(row.name)) {
               await supabase
@@ -835,6 +917,14 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
               if (resolvedContactId) await withRetry(() => associateDeal(resolvedHeldDealId, 'contacts', resolvedContactId, session))
               if (resolvedCompanyId) await withRetry(() => associateDeal(resolvedHeldDealId, 'companies', resolvedCompanyId, session))
               updated++
+              updateReasons.held_duplicate_fallback++
+              logUpdatedDeal(heldDeal.job_id, {
+                reason: 'held_duplicate_fallback',
+                hubspotDealId: resolvedHeldDealId,
+                matchedExistingDealId: resolvedHeldDealId,
+                contactId: resolvedContactId,
+                companyId: resolvedCompanyId,
+              })
             }
 
             await supabase
@@ -865,6 +955,13 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
 
     // ── Finalize ──────────────────────────────────────────────────────────────
     const finalSummary = { created, updated, skipped, errors, held: heldCount }
+    console.log('[hs-import] import summary', {
+      importId: batchImportId,
+      userId: session.user.id,
+      filename,
+      summary: finalSummary,
+      updateReasons,
+    })
     setSummary(finalSummary)
 
     if (batchImportId) {
