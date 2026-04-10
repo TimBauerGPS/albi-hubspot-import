@@ -4,6 +4,33 @@ import { readFile } from 'fs/promises'
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token'
 const GOOGLE_SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets.readonly'
 const DEFAULT_LOCAL_SERVICE_ACCOUNT_PATH = '/Users/TinierTim/TBDev/gps_fupm/_reference/skillful-air-294619-2d5fcd0322e6.json'
+const GOOGLE_FETCH_TIMEOUT_MS = 60_000
+
+function createTimeoutSignal(timeoutMs) {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(new Error(`Request timed out after ${timeoutMs}ms.`)), timeoutMs)
+  return {
+    signal: controller.signal,
+    clear: () => clearTimeout(timeout),
+  }
+}
+
+async function fetchJsonWithTimeout(url, options, label) {
+  const { signal, clear } = createTimeoutSignal(GOOGLE_FETCH_TIMEOUT_MS)
+
+  try {
+    const res = await fetch(url, { ...options, signal })
+    const data = await res.json()
+    return { res, data }
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      throw new Error(`${label} timed out after ${GOOGLE_FETCH_TIMEOUT_MS / 1000}s.`)
+    }
+    throw err
+  } finally {
+    clear()
+  }
+}
 
 function base64UrlEncode(value) {
   return Buffer.from(value)
@@ -52,13 +79,11 @@ async function getAccessToken() {
     assertion,
   })
 
-  const res = await fetch(credentials.token_uri || GOOGLE_TOKEN_URL, {
+  const { res, data } = await fetchJsonWithTimeout(credentials.token_uri || GOOGLE_TOKEN_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body,
-  })
-
-  const data = await res.json()
+  }, 'Google access-token request')
   if (!res.ok || !data.access_token) {
     throw new Error(data.error_description || data.error || 'Failed to get Google access token.')
   }
@@ -82,10 +107,9 @@ function parseSheetUrl(sheetUrl) {
 }
 
 async function googleGetJson(path, accessToken) {
-  const res = await fetch(`https://sheets.googleapis.com/v4/${path}`, {
+  const { res, data } = await fetchJsonWithTimeout(`https://sheets.googleapis.com/v4/${path}`, {
     headers: { Authorization: `Bearer ${accessToken}` },
-  })
-  const data = await res.json()
+  }, `Google Sheets request (${path})`)
   if (!res.ok) {
     throw new Error(data.error?.message || 'Google Sheets request failed.')
   }

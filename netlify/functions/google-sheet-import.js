@@ -76,7 +76,7 @@ export const handler = async (event) => {
         company_id: ctx.companyId ?? null,
         filename: 'Google Sheet: queued',
         total_rows: 0,
-        status: 'pending',
+        status: 'processing',
       })
       .select('id')
       .single()
@@ -85,8 +85,21 @@ export const handler = async (event) => {
       return jsonResponse(500, { error: `Failed to create import record: ${importErr.message}` })
     }
     importId = importRecord.id
+    console.log('[gs-import] import started', {
+      importId,
+      userId: ctx.userId,
+      internal: ctx.internal,
+      skipIfRecent: ctx.skipIfRecent,
+    })
 
     const sheet = await fetchGoogleSheetValues(ctx.sheetUrl)
+    console.log('[gs-import] sheet fetched', {
+      importId,
+      userId: ctx.userId,
+      spreadsheetTitle: sheet.spreadsheetTitle,
+      sheetTitle: sheet.sheetTitle,
+      rowCount: sheet.values?.length || 0,
+    })
     const parsed = parseAlbiSheetValues(sheet.values, ctx.effectiveConfig || {}, sheet.hyperlinks || [])
 
     if (parsed.missingColumns.length > 0) {
@@ -112,6 +125,12 @@ export const handler = async (event) => {
       importId,
     })
 
+    console.log('[gs-import] import completed', {
+      importId,
+      userId: ctx.userId,
+      summary: result.summary,
+    })
+
     return jsonResponse(200, {
       ...result,
       sheetTitle: sheet.sheetTitle,
@@ -120,6 +139,10 @@ export const handler = async (event) => {
       excludedCount: parsed.excludedCount,
     })
   } catch (err) {
+    console.error('[gs-import] import failed', {
+      importId,
+      error: err.message,
+    })
     if (importId) {
       try {
         const supabase = getAdminSupabase()

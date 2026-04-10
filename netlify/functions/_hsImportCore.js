@@ -378,20 +378,8 @@ export async function runImportRows({
             if (row.isGoogleLead && resolvedCompanyId) {
               try {
                 await withRetry(() => associateDeal(cachedDeal.hubspot_id, 'companies', resolvedCompanyId, apiKey))
-                associationAdded = true
               } catch (assocErr) {
                 console.warn(`Google association failed for ${row.name}:`, assocErr.message)
-              }
-              if (action === 'skipped' && associationAdded) {
-                action = 'updated'
-                skipped--
-                updated++
-                updateReasons.google_association++
-                logUpdatedDeal(row.name, {
-                  reason: 'google_association',
-                  hubspotDealId: cachedDeal.hubspot_id,
-                  companyId: resolvedCompanyId,
-                })
               }
             }
 

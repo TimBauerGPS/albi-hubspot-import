@@ -667,23 +667,13 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
             let associationAdded = false
 
             // Google leads: always ensure the company association exists.
-            // Handles deals imported before this feature was added (retroactive).
-            // associateDeal is idempotent in HubSpot so re-running is safe.
+            // associateDeal is idempotent in HubSpot, so we do not treat a
+            // successful call here as an "updated" row count.
             if (row.isGoogleLead && resolvedCompanyId) {
               try {
                 await withRetry(() => associateDeal(cachedDeal.hubspot_id, 'companies', resolvedCompanyId, session))
-                associationAdded = true
               } catch (assocErr) {
                 console.warn(`[Import] Google company association failed for ${row.name}:`, assocErr.message)
-              }
-              if (action === 'skipped' && associationAdded) {
-                action = 'updated'; skipped--; updated++
-                updateReasons.google_association++
-                logUpdatedDeal(row.name, {
-                  reason: 'google_association',
-                  hubspotDealId: cachedDeal.hubspot_id,
-                  companyId: resolvedCompanyId,
-                })
               }
             }
 
