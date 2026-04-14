@@ -6,6 +6,20 @@ import { parseAlbiSheetValues } from '../../src/lib/parseCSV.js'
 
 const ALLIED_COMPANY_NAME = 'Allied Restoration Services'
 
+async function shouldSkipRecentImport(supabase, userId) {
+  const { data: latestImport } = await supabase
+    .from('hs_imports')
+    .select('imported_at, filename')
+    .eq('user_id', userId)
+    .like('filename', 'Google Sheet:%')
+    .order('imported_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  const lastImportedAt = latestImport?.imported_at ? new Date(latestImport.imported_at).getTime() : 0
+  return Date.now() - lastImportedAt < 45 * 60 * 1000
+}
+
 async function resolveUserRequestContext(event, body) {
   if (isInternalJobRequest(event, body)) {
     const supabase = getAdminSupabase()
@@ -67,6 +81,13 @@ export const handler = async (event) => {
 
     if (!ctx.sheetUrl) {
       return jsonResponse(400, { error: 'No Google Sheet URL is saved for this user.' })
+    }
+
+    if (ctx.skipIfRecent && await shouldSkipRecentImport(ctx.supabase, ctx.userId)) {
+      console.log('[gs-import] skipped recent import', {
+        userId: ctx.userId,
+      })
+      return jsonResponse(200, { skipped: true, reason: 'recent_import' })
     }
 
     const { data: importRecord, error: importErr } = await ctx.supabase

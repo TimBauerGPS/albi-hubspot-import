@@ -24,14 +24,14 @@ function findCachedCompany(cachedCompanies, name) {
   return cachedCompanies.get(name.toLowerCase().trim()) ?? null
 }
 
-function buildCachedDealRow(userId, dealId, properties, row) {
+function buildCachedDealRow(userId, dealId, properties, row, existingCacheRow = null) {
   return {
     user_id: userId,
     hubspot_id: dealId,
     project_id: row.name,
     deal_name: properties.dealname ?? row.dealName,
-    deal_stage: properties.dealstage ?? null,
-    pipeline: properties.pipeline ?? null,
+    deal_stage: properties.dealstage ?? existingCacheRow?.deal_stage ?? null,
+    pipeline: properties.pipeline ?? existingCacheRow?.pipeline ?? null,
     total_estimates: row.estimatedRevenue,
     accrual_revenue: row.accrualRevenue,
     amount: row.estimatedRevenue,
@@ -56,6 +56,14 @@ function logUpdatedDeal(jobId, details) {
     jobId,
     ...details,
   })
+}
+
+function stageMatches(cachedStageId, expectedStageId, incomingStatusLabel, stageLabelById) {
+  if (expectedStageId) return (cachedStageId || '') === expectedStageId
+  if (!incomingStatusLabel) return (cachedStageId || '') === ''
+
+  const cachedStageLabel = stageLabelById[cachedStageId || ''] || ''
+  return cachedStageLabel === incomingStatusLabel
 }
 
 async function createDeal(properties, associations, apiKey) {
@@ -183,6 +191,7 @@ export async function runImportRows({
     let pipelineLabelToId = {}
     let stagesByPipeline = {}
     let ownerNameToId = {}
+    let stageLabelById = {}
 
     try {
       const { pipelines, owners } = await fetchPipelinesAndOwners(apiKey)
@@ -192,6 +201,7 @@ export async function runImportRows({
         stagesByPipeline[pKey] = {}
         for (const s of p.stages) {
           stagesByPipeline[pKey][s.label.toLowerCase().trim()] = s.id
+          stageLabelById[s.id] = s.label.toLowerCase().trim()
         }
       }
       for (const o of owners) {
@@ -203,7 +213,7 @@ export async function runImportRows({
     }
 
     const [dealRows, contactRows, companyRows, heldQueueRes] = await Promise.all([
-      fetchAllCacheRows(supabase, userId, 'hs_cached_deals', 'hubspot_id, project_id, deal_stage, total_estimates, accrual_revenue, amount'),
+      fetchAllCacheRows(supabase, userId, 'hs_cached_deals', 'hubspot_id, project_id, deal_stage, pipeline, total_estimates, accrual_revenue, amount'),
       fetchAllCacheRows(supabase, userId, 'hs_cached_contacts', 'hubspot_id, first_name, last_name, company_hubspot_id'),
       fetchAllCacheRows(supabase, userId, 'hs_cached_companies', 'hubspot_id, name'),
       supabase.from('hs_held_deals').select('*').eq('user_id', userId).is('resolved_at', null),
@@ -318,8 +328,9 @@ export async function runImportRows({
 
         if (cachedDeal) {
           const expectedStageId = stagesByPipeline[pKey]?.[sKey] ?? ''
+          const stageUnchanged = stageMatches(cachedDeal.deal_stage, expectedStageId, sKey, stageLabelById)
           const unchanged =
-            (cachedDeal.deal_stage || '') === expectedStageId &&
+            stageUnchanged &&
             Math.abs((cachedDeal.total_estimates ?? 0) - row.estimatedRevenue) < 0.01 &&
             Math.abs((cachedDeal.accrual_revenue ?? 0) - row.accrualRevenue) < 0.01 &&
             Math.abs((cachedDeal.amount ?? -1) - row.estimatedRevenue) < 0.01
@@ -331,7 +342,7 @@ export async function runImportRows({
           } else {
             try {
               const changedFields = []
-              if ((cachedDeal.deal_stage || '') !== expectedStageId) changedFields.push('dealstage')
+              if (!stageUnchanged) changedFields.push('dealstage')
               if (Math.abs((cachedDeal.total_estimates ?? 0) - row.estimatedRevenue) >= 0.01) changedFields.push('total_estimates')
               if (Math.abs((cachedDeal.accrual_revenue ?? 0) - row.accrualRevenue) >= 0.01) changedFields.push('accrual_revenue')
               if (Math.abs((cachedDeal.amount ?? -1) - row.estimatedRevenue) >= 0.01) changedFields.push('amount')
@@ -362,7 +373,7 @@ export async function runImportRows({
                 supabase,
                 cachedDeals,
                 userId,
-                buildCachedDealRow(userId, cachedDeal.hubspot_id, properties, row)
+                buildCachedDealRow(userId, cachedDeal.hubspot_id, properties, row, cachedDeal)
               )
             } catch (updateErr) {
               if (!updateErr.message.includes('404')) throw updateErr

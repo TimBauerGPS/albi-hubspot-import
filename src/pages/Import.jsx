@@ -58,14 +58,14 @@ function findCachedCompany(cachedCompanies, name) {
   return cachedCompanies.get(name.toLowerCase().trim()) ?? null
 }
 
-function buildCachedDealRow(userId, dealId, properties, row) {
+function buildCachedDealRow(userId, dealId, properties, row, existingCacheRow = null) {
   return {
     user_id: userId,
     hubspot_id: dealId,
     project_id: row.name,
     deal_name: properties.dealname ?? row.dealName,
-    deal_stage: properties.dealstage ?? null,
-    pipeline: properties.pipeline ?? null,
+    deal_stage: properties.dealstage ?? existingCacheRow?.deal_stage ?? null,
+    pipeline: properties.pipeline ?? existingCacheRow?.pipeline ?? null,
     total_estimates: row.estimatedRevenue,
     accrual_revenue: row.accrualRevenue,
     amount: row.estimatedRevenue,
@@ -90,6 +90,14 @@ function logUpdatedDeal(jobId, details) {
     jobId,
     ...details,
   })
+}
+
+function stageMatches(cachedStageId, expectedStageId, incomingStatusLabel, stageLabelById) {
+  if (expectedStageId) return (cachedStageId || '') === expectedStageId
+  if (!incomingStatusLabel) return (cachedStageId || '') === ''
+
+  const cachedStageLabel = stageLabelById[cachedStageId || ''] || ''
+  return cachedStageLabel === incomingStatusLabel
 }
 
 // ── CSV error download ─────────────────────────────────────────────────────────
@@ -398,6 +406,7 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
     let pipelineLabelToId = {}
     let stagesByPipeline = {}
     let ownerNameToId = {}
+    let stageLabelById = {}
     try {
       const { pipelines, owners } = await fetchPipelinesAndOwners(session)
       for (const p of pipelines) {
@@ -406,6 +415,7 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
         stagesByPipeline[pKey] = {}
         for (const s of p.stages) {
           stagesByPipeline[pKey][s.label.toLowerCase().trim()] = s.id
+          stageLabelById[s.id] = s.label.toLowerCase().trim()
         }
       }
       for (const o of owners) {
@@ -448,7 +458,7 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
 
     try {
       const [dealRows, contactRows, companyRows] = await Promise.all([
-        fetchAllCacheRows('hs_cached_deals',    'hubspot_id, project_id, deal_stage, total_estimates, accrual_revenue, amount'),
+        fetchAllCacheRows('hs_cached_deals',    'hubspot_id, project_id, deal_stage, pipeline, total_estimates, accrual_revenue, amount'),
         fetchAllCacheRows('hs_cached_contacts', 'hubspot_id, first_name, last_name, company_hubspot_id'),
         fetchAllCacheRows('hs_cached_companies','hubspot_id, name'),
       ])
@@ -603,8 +613,9 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
         if (cachedDeal) {
           // ── Duplicate detection ───────────────────────────────────────────
           const expectedStageId = stagesByPipeline[pKey]?.[sKey] ?? ''
+          const stageUnchanged = stageMatches(cachedDeal.deal_stage, expectedStageId, sKey, stageLabelById)
           const unchanged =
-            (cachedDeal.deal_stage || '') === expectedStageId &&
+            stageUnchanged &&
             Math.abs((cachedDeal.total_estimates ?? 0) - row.estimatedRevenue) < 0.01 &&
             Math.abs((cachedDeal.accrual_revenue  ?? 0) - row.accrualRevenue)  < 0.01 &&
             Math.abs((cachedDeal.amount          ?? -1) - row.estimatedRevenue) < 0.01
@@ -616,7 +627,7 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
           } else {
             try {
               const changedFields = []
-              if ((cachedDeal.deal_stage || '') !== expectedStageId) changedFields.push('dealstage')
+              if (!stageUnchanged) changedFields.push('dealstage')
               if (Math.abs((cachedDeal.total_estimates ?? 0) - row.estimatedRevenue) >= 0.01) changedFields.push('total_estimates')
               if (Math.abs((cachedDeal.accrual_revenue ?? 0) - row.accrualRevenue) >= 0.01) changedFields.push('accrual_revenue')
               if (Math.abs((cachedDeal.amount ?? -1) - row.estimatedRevenue) >= 0.01) changedFields.push('amount')
@@ -646,7 +657,7 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
               await persistCachedDeal(
                 supabase,
                 cachedDeals,
-                buildCachedDealRow(session.user.id, cachedDeal.hubspot_id, properties, row)
+                buildCachedDealRow(session.user.id, cachedDeal.hubspot_id, properties, row, cachedDeal)
               )
             } catch (updateErr) {
               // 404: cached deal ID deleted/merged in HubSpot — drop stale entry
