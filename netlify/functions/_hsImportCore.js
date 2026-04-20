@@ -141,7 +141,10 @@ export async function runImportRows({
   skipIfRecent = false,
   importId: existingImportId = null,
 }) {
-  if (skipIfRecent) {
+  // If the caller already created an import row and passed its id, it has
+  // already decided this run should proceed. Re-checking recency here would
+  // see that fresh row and incorrectly short-circuit the import.
+  if (skipIfRecent && !existingImportId) {
     const { data: latestImport } = await supabase
       .from('hs_imports')
       .select('imported_at, filename')

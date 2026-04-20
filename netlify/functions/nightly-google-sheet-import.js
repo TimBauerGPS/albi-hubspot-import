@@ -1,8 +1,10 @@
 import { getAdminSupabase } from './_supabaseAdmin.js'
+import { notifyStaleGoogleSheetImports } from './_importAlerts.js'
 
 const APP_NAME = 'albi-hubspot-import'
 const ALLIED_COMPANY_NAME = 'Allied Restoration Services'
 const TIMEZONE = 'America/Los_Angeles'
+const STALE_IMPORT_MINUTES = 120
 
 function getPacificHour(date = new Date()) {
   return Number(new Intl.DateTimeFormat('en-US', {
@@ -38,12 +40,54 @@ async function dispatchBackground(path, payload) {
   }
 }
 
-export default async () => {
-  if (getPacificHour() !== 20) {
-    return new Response('Skipping outside 8pm Pacific window.', { status: 200 })
+async function markStaleGoogleSheetImports(supabase) {
+  const cutoff = new Date(Date.now() - STALE_IMPORT_MINUTES * 60 * 1000).toISOString()
+  const { data: staleRows, error } = await supabase
+    .from('hs_imports')
+    .select('id, user_id, filename, imported_at, error_count')
+    .like('filename', 'Google Sheet:%')
+    .eq('status', 'processing')
+    .lt('imported_at', cutoff)
+    .order('imported_at', { ascending: true })
+
+  if (error) throw error
+  if (!staleRows?.length) return []
+
+  for (const row of staleRows) {
+    const { error: updateError } = await supabase
+      .from('hs_imports')
+      .update({
+        status: 'error',
+        error_count: row.error_count > 0 ? row.error_count : 1,
+      })
+      .eq('id', row.id)
+
+    if (updateError) throw updateError
   }
 
+  return staleRows
+}
+
+export default async () => {
   const supabase = getAdminSupabase()
+  const staleRows = await markStaleGoogleSheetImports(supabase)
+
+  if (staleRows.length) {
+    try {
+      await notifyStaleGoogleSheetImports(staleRows)
+    } catch (err) {
+      console.error('[nightly-google-sheet-import] stale import alert failed', err.message)
+    }
+  }
+
+  if (getPacificHour() !== 20) {
+    return new Response(
+      staleRows.length
+        ? `Marked ${staleRows.length} stale Google Sheet import(s) as error. Skipping outside 8pm Pacific window.`
+        : 'Skipping outside 8pm Pacific window.',
+      { status: 200 }
+    )
+  }
 
   const [{ data: accessRows, error: accessError }, { data: memberRows, error: memberError }, { data: configRows, error: configError }] = await Promise.all([
     supabase.from('user_app_access').select('user_id').eq('app_name', APP_NAME),
@@ -76,7 +120,10 @@ export default async () => {
   const queued = results.filter(r => r.status === 'fulfilled').length
   const failed = results.length - queued
 
-  return new Response(`Queued ${queued} nightly Google Sheet import(s); ${failed} failed.`, { status: 200 })
+  return new Response(
+    `${staleRows.length ? `Marked ${staleRows.length} stale Google Sheet import(s) as error. ` : ''}Queued ${queued} nightly Google Sheet import(s); ${failed} failed.`,
+    { status: 200 }
+  )
 }
 
 export const config = {

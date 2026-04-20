@@ -1,6 +1,7 @@
 import { getHubspotKey, jsonResponse } from './_getHubspotKey.js'
 import { fetchGoogleSheetValues } from './_googleSheets.js'
 import { runImportRows } from './_hsImportCore.js'
+import { notifyGoogleSheetImportError } from './_importAlerts.js'
 import { getAdminSupabase, getUserContextById, isInternalJobRequest } from './_supabaseAdmin.js'
 import { parseAlbiSheetValues } from '../../src/lib/parseCSV.js'
 
@@ -67,9 +68,17 @@ export const handler = async (event) => {
 
   const body = JSON.parse(event.body || '{}')
   let importId = null
+  let alertContext = {}
 
   try {
     const ctx = await resolveUserRequestContext(event, body)
+    alertContext = {
+      userId: ctx.userId,
+      companyName: ctx.companyName,
+      sheetUrl: ctx.sheetUrl,
+      internal: ctx.internal,
+      skipIfRecent: ctx.skipIfRecent,
+    }
 
     if (ctx.companyName !== ALLIED_COMPANY_NAME) {
       return jsonResponse(403, { error: 'Google Sheet import is only enabled for Allied Restoration Services.' })
@@ -129,6 +138,25 @@ export const handler = async (event) => {
         .update({ status: 'error', error_count: 1 })
         .eq('id', importId)
 
+      try {
+        await notifyGoogleSheetImportError({
+          importId,
+          userId: ctx.userId,
+          companyName: ctx.companyName,
+          sheetUrl: ctx.sheetUrl,
+          message: `Missing required columns: ${parsed.missingColumns.join(', ')}`,
+          details: {
+            missingColumns: parsed.missingColumns,
+            internal: ctx.internal,
+          },
+        })
+      } catch (notifyErr) {
+        console.error('[gs-import] alert send failed', {
+          importId,
+          error: notifyErr.message,
+        })
+      }
+
       return jsonResponse(400, {
         error: `Missing required columns: ${parsed.missingColumns.join(', ')}`,
       })
@@ -174,6 +202,24 @@ export const handler = async (event) => {
       } catch {
         // Best effort so the UI can show progress/failure for queued imports.
       }
+    }
+    try {
+      await notifyGoogleSheetImportError({
+        importId,
+        userId: alertContext.userId,
+        companyName: alertContext.companyName,
+        sheetUrl: alertContext.sheetUrl,
+        message: err.message,
+        details: {
+          internal: alertContext.internal,
+          skipIfRecent: alertContext.skipIfRecent,
+        },
+      })
+    } catch (notifyErr) {
+      console.error('[gs-import] alert send failed', {
+        importId,
+        error: notifyErr.message,
+      })
     }
     return jsonResponse(500, { error: err.message })
   }
