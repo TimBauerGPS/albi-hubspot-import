@@ -277,6 +277,7 @@ export async function runImportRows({
       let hubspotDealId = null
       let action = 'error'
       let errorMsg = null
+      let madeHubspotCall = false
 
       try {
         const properties = {
@@ -350,6 +351,7 @@ export async function runImportRows({
               if (Math.abs((cachedDeal.accrual_revenue ?? 0) - row.accrualRevenue) >= 0.01) changedFields.push('accrual_revenue')
               if (Math.abs((cachedDeal.amount ?? -1) - row.estimatedRevenue) >= 0.01) changedFields.push('amount')
 
+              madeHubspotCall = true
               await withRetry(() => updateDeal(cachedDeal.hubspot_id, properties, apiKey))
               hubspotDealId = cachedDeal.hubspot_id
               action = 'updated'
@@ -389,33 +391,27 @@ export async function runImportRows({
             const wasHeld = heldQueueMap.has(row.name)
             let associationAdded = false
 
-            if (row.isGoogleLead && resolvedCompanyId) {
+            if (resolvedContactId) {
               try {
-                await withRetry(() => associateDeal(cachedDeal.hubspot_id, 'companies', resolvedCompanyId, apiKey))
+                madeHubspotCall = true
+                await withRetry(() => associateDeal(cachedDeal.hubspot_id, 'contacts', resolvedContactId, apiKey))
+                associationAdded = true
               } catch (assocErr) {
-                console.warn(`Google association failed for ${row.name}:`, assocErr.message)
+                console.warn(`Contact association failed for ${row.name}:`, assocErr.message)
+              }
+            }
+
+            if (resolvedCompanyId) {
+              try {
+                madeHubspotCall = true
+                await withRetry(() => associateDeal(cachedDeal.hubspot_id, 'companies', resolvedCompanyId, apiKey))
+                associationAdded = true
+              } catch (assocErr) {
+                console.warn(`Company association failed for ${row.name}:`, assocErr.message)
               }
             }
 
             if (wasHeld) {
-              if (resolvedContactId) {
-                try {
-                  await withRetry(() => associateDeal(cachedDeal.hubspot_id, 'contacts', resolvedContactId, apiKey))
-                  associationAdded = true
-                } catch (assocErr) {
-                  console.warn(`Contact association failed for ${row.name}:`, assocErr.message)
-                }
-              }
-
-              if (resolvedCompanyId) {
-                try {
-                  await withRetry(() => associateDeal(cachedDeal.hubspot_id, 'companies', resolvedCompanyId, apiKey))
-                  associationAdded = true
-                } catch (assocErr) {
-                  console.warn(`Company association failed for ${row.name}:`, assocErr.message)
-                }
-              }
-
               if (action === 'skipped' && associationAdded) {
                 action = 'updated'
                 skipped--
@@ -476,6 +472,7 @@ export async function runImportRows({
 
             let resolvedDealId
             try {
+              madeHubspotCall = true
               const newDeal = await withRetry(() => createDeal(properties, associations, apiKey))
               resolvedDealId = newDeal.id
               action = 'created'
@@ -485,11 +482,14 @@ export async function runImportRows({
               if (!match) throw createErr
 
               resolvedDealId = match[1]
+              madeHubspotCall = true
               await withRetry(() => updateDeal(resolvedDealId, properties, apiKey))
               if (resolvedContactId) {
+                madeHubspotCall = true
                 await withRetry(() => associateDeal(resolvedDealId, 'contacts', resolvedContactId, apiKey))
               }
               if (resolvedCompanyId) {
+                madeHubspotCall = true
                 await withRetry(() => associateDeal(resolvedDealId, 'companies', resolvedCompanyId, apiKey))
               }
               action = 'updated'
@@ -545,7 +545,7 @@ export async function runImportRows({
         })
       }
 
-      return action === 'created' || action === 'updated' || action === 'error'
+      return madeHubspotCall || action === 'created' || action === 'updated' || action === 'error'
     }, {
       batchSize: 10,
       delayMs: 1100,

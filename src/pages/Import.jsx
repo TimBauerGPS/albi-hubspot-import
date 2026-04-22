@@ -544,6 +544,7 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
       let hubspotDealId = null
       let action = 'error'
       let errorMsg = null
+      let madeHubspotCall = false
 
       try {
         // ── Build HubSpot properties ──────────────────────────────────────────
@@ -632,6 +633,7 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
               if (Math.abs((cachedDeal.accrual_revenue ?? 0) - row.accrualRevenue) >= 0.01) changedFields.push('accrual_revenue')
               if (Math.abs((cachedDeal.amount ?? -1) - row.estimatedRevenue) >= 0.01) changedFields.push('amount')
 
+              madeHubspotCall = true
               await withRetry(() => updateDeal(cachedDeal.hubspot_id, properties, session))
               hubspotDealId = cachedDeal.hubspot_id
               action = 'updated'
@@ -677,35 +679,29 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
             const wasHeld = heldQueueMap.has(row.name)
             let associationAdded = false
 
-            // Google leads: always ensure the company association exists.
-            // associateDeal is idempotent in HubSpot, so we do not treat a
-            // successful call here as an "updated" row count.
-            if (row.isGoogleLead && resolvedCompanyId) {
+            // Referrer associations are idempotent in HubSpot, so successful
+            // calls do not by themselves turn a skipped row into an update.
+            if (resolvedContactId) {
               try {
-                await withRetry(() => associateDeal(cachedDeal.hubspot_id, 'companies', resolvedCompanyId, session))
+                madeHubspotCall = true
+                await withRetry(() => associateDeal(cachedDeal.hubspot_id, 'contacts', resolvedContactId, session))
+                associationAdded = true
               } catch (assocErr) {
-                console.warn(`[Import] Google company association failed for ${row.name}:`, assocErr.message)
+                console.warn(`[Import] Contact association failed for ${row.name}:`, assocErr.message)
+              }
+            }
+
+            if (resolvedCompanyId) {
+              try {
+                madeHubspotCall = true
+                await withRetry(() => associateDeal(cachedDeal.hubspot_id, 'companies', resolvedCompanyId, session))
+                associationAdded = true
+              } catch (assocErr) {
+                console.warn(`[Import] Company association failed for ${row.name}:`, assocErr.message)
               }
             }
 
             if (wasHeld) {
-              // Wrap each call so a failure doesn't abort held deal resolution.
-              if (resolvedContactId) {
-                try {
-                  await withRetry(() => associateDeal(cachedDeal.hubspot_id, 'contacts', resolvedContactId, session))
-                  associationAdded = true
-                } catch (assocErr) {
-                  console.warn(`[Import] Contact association failed for ${row.name}:`, assocErr.message)
-                }
-              }
-              if (resolvedCompanyId) {
-                try {
-                  await withRetry(() => associateDeal(cachedDeal.hubspot_id, 'companies', resolvedCompanyId, session))
-                  associationAdded = true
-                } catch (assocErr) {
-                  console.warn(`[Import] Company association failed for ${row.name}:`, assocErr.message)
-                }
-              }
               if (action === 'skipped' && associationAdded) {
                 action = 'updated'; skipped--; updated++
                 updateReasons.held_association++
@@ -765,6 +761,7 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
 
             let resolvedDealId
             try {
+              madeHubspotCall = true
               const { deal: newDeal } = await withRetry(() =>
                 createDeal(properties, associations, session)
               )
@@ -779,13 +776,16 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
               if (!match) throw createErr  // non-recoverable — rethrow to outer catch
 
               resolvedDealId = match[1]
+              madeHubspotCall = true
               await withRetry(() => updateDeal(resolvedDealId, properties, session))
               // associations were bundled into the create attempt; apply them
               // separately on the existing deal (associateDeal is idempotent)
               if (resolvedContactId) {
+                madeHubspotCall = true
                 await withRetry(() => associateDeal(resolvedDealId, 'contacts', resolvedContactId, session))
               }
               if (resolvedCompanyId) {
+                madeHubspotCall = true
                 await withRetry(() => associateDeal(resolvedDealId, 'companies', resolvedCompanyId, session))
               }
               action = 'updated'
@@ -848,8 +848,8 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
 
       // Signal whether a HubSpot API call was made this row.
       // rateLimiter only inserts the 1.1s delay when at least one row in a batch returns true.
-      // Skipped and held rows return false so all-skip/all-held batches are instant.
-      return action === 'created' || action === 'updated' || action === 'error'
+      // Skipped/held rows only return true when they still made an association or error call.
+      return madeHubspotCall || action === 'created' || action === 'updated' || action === 'error'
     }, {
       batchSize: 10,
       delayMs: 1100,
