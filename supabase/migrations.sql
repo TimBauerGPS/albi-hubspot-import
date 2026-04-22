@@ -168,15 +168,17 @@ CREATE TABLE IF NOT EXISTS hs_cached_deals (
   pipeline        text,
   total_estimates numeric,           -- Cached for local duplicate detection
   accrual_revenue numeric,           -- Cached for local duplicate detection
+  amount          numeric,           -- Cached for local duplicate detection
   synced_at       timestamptz NOT NULL DEFAULT now(),
 
   UNIQUE (user_id, hubspot_id)
 );
 
 -- ⚠ If hs_cached_deals already exists (table was created before this column was added),
--- run these two ALTER statements manually in the Supabase SQL editor:
+-- run these ALTER statements manually in the Supabase SQL editor:
 ALTER TABLE hs_cached_deals ADD COLUMN IF NOT EXISTS total_estimates numeric;
 ALTER TABLE hs_cached_deals ADD COLUMN IF NOT EXISTS accrual_revenue numeric;
+ALTER TABLE hs_cached_deals ADD COLUMN IF NOT EXISTS amount numeric;
 
 -- RLS for cache tables
 ALTER TABLE hs_cached_contacts ENABLE ROW LEVEL SECURITY;

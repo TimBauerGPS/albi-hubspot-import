@@ -94,10 +94,13 @@ function logUpdatedDeal(jobId, details) {
 
 function stageMatches(cachedStageId, expectedStageId, incomingStatusLabel, stageLabelById) {
   if (expectedStageId) return (cachedStageId || '') === expectedStageId
-  if (!incomingStatusLabel) return (cachedStageId || '') === ''
+  return true
+}
 
-  const cachedStageLabel = stageLabelById[cachedStageId || ''] || ''
-  return cachedStageLabel === incomingStatusLabel
+function numericDiffers(cachedValue, incomingValue, missingFallback = 0) {
+  const cachedNumber = Number(cachedValue)
+  const comparableCached = Number.isFinite(cachedNumber) ? cachedNumber : missingFallback
+  return Math.abs(comparableCached - incomingValue) >= 0.01
 }
 
 // ── CSV error download ─────────────────────────────────────────────────────────
@@ -615,11 +618,14 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
           // ── Duplicate detection ───────────────────────────────────────────
           const expectedStageId = stagesByPipeline[pKey]?.[sKey] ?? ''
           const stageUnchanged = stageMatches(cachedDeal.deal_stage, expectedStageId, sKey, stageLabelById)
+          const totalEstimatesChanged = numericDiffers(cachedDeal.total_estimates, row.estimatedRevenue)
+          const accrualRevenueChanged = numericDiffers(cachedDeal.accrual_revenue, row.accrualRevenue)
+          const amountChanged = numericDiffers(cachedDeal.amount, row.estimatedRevenue)
           const unchanged =
             stageUnchanged &&
-            Math.abs((cachedDeal.total_estimates ?? 0) - row.estimatedRevenue) < 0.01 &&
-            Math.abs((cachedDeal.accrual_revenue  ?? 0) - row.accrualRevenue)  < 0.01 &&
-            Math.abs((cachedDeal.amount          ?? -1) - row.estimatedRevenue) < 0.01
+            !totalEstimatesChanged &&
+            !accrualRevenueChanged &&
+            !amountChanged
 
           if (unchanged) {
             hubspotDealId = cachedDeal.hubspot_id
@@ -629,9 +635,9 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
             try {
               const changedFields = []
               if (!stageUnchanged) changedFields.push('dealstage')
-              if (Math.abs((cachedDeal.total_estimates ?? 0) - row.estimatedRevenue) >= 0.01) changedFields.push('total_estimates')
-              if (Math.abs((cachedDeal.accrual_revenue ?? 0) - row.accrualRevenue) >= 0.01) changedFields.push('accrual_revenue')
-              if (Math.abs((cachedDeal.amount ?? -1) - row.estimatedRevenue) >= 0.01) changedFields.push('amount')
+              if (totalEstimatesChanged) changedFields.push('total_estimates')
+              if (accrualRevenueChanged) changedFields.push('accrual_revenue')
+              if (amountChanged) changedFields.push('amount')
 
               madeHubspotCall = true
               await withRetry(() => updateDeal(cachedDeal.hubspot_id, properties, session))

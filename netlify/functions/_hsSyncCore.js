@@ -6,6 +6,12 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
+function parseHubspotNumber(value) {
+  if (value == null || value === '') return null
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
 async function fetchAll(apiKey, objectType, properties, filterGroups = []) {
   const all = []
   let after
@@ -123,9 +129,9 @@ export async function runHubspotSync({ supabase, userId, apiKey, skipIfRecent = 
         deal_name: d.properties.dealname || null,
         deal_stage: d.properties.dealstage || null,
         pipeline: d.properties.pipeline || null,
-        total_estimates: d.properties.total_estimates != null ? parseFloat(d.properties.total_estimates) : null,
-        accrual_revenue: d.properties.accrual_revenue != null ? parseFloat(d.properties.accrual_revenue) : null,
-        amount: d.properties.amount != null ? parseFloat(d.properties.amount) : null,
+        total_estimates: parseHubspotNumber(d.properties.total_estimates),
+        accrual_revenue: parseHubspotNumber(d.properties.accrual_revenue),
+        amount: parseHubspotNumber(d.properties.amount),
         synced_at: syncedAt,
       }))
 
