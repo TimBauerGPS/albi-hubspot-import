@@ -129,6 +129,7 @@ export function parseAlbiRecords(data, headers = [], userConfig = {}) {
 
   let excludedCount = 0
   let filteredCount = 0
+  let noReferrerCount = 0
   const rows = []
   const unmappedSuffixes = new Set()
 
@@ -150,6 +151,10 @@ export function parseAlbiRecords(data, headers = [], userConfig = {}) {
 
     const referrer = get('referrer')
     const salesPerson = get('salesPerson')
+    if (!referrer) {
+      noReferrerCount++
+      return
+    }
 
     if (salesTeamNames.size > 0) {
       const spInTeam = salesTeamNames.has(salesPerson.toLowerCase())
@@ -196,6 +201,7 @@ export function parseAlbiRecords(data, headers = [], userConfig = {}) {
     missingColumns,
     excludedCount,
     filteredCount,
+    noReferrerCount,
     unmappedSuffixes: [...unmappedSuffixes],
   }
 }
@@ -226,6 +232,7 @@ export function parseAlbiSheetValues(values, userConfig = {}, linkMap = []) {
  *  - Skips blank Name rows
  *  - Skips rows matching excluded suffixes (substring match)
  *  - Skips rows matching the blacklist
+ *  - Skips rows with no Referrer; these never reach HubSpot create/update or import tracking
  *  - Skips rows where Sales Person is not in the configured team AND referrer is not a Google lead
  *  - Rows with a referrer but no HubSpot contact/company match go into unmatchedReferrers
  *    (handled during import, not parse — we just pass the referrer through here)

@@ -54,7 +54,7 @@ export default function CSVUploader({ userConfig, onConfirm, disabled }) {
   const inputRef = useRef(null)
   const [dragging, setDragging] = useState(false)
   const [parsing, setParsing] = useState(false)
-  const [result, setResult] = useState(null) // { rows, missingColumns, excludedCount, filename }
+  const [result, setResult] = useState(null) // { rows, missingColumns, excludedCount, filteredCount, noReferrerCount, filename }
   const [error, setError] = useState(null)
 
   async function processFile(file) {
@@ -68,8 +68,8 @@ export default function CSVUploader({ userConfig, onConfirm, disabled }) {
     setResult(null)
 
     try {
-      const { rows, missingColumns, excludedCount, filteredCount, unmappedSuffixes } = await parseAlbiCSV(file, userConfig)
-      setResult({ rows, missingColumns, excludedCount, filteredCount, unmappedSuffixes, filename: file.name })
+      const { rows, missingColumns, excludedCount, filteredCount, noReferrerCount, unmappedSuffixes } = await parseAlbiCSV(file, userConfig)
+      setResult({ rows, missingColumns, excludedCount, filteredCount, noReferrerCount, unmappedSuffixes, filename: file.name })
     } catch (err) {
       setError('Failed to parse CSV: ' + err.message)
     }
@@ -160,6 +160,7 @@ export default function CSVUploader({ userConfig, onConfirm, disabled }) {
                 <p className="text-xs text-gray-500">
                   {result.rows.length} rows to import
                   {result.excludedCount > 0 && ` · ${result.excludedCount} excluded by suffix/blacklist`}
+                  {result.noReferrerCount > 0 && ` · ${result.noReferrerCount} skipped without referrer`}
                   {result.filteredCount > 0 && ` · ${result.filteredCount} filtered (not your team's jobs)`}
                 </p>
               </div>

@@ -178,6 +178,7 @@ export const handler = async (event) => {
       importId,
       userId: ctx.userId,
       summary: result.summary,
+      noReferrerCount: parsed.noReferrerCount,
     })
 
     return jsonResponse(200, {
@@ -186,6 +187,7 @@ export const handler = async (event) => {
       spreadsheetTitle: sheet.spreadsheetTitle,
       filteredCount: parsed.filteredCount,
       excludedCount: parsed.excludedCount,
+      noReferrerCount: parsed.noReferrerCount,
     })
   } catch (err) {
     console.error('[gs-import] import failed', {
