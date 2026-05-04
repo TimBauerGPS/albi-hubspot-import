@@ -591,6 +591,8 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
             resolvedCompanyId = companyId || null
           }
         }
+        const hasUnmatchedReferrer =
+          row.referrer && !row.isGoogleLead && !resolvedContactId && !resolvedCompanyId
 
         // ── Google leads: find or create the matching HubSpot company ─────────
         // If the cache has no match, create the company in HubSpot and add it
@@ -615,68 +617,82 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
         let createFallback = false
 
         if (cachedDeal) {
-          // ── Duplicate detection ───────────────────────────────────────────
-          const expectedStageId = stagesByPipeline[pKey]?.[sKey] ?? ''
-          const stageUnchanged = stageMatches(cachedDeal.deal_stage, expectedStageId, sKey, stageLabelById)
-          const totalEstimatesChanged = numericDiffers(cachedDeal.total_estimates, row.estimatedRevenue)
-          const accrualRevenueChanged = numericDiffers(cachedDeal.accrual_revenue, row.accrualRevenue)
-          const amountChanged = numericDiffers(cachedDeal.amount, row.estimatedRevenue)
-          const unchanged =
-            stageUnchanged &&
-            !totalEstimatesChanged &&
-            !accrualRevenueChanged &&
-            !amountChanged
-
-          if (unchanged) {
+          if (hasUnmatchedReferrer) {
             hubspotDealId = cachedDeal.hubspot_id
             action = 'skipped'
             skipped++
-          } else {
-            try {
-              const changedFields = []
-              if (!stageUnchanged) changedFields.push('dealstage')
-              if (totalEstimatesChanged) changedFields.push('total_estimates')
-              if (accrualRevenueChanged) changedFields.push('accrual_revenue')
-              if (amountChanged) changedFields.push('amount')
 
-              madeHubspotCall = true
-              await withRetry(() => updateDeal(cachedDeal.hubspot_id, properties, session))
+            if (heldQueueMap.has(row.name)) {
+              await supabase
+                .from('hs_held_deals')
+                .update({ resolved_at: new Date().toISOString(), resolved_deal_id: hubspotDealId })
+                .eq('user_id', session.user.id)
+                .eq('job_id', row.name)
+            }
+          } else {
+            // ── Duplicate detection ───────────────────────────────────────────
+            const expectedStageId = stagesByPipeline[pKey]?.[sKey] ?? ''
+            const stageUnchanged = stageMatches(cachedDeal.deal_stage, expectedStageId, sKey, stageLabelById)
+            const totalEstimatesChanged = numericDiffers(cachedDeal.total_estimates, row.estimatedRevenue)
+            const accrualRevenueChanged = numericDiffers(cachedDeal.accrual_revenue, row.accrualRevenue)
+            const amountChanged = numericDiffers(cachedDeal.amount, row.estimatedRevenue)
+            const unchanged =
+              stageUnchanged &&
+              !totalEstimatesChanged &&
+              !accrualRevenueChanged &&
+              !amountChanged
+
+            if (unchanged) {
               hubspotDealId = cachedDeal.hubspot_id
-              action = 'updated'
-              updated++
-              updateReasons.field_diff++
-              logUpdatedDeal(row.name, {
-                reason: 'field_diff',
-                hubspotDealId,
-                changedFields,
-                cached: {
-                  dealstage: cachedDeal.deal_stage || '',
-                  total_estimates: cachedDeal.total_estimates ?? null,
-                  accrual_revenue: cachedDeal.accrual_revenue ?? null,
-                  amount: cachedDeal.amount ?? null,
-                },
-                incoming: {
-                  dealstage: expectedStageId,
-                  total_estimates: row.estimatedRevenue,
-                  accrual_revenue: row.accrualRevenue,
-                  amount: row.estimatedRevenue,
-                },
-              })
-              await persistCachedDeal(
-                supabase,
-                cachedDeals,
-                buildCachedDealRow(session.user.id, cachedDeal.hubspot_id, properties, row, cachedDeal)
-              )
-            } catch (updateErr) {
-              // 404: cached deal ID deleted/merged in HubSpot — drop stale entry
-              // and let the create path handle it (with its own 400 recovery).
-              if (!updateErr.message.includes('404')) throw updateErr
-              cachedDeals.delete(row.name)
-              createFallback = true
+              action = 'skipped'
+              skipped++
+            } else {
+              try {
+                const changedFields = []
+                if (!stageUnchanged) changedFields.push('dealstage')
+                if (totalEstimatesChanged) changedFields.push('total_estimates')
+                if (accrualRevenueChanged) changedFields.push('accrual_revenue')
+                if (amountChanged) changedFields.push('amount')
+
+                madeHubspotCall = true
+                await withRetry(() => updateDeal(cachedDeal.hubspot_id, properties, session))
+                hubspotDealId = cachedDeal.hubspot_id
+                action = 'updated'
+                updated++
+                updateReasons.field_diff++
+                logUpdatedDeal(row.name, {
+                  reason: 'field_diff',
+                  hubspotDealId,
+                  changedFields,
+                  cached: {
+                    dealstage: cachedDeal.deal_stage || '',
+                    total_estimates: cachedDeal.total_estimates ?? null,
+                    accrual_revenue: cachedDeal.accrual_revenue ?? null,
+                    amount: cachedDeal.amount ?? null,
+                  },
+                  incoming: {
+                    dealstage: expectedStageId,
+                    total_estimates: row.estimatedRevenue,
+                    accrual_revenue: row.accrualRevenue,
+                    amount: row.estimatedRevenue,
+                  },
+                })
+                await persistCachedDeal(
+                  supabase,
+                  cachedDeals,
+                  buildCachedDealRow(session.user.id, cachedDeal.hubspot_id, properties, row, cachedDeal)
+                )
+              } catch (updateErr) {
+                // 404: cached deal ID deleted/merged in HubSpot — drop stale entry
+                // and let the create path handle it (with its own 400 recovery).
+                if (!updateErr.message.includes('404')) throw updateErr
+                cachedDeals.delete(row.name)
+                createFallback = true
+              }
             }
           }
 
-          if (!createFallback) {
+          if (!createFallback && !hasUnmatchedReferrer) {
             // ── Retroactive association linking ─────────────────────────────
             // Only link (and count as an update) when resolving a previously held
             // deal. Deals created with associations already have them; re-calling
@@ -731,9 +747,6 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
 
         if (!cachedDeal || createFallback) {
           // ── Create new deal — or hold if referrer is unmatched ────────────
-          const hasUnmatchedReferrer =
-            row.referrer && !row.isGoogleLead && !resolvedContactId && !resolvedCompanyId
-
           if (hasUnmatchedReferrer) {
             await supabase.from('hs_held_deals').upsert({
               user_id: session.user.id,

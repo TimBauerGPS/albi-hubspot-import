@@ -319,6 +319,8 @@ export async function runImportRows({
             resolvedCompanyId = findCachedCompany(cachedCompanies, row.referrer) || null
           }
         }
+        const hasUnmatchedReferrer =
+          row.referrer && !row.isGoogleLead && !resolvedContactId && !resolvedCompanyId
 
         if (row.isGoogleLead && row.referrer && !resolvedCompanyId) {
           try {
@@ -334,66 +336,80 @@ export async function runImportRows({
         let createFallback = false
 
         if (cachedDeal) {
-          const expectedStageId = stagesByPipeline[pKey]?.[sKey] ?? ''
-          const stageUnchanged = stageMatches(cachedDeal.deal_stage, expectedStageId, sKey, stageLabelById)
-          const totalEstimatesChanged = numericDiffers(cachedDeal.total_estimates, row.estimatedRevenue)
-          const accrualRevenueChanged = numericDiffers(cachedDeal.accrual_revenue, row.accrualRevenue)
-          const amountChanged = numericDiffers(cachedDeal.amount, row.estimatedRevenue)
-          const unchanged =
-            stageUnchanged &&
-            !totalEstimatesChanged &&
-            !accrualRevenueChanged &&
-            !amountChanged
-
-          if (unchanged) {
+          if (hasUnmatchedReferrer) {
             hubspotDealId = cachedDeal.hubspot_id
             action = 'skipped'
             skipped++
-          } else {
-            try {
-              const changedFields = []
-              if (!stageUnchanged) changedFields.push('dealstage')
-              if (totalEstimatesChanged) changedFields.push('total_estimates')
-              if (accrualRevenueChanged) changedFields.push('accrual_revenue')
-              if (amountChanged) changedFields.push('amount')
 
-              madeHubspotCall = true
-              await withRetry(() => updateDeal(cachedDeal.hubspot_id, properties, apiKey))
+            if (heldQueueMap.has(row.name)) {
+              await supabase
+                .from('hs_held_deals')
+                .update({ resolved_at: new Date().toISOString(), resolved_deal_id: hubspotDealId })
+                .eq('user_id', userId)
+                .eq('job_id', row.name)
+            }
+          } else {
+            const expectedStageId = stagesByPipeline[pKey]?.[sKey] ?? ''
+            const stageUnchanged = stageMatches(cachedDeal.deal_stage, expectedStageId, sKey, stageLabelById)
+            const totalEstimatesChanged = numericDiffers(cachedDeal.total_estimates, row.estimatedRevenue)
+            const accrualRevenueChanged = numericDiffers(cachedDeal.accrual_revenue, row.accrualRevenue)
+            const amountChanged = numericDiffers(cachedDeal.amount, row.estimatedRevenue)
+            const unchanged =
+              stageUnchanged &&
+              !totalEstimatesChanged &&
+              !accrualRevenueChanged &&
+              !amountChanged
+
+            if (unchanged) {
               hubspotDealId = cachedDeal.hubspot_id
-              action = 'updated'
-              updated++
-              updateReasons.field_diff++
-              logUpdatedDeal(row.name, {
-                reason: 'field_diff',
-                hubspotDealId,
-                changedFields,
-                cached: {
-                  dealstage: cachedDeal.deal_stage || '',
-                  total_estimates: cachedDeal.total_estimates ?? null,
-                  accrual_revenue: cachedDeal.accrual_revenue ?? null,
-                  amount: cachedDeal.amount ?? null,
-                },
-                incoming: {
-                  dealstage: expectedStageId,
-                  total_estimates: row.estimatedRevenue,
-                  accrual_revenue: row.accrualRevenue,
-                  amount: row.estimatedRevenue,
-                },
-              })
-              await persistCachedDeal(
-                supabase,
-                cachedDeals,
-                userId,
-                buildCachedDealRow(userId, cachedDeal.hubspot_id, properties, row, cachedDeal)
-              )
-            } catch (updateErr) {
-              if (!updateErr.message.includes('404')) throw updateErr
-              cachedDeals.delete(row.name)
-              createFallback = true
+              action = 'skipped'
+              skipped++
+            } else {
+              try {
+                const changedFields = []
+                if (!stageUnchanged) changedFields.push('dealstage')
+                if (totalEstimatesChanged) changedFields.push('total_estimates')
+                if (accrualRevenueChanged) changedFields.push('accrual_revenue')
+                if (amountChanged) changedFields.push('amount')
+
+                madeHubspotCall = true
+                await withRetry(() => updateDeal(cachedDeal.hubspot_id, properties, apiKey))
+                hubspotDealId = cachedDeal.hubspot_id
+                action = 'updated'
+                updated++
+                updateReasons.field_diff++
+                logUpdatedDeal(row.name, {
+                  reason: 'field_diff',
+                  hubspotDealId,
+                  changedFields,
+                  cached: {
+                    dealstage: cachedDeal.deal_stage || '',
+                    total_estimates: cachedDeal.total_estimates ?? null,
+                    accrual_revenue: cachedDeal.accrual_revenue ?? null,
+                    amount: cachedDeal.amount ?? null,
+                  },
+                  incoming: {
+                    dealstage: expectedStageId,
+                    total_estimates: row.estimatedRevenue,
+                    accrual_revenue: row.accrualRevenue,
+                    amount: row.estimatedRevenue,
+                  },
+                })
+                await persistCachedDeal(
+                  supabase,
+                  cachedDeals,
+                  userId,
+                  buildCachedDealRow(userId, cachedDeal.hubspot_id, properties, row, cachedDeal)
+                )
+              } catch (updateErr) {
+                if (!updateErr.message.includes('404')) throw updateErr
+                cachedDeals.delete(row.name)
+                createFallback = true
+              }
             }
           }
 
-          if (!createFallback) {
+          if (!createFallback && !hasUnmatchedReferrer) {
             const wasHeld = heldQueueMap.has(row.name)
             let associationAdded = false
 
@@ -441,9 +457,6 @@ export async function runImportRows({
         }
 
         if (!cachedDeal || createFallback) {
-          const hasUnmatchedReferrer =
-            row.referrer && !row.isGoogleLead && !resolvedContactId && !resolvedCompanyId
-
           if (hasUnmatchedReferrer) {
             await supabase.from('hs_held_deals').upsert({
               user_id: userId,
