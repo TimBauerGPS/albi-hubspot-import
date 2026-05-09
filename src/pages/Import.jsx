@@ -4,7 +4,7 @@ import { supabase } from '../lib/supabase'
 import {
   createDeal,
   updateDeal,
-  associateDeal,
+  syncDealReferrerAssociations,
   createCompany,
   syncHubspotData,
   queueGoogleSheetImport,
@@ -508,6 +508,7 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
       field_diff: 0,
       google_association: 0,
       held_association: 0,
+      referrer_association: 0,
       duplicate_create_fallback: 0,
       held_duplicate_fallback: 0,
     }
@@ -692,49 +693,38 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
             }
           }
 
-          if (!createFallback && !hasUnmatchedReferrer) {
-            // ── Retroactive association linking ─────────────────────────────
-            // Only link (and count as an update) when resolving a previously held
-            // deal. Deals created with associations already have them; re-calling
-            // associateDeal every run is idempotent but incorrectly flips
-            // action from 'skipped' → 'updated' on every subsequent import.
+          if (!createFallback && row.referrer && !hasUnmatchedReferrer) {
+            // ── Referrer association sync ───────────────────────────────────
+            // The import row is the source of truth for the deal's referrer.
+            // Replace stale contact/company associations when the referrer changes.
             const wasHeld = heldQueueMap.has(row.name)
-            let associationAdded = false
+            madeHubspotCall = true
+            const associationSync = await withRetry(() =>
+              syncDealReferrerAssociations(
+                cachedDeal.hubspot_id,
+                resolvedContactId,
+                resolvedCompanyId,
+                session
+              )
+            )
 
-            // Referrer associations are idempotent in HubSpot, so successful
-            // calls do not by themselves turn a skipped row into an update.
-            if (resolvedContactId) {
-              try {
-                madeHubspotCall = true
-                await withRetry(() => associateDeal(cachedDeal.hubspot_id, 'contacts', resolvedContactId, session))
-                associationAdded = true
-              } catch (assocErr) {
-                console.warn(`[Import] Contact association failed for ${row.name}:`, assocErr.message)
+            if (associationSync.changed) {
+              if (action === 'skipped') {
+                action = 'updated'; skipped--; updated++
               }
-            }
 
-            if (resolvedCompanyId) {
-              try {
-                madeHubspotCall = true
-                await withRetry(() => associateDeal(cachedDeal.hubspot_id, 'companies', resolvedCompanyId, session))
-                associationAdded = true
-              } catch (assocErr) {
-                console.warn(`[Import] Company association failed for ${row.name}:`, assocErr.message)
-              }
+              const reason = wasHeld ? 'held_association' : 'referrer_association'
+              updateReasons[reason]++
+              logUpdatedDeal(row.name, {
+                reason,
+                hubspotDealId: cachedDeal.hubspot_id,
+                contactId: resolvedContactId,
+                companyId: resolvedCompanyId,
+                associationChanges: associationSync.changes,
+              })
             }
 
             if (wasHeld) {
-              if (action === 'skipped' && associationAdded) {
-                action = 'updated'; skipped--; updated++
-                updateReasons.held_association++
-                logUpdatedDeal(row.name, {
-                  reason: 'held_association',
-                  hubspotDealId: cachedDeal.hubspot_id,
-                  contactId: resolvedContactId,
-                  companyId: resolvedCompanyId,
-                })
-              }
-
               // Mark as resolved — runs regardless of association outcome.
               await supabase
                 .from('hs_held_deals')
@@ -797,16 +787,16 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
               resolvedDealId = match[1]
               madeHubspotCall = true
               await withRetry(() => updateDeal(resolvedDealId, properties, session))
-              // associations were bundled into the create attempt; apply them
-              // separately on the existing deal (associateDeal is idempotent)
-              if (resolvedContactId) {
-                madeHubspotCall = true
-                await withRetry(() => associateDeal(resolvedDealId, 'contacts', resolvedContactId, session))
-              }
-              if (resolvedCompanyId) {
-                madeHubspotCall = true
-                await withRetry(() => associateDeal(resolvedDealId, 'companies', resolvedCompanyId, session))
-              }
+              const associationSync = row.referrer
+                ? await withRetry(() =>
+                    syncDealReferrerAssociations(
+                      resolvedDealId,
+                      resolvedContactId,
+                      resolvedCompanyId,
+                      session
+                    )
+                  )
+                : { changes: [] }
               action = 'updated'
               updated++
               updateReasons.duplicate_create_fallback++
@@ -816,6 +806,7 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
                 matchedExistingDealId: resolvedDealId,
                 contactId: resolvedContactId,
                 companyId: resolvedCompanyId,
+                associationChanges: associationSync.changes,
               })
             }
 
@@ -934,8 +925,14 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
               if (!match) throw createErr
               resolvedHeldDealId = match[1]
               await withRetry(() => updateDeal(resolvedHeldDealId, heldDeal.properties_json || {}, session))
-              if (resolvedContactId) await withRetry(() => associateDeal(resolvedHeldDealId, 'contacts', resolvedContactId, session))
-              if (resolvedCompanyId) await withRetry(() => associateDeal(resolvedHeldDealId, 'companies', resolvedCompanyId, session))
+              const associationSync = await withRetry(() =>
+                syncDealReferrerAssociations(
+                  resolvedHeldDealId,
+                  resolvedContactId,
+                  resolvedCompanyId,
+                  session
+                )
+              )
               updated++
               updateReasons.held_duplicate_fallback++
               logUpdatedDeal(heldDeal.job_id, {
@@ -944,6 +941,7 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
                 matchedExistingDealId: resolvedHeldDealId,
                 contactId: resolvedContactId,
                 companyId: resolvedCompanyId,
+                associationChanges: associationSync.changes,
               })
             }
 

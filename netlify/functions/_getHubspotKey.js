@@ -141,3 +141,15 @@ export async function hsPut(path, apiKey) {
   }
   return res.status === 204 ? {} : res.json()
 }
+
+export async function hsDelete(path, apiKey) {
+  const res = await fetch(`${HS_BASE}${path}`, {
+    method: 'DELETE',
+    headers: hsHeaders(apiKey),
+  })
+  if (!res.ok && res.status !== 204) {
+    const text = await res.text()
+    throw new Error(`HubSpot ${res.status}: ${text}`)
+  }
+  return {}
+}

@@ -1,5 +1,5 @@
 import { processBatched, withRetry } from '../../src/lib/rateLimiter.js'
-import { hsGet, hsPatch, hsPost, hsPut } from './_getHubspotKey.js'
+import { hsDelete, hsGet, hsPatch, hsPost, hsPut } from './_getHubspotKey.js'
 
 function findCachedDeal(cachedDeals, projectId) {
   return cachedDeals.get(projectId) ?? null
@@ -81,6 +81,61 @@ async function updateDeal(dealId, properties, apiKey) {
 
 async function associateDeal(dealId, objectType, objectId, apiKey) {
   return hsPut(`/crm/v4/objects/deals/${dealId}/associations/default/${objectType}/${objectId}`, apiKey)
+}
+
+async function fetchDealAssociationIds(dealId, objectType, apiKey) {
+  const ids = []
+  let after = null
+
+  do {
+    const query = new URLSearchParams({ limit: '500' })
+    if (after) query.set('after', after)
+
+    const result = await hsGet(
+      `/crm/v4/objects/deals/${dealId}/associations/${objectType}?${query.toString()}`,
+      apiKey
+    )
+
+    for (const association of result.results || []) {
+      if (association.toObjectId) ids.push(String(association.toObjectId))
+    }
+
+    after = result.paging?.next?.after ?? null
+  } while (after)
+
+  return ids
+}
+
+async function deleteDealAssociation(dealId, objectType, objectId, apiKey) {
+  return hsDelete(`/crm/v4/objects/deals/${dealId}/associations/${objectType}/${objectId}`, apiKey)
+}
+
+async function syncDealReferrerAssociations(dealId, { contactId, companyId }, apiKey) {
+  const desiredByType = {
+    contacts: contactId ? String(contactId) : null,
+    companies: companyId ? String(companyId) : null,
+  }
+  const changes = []
+
+  for (const [objectType, desiredId] of Object.entries(desiredByType)) {
+    const currentIds = await fetchDealAssociationIds(dealId, objectType, apiKey)
+
+    for (const currentId of currentIds) {
+      if (currentId === desiredId) continue
+      await deleteDealAssociation(dealId, objectType, currentId, apiKey)
+      changes.push({ action: 'removed', objectType, objectId: currentId })
+    }
+
+    if (desiredId && !currentIds.includes(desiredId)) {
+      await associateDeal(dealId, objectType, desiredId, apiKey)
+      changes.push({ action: 'added', objectType, objectId: desiredId })
+    }
+  }
+
+  return {
+    changed: changes.length > 0,
+    changes,
+  }
 }
 
 async function createCompany(name, apiKey) {
@@ -272,6 +327,7 @@ export async function runImportRows({
       field_diff: 0,
       google_association: 0,
       held_association: 0,
+      referrer_association: 0,
       duplicate_create_fallback: 0,
       held_duplicate_fallback: 0,
     }
@@ -409,44 +465,36 @@ export async function runImportRows({
             }
           }
 
-          if (!createFallback && !hasUnmatchedReferrer) {
+          if (!createFallback && row.referrer && !hasUnmatchedReferrer) {
             const wasHeld = heldQueueMap.has(row.name)
-            let associationAdded = false
+            madeHubspotCall = true
+            const associationSync = await withRetry(() =>
+              syncDealReferrerAssociations(
+                cachedDeal.hubspot_id,
+                { contactId: resolvedContactId, companyId: resolvedCompanyId },
+                apiKey
+              )
+            )
 
-            if (resolvedContactId) {
-              try {
-                madeHubspotCall = true
-                await withRetry(() => associateDeal(cachedDeal.hubspot_id, 'contacts', resolvedContactId, apiKey))
-                associationAdded = true
-              } catch (assocErr) {
-                console.warn(`Contact association failed for ${row.name}:`, assocErr.message)
-              }
-            }
-
-            if (resolvedCompanyId) {
-              try {
-                madeHubspotCall = true
-                await withRetry(() => associateDeal(cachedDeal.hubspot_id, 'companies', resolvedCompanyId, apiKey))
-                associationAdded = true
-              } catch (assocErr) {
-                console.warn(`Company association failed for ${row.name}:`, assocErr.message)
-              }
-            }
-
-            if (wasHeld) {
-              if (action === 'skipped' && associationAdded) {
+            if (associationSync.changed) {
+              if (action === 'skipped') {
                 action = 'updated'
                 skipped--
                 updated++
-                updateReasons.held_association++
-                logUpdatedDeal(row.name, {
-                  reason: 'held_association',
-                  hubspotDealId: cachedDeal.hubspot_id,
-                  contactId: resolvedContactId,
-                  companyId: resolvedCompanyId,
-                })
               }
 
+              const reason = wasHeld ? 'held_association' : 'referrer_association'
+              updateReasons[reason]++
+              logUpdatedDeal(row.name, {
+                reason,
+                hubspotDealId: cachedDeal.hubspot_id,
+                contactId: resolvedContactId,
+                companyId: resolvedCompanyId,
+                associationChanges: associationSync.changes,
+              })
+            }
+
+            if (wasHeld) {
               await supabase
                 .from('hs_held_deals')
                 .update({ resolved_at: new Date().toISOString(), resolved_deal_id: hubspotDealId })
@@ -503,14 +551,15 @@ export async function runImportRows({
               resolvedDealId = match[1]
               madeHubspotCall = true
               await withRetry(() => updateDeal(resolvedDealId, properties, apiKey))
-              if (resolvedContactId) {
-                madeHubspotCall = true
-                await withRetry(() => associateDeal(resolvedDealId, 'contacts', resolvedContactId, apiKey))
-              }
-              if (resolvedCompanyId) {
-                madeHubspotCall = true
-                await withRetry(() => associateDeal(resolvedDealId, 'companies', resolvedCompanyId, apiKey))
-              }
+              const associationSync = row.referrer
+                ? await withRetry(() =>
+                    syncDealReferrerAssociations(
+                      resolvedDealId,
+                      { contactId: resolvedContactId, companyId: resolvedCompanyId },
+                      apiKey
+                    )
+                  )
+                : { changes: [] }
               action = 'updated'
               updated++
               updateReasons.duplicate_create_fallback++
@@ -520,6 +569,7 @@ export async function runImportRows({
                 matchedExistingDealId: resolvedDealId,
                 contactId: resolvedContactId,
                 companyId: resolvedCompanyId,
+                associationChanges: associationSync.changes,
               })
             }
 
@@ -621,8 +671,13 @@ export async function runImportRows({
 
             resolvedHeldDealId = match[1]
             await withRetry(() => updateDeal(resolvedHeldDealId, heldDeal.properties_json || {}, apiKey))
-            if (resolvedContactId) await withRetry(() => associateDeal(resolvedHeldDealId, 'contacts', resolvedContactId, apiKey))
-            if (resolvedCompanyId) await withRetry(() => associateDeal(resolvedHeldDealId, 'companies', resolvedCompanyId, apiKey))
+            const associationSync = await withRetry(() =>
+              syncDealReferrerAssociations(
+                resolvedHeldDealId,
+                { contactId: resolvedContactId, companyId: resolvedCompanyId },
+                apiKey
+              )
+            )
             updated++
             updateReasons.held_duplicate_fallback++
             logUpdatedDeal(heldDeal.job_id, {
@@ -631,6 +686,7 @@ export async function runImportRows({
               matchedExistingDealId: resolvedHeldDealId,
               contactId: resolvedContactId,
               companyId: resolvedCompanyId,
+              associationChanges: associationSync.changes,
             })
           }
 

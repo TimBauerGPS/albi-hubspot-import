@@ -40,6 +40,10 @@ export async function associateDeal(dealId, objectType, objectId, session) {
   return call('hs-associate', { dealId, objectType, objectId }, session)
 }
 
+export async function syncDealReferrerAssociations(dealId, contactId, companyId, session) {
+  return call('hs-sync-referrer-associations', { dealId, contactId, companyId }, session)
+}
+
 // Search by email, or by first+last name split from the Referrer field.
 // Returns { contactId, companyId } — the contact's associated HubSpot company
 // is included so Import.jsx can associate both with the deal in one pass.
