@@ -18,6 +18,14 @@ import { useEffect, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import AppShell from '../components/AppShell'
 
+function normalizeLookupKey(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim()
+}
+
 // ── Email-draft modal ─────────────────────────────────────────────────────────
 
 function EmailModal({ drafts, onClose }) {
@@ -225,10 +233,10 @@ export default function HeldDeals({ session, isAdmin, companyName }) {
   function handleEmailRequest() {
     if (heldDeals.length === 0) return
 
-    // Build a map: sales person name (lowercase) → { name, email, deals[] }
+    // Build a map: sales person name → { name, email, deals[] }
     const salesTeamMap = {}
     for (const member of salesTeam) {
-      const key = String(member.name || '').trim().toLowerCase()
+      const key = normalizeLookupKey(member.name)
       if (key) salesTeamMap[key] = { name: member.name, email: member.email || null, deals: [] }
     }
 
@@ -237,7 +245,7 @@ export default function HeldDeals({ session, isAdmin, companyName }) {
     const ungrouped = [] // held deals with no sales_person or unrecognised name
 
     for (const deal of heldDeals) {
-      const spKey = String(deal.sales_person || '').trim().toLowerCase()
+      const spKey = normalizeLookupKey(deal.sales_person)
       if (spKey && salesTeamMap[spKey]) {
         salesTeamMap[spKey].deals.push(deal)
         grouped[spKey] = true

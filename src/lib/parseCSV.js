@@ -100,6 +100,14 @@ export function isGoogleLead(referrer) {
   return String(referrer).toLowerCase().includes('google')
 }
 
+function normalizeLookupKey(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim()
+}
+
 function extractProjectLink(value) {
   const raw = String(value || '').trim()
   if (!raw) return ''
@@ -120,7 +128,7 @@ export function parseAlbiRecords(data, headers = [], userConfig = {}) {
   } = userConfig
 
   const normalizedHeaders = headers.map(h => String(h || '').trim())
-  const salesTeamNames = new Set(salesTeam.map(p => String(p.name || '').trim().toLowerCase()))
+  const salesTeamNames = new Set(salesTeam.map(p => normalizeLookupKey(p.name)))
   const blacklistSet = new Set(blacklist.map(b => String(b).trim()))
   const headerLower = normalizedHeaders.map(h => h.toLowerCase())
   const missingColumns = REQUIRED_COLUMNS.filter(
@@ -157,7 +165,7 @@ export function parseAlbiRecords(data, headers = [], userConfig = {}) {
     }
 
     if (salesTeamNames.size > 0) {
-      const spInTeam = salesTeamNames.has(salesPerson.toLowerCase())
+      const spInTeam = salesTeamNames.has(normalizeLookupKey(salesPerson))
       const googleLead = isGoogleLead(referrer)
       if (!spInTeam && !googleLead) {
         filteredCount++

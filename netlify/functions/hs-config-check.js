@@ -26,6 +26,14 @@ const REQUIRED_SCOPES = [
   'crm.schemas.deals.read',
 ]
 
+function normalizeLookupKey(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim()
+}
+
 export const handler = async (event) => {
   if (event.httpMethod !== 'POST') {
     return jsonResponse(405, { error: 'Method not allowed' })
@@ -136,14 +144,14 @@ export const handler = async (event) => {
   if (sales_team.length > 0) {
     try {
       const { results } = await hsGet('/crm/v3/owners/', apiKey)
-      const ownerEmails = results.map(o => (o.email || '').toLowerCase())
+      const ownerEmails = results.map(o => normalizeLookupKey(o.email))
       const ownerNames = results.map(o =>
-        `${o.firstName || ''} ${o.lastName || ''}`.trim().toLowerCase()
+        normalizeLookupKey(`${o.firstName || ''} ${o.lastName || ''}`)
       )
 
       const notFound = sales_team.filter(person => {
-        const emailMatch = ownerEmails.includes((person.email || '').toLowerCase())
-        const nameMatch = ownerNames.includes((person.name || '').toLowerCase())
+        const emailMatch = ownerEmails.includes(normalizeLookupKey(person.email))
+        const nameMatch = ownerNames.includes(normalizeLookupKey(person.name))
         return !emailMatch && !nameMatch
       })
 

@@ -7,13 +7,38 @@
  * Mirrors the Google Script's matchReferrer() logic:
  *   1. Check local Supabase cache by first_name + last_name (case-insensitive)
  *   2. Fall back to HubSpot API search with firstname + lastname filters
- *   3. Return both contactId AND the contact's companyId (from company_hubspot_id in cache)
- *      so the caller can associate both with the new deal in one pass.
+ *   3. Return both contactId AND the contact's companyId so the caller can
+ *      associate both with the new deal in one pass.
  *
  * Body: { email?: string, firstName?: string, lastName?: string }
  */
 
-import { getHubspotKey, jsonResponse, hsPost } from './_getHubspotKey.js'
+import { getHubspotKey, jsonResponse, hsGet, hsPost } from './_getHubspotKey.js'
+
+function normalizeLookupKey(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim()
+}
+
+function contactMatchesName(contact, firstName, lastName) {
+  const props = contact.properties || {}
+  const contactFirst = normalizeLookupKey(props.firstname)
+  const contactLast = normalizeLookupKey(props.lastname)
+  const wantedFirst = normalizeLookupKey(firstName)
+  const wantedLast = normalizeLookupKey(lastName)
+
+  if (wantedLast && contactLast !== wantedLast) return false
+  if (!wantedFirst) return true
+  return contactFirst === wantedFirst || contactFirst.startsWith(wantedFirst[0])
+}
+
+async function fetchContactCompanyId(contactId, apiKey) {
+  const result = await hsGet(`/crm/v4/objects/contacts/${contactId}/associations/companies?limit=500`, apiKey)
+  return result.results?.[0]?.toObjectId ? String(result.results[0].toObjectId) : null
+}
 
 export const handler = async (event) => {
   if (event.httpMethod !== 'POST') return jsonResponse(405, { error: 'Method not allowed' })
@@ -75,28 +100,56 @@ export const handler = async (event) => {
   // ── 2. Fall back to HubSpot API ───────────────────────────────────────────
   const { hubspot_api_key: apiKey } = config
 
-  // Build filters — match on email OR exact first+last name
-  const filters = email
-    ? [{ propertyName: 'email', operator: 'EQ', value: email }]
-    : [
-        ...(firstName ? [{ propertyName: 'firstname', operator: 'EQ', value: firstName }] : []),
-        ...(lastName  ? [{ propertyName: 'lastname',  operator: 'EQ', value: lastName  }] : []),
-      ]
-
   try {
-    const result = await hsPost('/crm/v3/objects/contacts/search', {
-      filterGroups: [{ filters }],
-      properties: ['firstname', 'lastname', 'email'],
-      limit: 1,
-    }, apiKey)
+    const searchBodies = []
 
-    const contact = result.results?.[0]
+    if (email) {
+      searchBodies.push({
+        filterGroups: [{ filters: [{ propertyName: 'email', operator: 'EQ', value: email }] }],
+        properties: ['firstname', 'lastname', 'email'],
+        limit: 1,
+      })
+    } else {
+      const filters = [
+        ...(firstName ? [{ propertyName: 'firstname', operator: 'EQ', value: firstName }] : []),
+        ...(lastName ? [{ propertyName: 'lastname', operator: 'EQ', value: lastName }] : []),
+      ]
+      if (filters.length > 0) {
+        searchBodies.push({ filterGroups: [{ filters }], properties: ['firstname', 'lastname', 'email'], limit: 1 })
+      }
+
+      const query = [firstName, lastName].filter(Boolean).join(' ').trim()
+      if (query) {
+        searchBodies.push({ query, properties: ['firstname', 'lastname', 'email'], limit: 10 })
+      }
+    }
+
+    let contact = null
+    for (const body of searchBodies) {
+      const result = await hsPost('/crm/v3/objects/contacts/search', body, apiKey)
+      contact = email
+        ? result.results?.[0]
+        : (result.results || []).find(c => contactMatchesName(c, firstName, lastName))
+      if (contact) break
+    }
+
     if (!contact) return jsonResponse(200, { contactId: null, companyId: null })
 
-    // companyId not available from search API — hs-sync.js stores it in cache.
-    // If this contact was just fetched live (not in cache), companyId will be null;
-    // populated on next sync. Caller falls back to company-name search anyway.
-    return jsonResponse(200, { contactId: contact.id, companyId: null, source: 'api' })
+    const companyId = await fetchContactCompanyId(contact.id, apiKey)
+
+    await supabase
+      .from('hs_cached_contacts')
+      .upsert({
+        user_id: user.id,
+        hubspot_id: String(contact.id),
+        email: contact.properties?.email || null,
+        first_name: contact.properties?.firstname || null,
+        last_name: contact.properties?.lastname || null,
+        company_hubspot_id: companyId,
+        synced_at: new Date().toISOString(),
+      }, { onConflict: 'user_id,hubspot_id' })
+
+    return jsonResponse(200, { contactId: contact.id, companyId, source: 'api' })
   } catch (err) {
     return jsonResponse(500, { error: err.message })
   }

@@ -5,23 +5,31 @@ function findCachedDeal(cachedDeals, projectId) {
   return cachedDeals.get(projectId) ?? null
 }
 
+function normalizeLookupKey(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim()
+}
+
 function findCachedContact(contactsByLastName, firstName, lastName) {
-  const candidates = contactsByLastName.get(lastName.toLowerCase().trim()) ?? []
+  const candidates = contactsByLastName.get(normalizeLookupKey(lastName)) ?? []
   if (candidates.length === 0) return null
   if (!firstName) return candidates[0]
 
-  const fn = firstName.toLowerCase().trim()
-  const exact = candidates.find(c => (c.first_name || '').toLowerCase() === fn)
+  const fn = normalizeLookupKey(firstName)
+  const exact = candidates.find(c => normalizeLookupKey(c.first_name) === fn)
   if (exact) return exact
 
-  const initial = candidates.find(c => (c.first_name || '').toLowerCase().startsWith(fn[0]))
+  const initial = candidates.find(c => normalizeLookupKey(c.first_name).startsWith(fn[0]))
   if (initial) return initial
 
   return candidates[0]
 }
 
 function findCachedCompany(cachedCompanies, name) {
-  return cachedCompanies.get(name.toLowerCase().trim()) ?? null
+  return cachedCompanies.get(normalizeLookupKey(name)) ?? null
 }
 
 function buildCachedDealRow(userId, dealId, properties, row, existingCacheRow = null) {
@@ -48,6 +56,24 @@ async function persistCachedDeal(supabase, cachedDeals, userId, cacheRow) {
 
   if (error) {
     console.warn(`Failed to persist cached deal ${cacheRow.project_id}:`, error.message)
+  }
+}
+
+async function persistCachedContact(supabase, contactsByLastName, userId, contact) {
+  const row = { user_id: userId, ...contact, synced_at: new Date().toISOString() }
+
+  if (row.last_name) {
+    const key = normalizeLookupKey(row.last_name)
+    if (!contactsByLastName.has(key)) contactsByLastName.set(key, [])
+    contactsByLastName.get(key).push(row)
+  }
+
+  const { error } = await supabase
+    .from('hs_cached_contacts')
+    .upsert(row, { onConflict: 'user_id,hubspot_id' })
+
+  if (error) {
+    console.warn(`Failed to persist cached contact ${row.hubspot_id}:`, error.message)
   }
 }
 
@@ -106,6 +132,29 @@ async function fetchDealAssociationIds(dealId, objectType, apiKey) {
   return ids
 }
 
+async function fetchObjectAssociationIds(fromType, fromId, toType, apiKey) {
+  const ids = []
+  let after = null
+
+  do {
+    const query = new URLSearchParams({ limit: '500' })
+    if (after) query.set('after', after)
+
+    const result = await hsGet(
+      `/crm/v4/objects/${fromType}/${fromId}/associations/${toType}?${query.toString()}`,
+      apiKey
+    )
+
+    for (const association of result.results || []) {
+      if (association.toObjectId) ids.push(String(association.toObjectId))
+    }
+
+    after = result.paging?.next?.after ?? null
+  } while (after)
+
+  return ids
+}
+
 async function deleteDealAssociation(dealId, objectType, objectId, apiKey) {
   return hsDelete(`/crm/v4/objects/deals/${dealId}/associations/${objectType}/${objectId}`, apiKey)
 }
@@ -140,6 +189,64 @@ async function syncDealReferrerAssociations(dealId, { contactId, companyId }, ap
 
 async function createCompany(name, apiKey) {
   return hsPost('/crm/v3/objects/companies', { properties: { name } }, apiKey)
+}
+
+function contactMatchesName(contact, firstName, lastName) {
+  const props = contact.properties || {}
+  const contactFirst = normalizeLookupKey(props.firstname)
+  const contactLast = normalizeLookupKey(props.lastname)
+  const wantedFirst = normalizeLookupKey(firstName)
+  const wantedLast = normalizeLookupKey(lastName)
+
+  if (wantedLast && contactLast !== wantedLast) return false
+  if (!wantedFirst) return true
+  return contactFirst === wantedFirst || contactFirst.startsWith(wantedFirst[0])
+}
+
+async function searchLiveContactByName(firstName, lastName, apiKey) {
+  const filters = [
+    ...(firstName ? [{ propertyName: 'firstname', operator: 'EQ', value: firstName }] : []),
+    ...(lastName ? [{ propertyName: 'lastname', operator: 'EQ', value: lastName }] : []),
+  ]
+
+  const searchBodies = []
+  if (filters.length > 0) {
+    searchBodies.push({ filterGroups: [{ filters }], properties: ['firstname', 'lastname', 'email'], limit: 1 })
+  }
+
+  const query = [firstName, lastName].filter(Boolean).join(' ').trim()
+  if (query) {
+    searchBodies.push({ query, properties: ['firstname', 'lastname', 'email'], limit: 10 })
+  }
+
+  for (const body of searchBodies) {
+    const result = await hsPost('/crm/v3/objects/contacts/search', body, apiKey)
+    const contact = (result.results || []).find(c => contactMatchesName(c, firstName, lastName))
+    if (!contact) continue
+
+    const companyIds = await fetchObjectAssociationIds('contacts', contact.id, 'companies', apiKey)
+    return {
+      hubspot_id: String(contact.id),
+      email: contact.properties?.email || null,
+      first_name: contact.properties?.firstname || null,
+      last_name: contact.properties?.lastname || null,
+      company_hubspot_id: companyIds[0] || null,
+    }
+  }
+
+  return null
+}
+
+async function searchLiveCompanyByName(name, apiKey) {
+  const result = await hsPost('/crm/v3/objects/companies/search', {
+    query: name,
+    properties: ['name'],
+    limit: 10,
+  }, apiKey)
+
+  const wantedName = normalizeLookupKey(name)
+  const company = (result.results || []).find(c => normalizeLookupKey(c.properties?.name) === wantedName)
+  return company ? String(company.id) : null
 }
 
 async function fetchPipelinesAndOwners(apiKey) {
@@ -266,8 +373,8 @@ export async function runImportRows({
         }
       }
       for (const o of owners) {
-        if (o.name) ownerNameToId[o.name.toLowerCase().trim()] = o.id
-        if (o.email) ownerNameToId[o.email.toLowerCase().trim()] = o.id
+        if (o.name) ownerNameToId[normalizeLookupKey(o.name)] = o.id
+        if (o.email) ownerNameToId[normalizeLookupKey(o.email)] = o.id
       }
     } catch (err) {
       console.warn('Could not fetch pipeline/owner metadata:', err.message)
@@ -300,7 +407,7 @@ export async function runImportRows({
         indexFirst = parts.slice(0, -1).join(' ')
       }
 
-      const key = indexLast.toLowerCase()
+      const key = normalizeLookupKey(indexLast)
       if (!contactsByLastName.has(key)) contactsByLastName.set(key, [])
 
       const entry = (indexFirst === rawFirst && indexLast === rawLast)
@@ -311,7 +418,7 @@ export async function runImportRows({
     }
 
     for (const c of companyRows) {
-      if (c.name) cachedCompanies.set(c.name.toLowerCase().trim(), c.hubspot_id)
+      if (c.name) cachedCompanies.set(normalizeLookupKey(c.name), c.hubspot_id)
     }
 
     const heldQueue = heldQueueRes.data || []
@@ -356,7 +463,7 @@ export async function runImportRows({
           if (stageId) properties.dealstage = stageId
         }
 
-        const ownerKey = (row.salesPerson || '').toLowerCase().trim()
+        const ownerKey = normalizeLookupKey(row.salesPerson)
         const ownerId = ownerNameToId[ownerKey]
         if (ownerId) properties.hubspot_owner_id = ownerId
 
@@ -372,7 +479,28 @@ export async function runImportRows({
             resolvedContactId = contact.hubspot_id
             resolvedCompanyId = contact.company_hubspot_id || null
           } else {
-            resolvedCompanyId = findCachedCompany(cachedCompanies, row.referrer) || null
+            let liveContact = null
+            try {
+              liveContact = await searchLiveContactByName(firstName, lastName, apiKey)
+            } catch (err) {
+              console.warn(`Could not live-search HubSpot contact "${row.referrer}":`, err.message)
+            }
+
+            if (liveContact) {
+              await persistCachedContact(supabase, contactsByLastName, userId, liveContact)
+              resolvedContactId = liveContact.hubspot_id
+              resolvedCompanyId = liveContact.company_hubspot_id || null
+            } else {
+              resolvedCompanyId = findCachedCompany(cachedCompanies, row.referrer) || null
+              if (!resolvedCompanyId) {
+                try {
+                  resolvedCompanyId = await searchLiveCompanyByName(row.referrer, apiKey)
+                  if (resolvedCompanyId) cachedCompanies.set(normalizeLookupKey(row.referrer), resolvedCompanyId)
+                } catch (err) {
+                  console.warn(`Could not live-search HubSpot company "${row.referrer}":`, err.message)
+                }
+              }
+            }
           }
         }
         const hasUnmatchedReferrer =
@@ -382,7 +510,7 @@ export async function runImportRows({
           try {
             const company = await withRetry(() => createCompany(row.referrer, apiKey))
             resolvedCompanyId = company.id
-            cachedCompanies.set(row.referrer.toLowerCase().trim(), company.id)
+            cachedCompanies.set(normalizeLookupKey(row.referrer), company.id)
           } catch (err) {
             console.warn(`Could not create Google company "${row.referrer}":`, err.message)
           }
@@ -642,7 +770,28 @@ export async function runImportRows({
         let resolvedCompanyId = contact?.company_hubspot_id ?? null
 
         if (!resolvedContactId) {
-          resolvedCompanyId = findCachedCompany(cachedCompanies, heldDeal.referrer) || null
+          let liveContact = null
+          try {
+            liveContact = await searchLiveContactByName(firstName, lastName, apiKey)
+          } catch (err) {
+            console.warn(`Could not live-search HubSpot contact "${heldDeal.referrer}":`, err.message)
+          }
+
+          if (liveContact) {
+            await persistCachedContact(supabase, contactsByLastName, userId, liveContact)
+            resolvedContactId = liveContact.hubspot_id
+            resolvedCompanyId = liveContact.company_hubspot_id || null
+          } else {
+            resolvedCompanyId = findCachedCompany(cachedCompanies, heldDeal.referrer) || null
+            if (!resolvedCompanyId) {
+              try {
+                resolvedCompanyId = await searchLiveCompanyByName(heldDeal.referrer, apiKey)
+                if (resolvedCompanyId) cachedCompanies.set(normalizeLookupKey(heldDeal.referrer), resolvedCompanyId)
+              } catch (err) {
+                console.warn(`Could not live-search HubSpot company "${heldDeal.referrer}":`, err.message)
+              }
+            }
+          }
         }
 
         if (resolvedContactId || resolvedCompanyId) {

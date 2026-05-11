@@ -11,6 +11,14 @@
 
 import { getHubspotKey, jsonResponse, hsPost } from './_getHubspotKey.js'
 
+function normalizeLookupKey(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim()
+}
+
 export const handler = async (event) => {
   if (event.httpMethod !== 'POST') return jsonResponse(405, { error: 'Method not allowed' })
 
@@ -39,15 +47,23 @@ export const handler = async (event) => {
 
   try {
     const result = await hsPost('/crm/v3/objects/companies/search', {
-      filterGroups: [
-        { filters: [{ propertyName: 'name', operator: 'EQ', value: name }] },
-      ],
+      query: name,
       properties: ['name'],
-      limit: 1,
+      limit: 10,
     }, apiKey)
 
-    const company = result.results?.[0]
+    const wantedName = normalizeLookupKey(name)
+    const company = (result.results || []).find(c => normalizeLookupKey(c.properties?.name) === wantedName)
     if (!company) return jsonResponse(200, { companyId: null })
+
+    await supabase
+      .from('hs_cached_companies')
+      .upsert({
+        user_id: user.id,
+        hubspot_id: String(company.id),
+        name: company.properties?.name || name,
+        synced_at: new Date().toISOString(),
+      }, { onConflict: 'user_id,hubspot_id' })
 
     return jsonResponse(200, { companyId: company.id, source: 'api' })
   } catch (err) {

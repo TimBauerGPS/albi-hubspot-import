@@ -6,6 +6,8 @@ import {
   updateDeal,
   syncDealReferrerAssociations,
   createCompany,
+  searchContact,
+  searchCompany,
   syncHubspotData,
   queueGoogleSheetImport,
   fetchPipelinesAndOwners,
@@ -16,10 +18,9 @@ import ImportProgress from '../components/ImportProgress'
 import AppShell from '../components/AppShell'
 
 // ── In-memory cache lookup helpers ────────────────────────────────────────────
-// All three search functions that previously called Netlify (and in turn HubSpot)
-// are replaced by simple Map lookups against data prefetched at the start of each
-// import run. This eliminates 2–3 HubSpot API calls per row, cutting rate-limit
-// pressure by ~70% and cutting import time roughly in half.
+// Most rows resolve via Map lookups against data prefetched at the start of each
+// import run. Cache misses fall back to live HubSpot search so newly added
+// referrers do not get held just because the sync cache is stale.
 
 /**
  * Find an existing HubSpot deal by Albi project_id.
@@ -29,22 +30,30 @@ function findCachedDeal(cachedDeals, projectId) {
   return cachedDeals.get(projectId) ?? null
 }
 
+function normalizeLookupKey(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim()
+}
+
 /**
  * Find a HubSpot contact by name split from the referrer string.
  * Matches on last name first, then narrows by first name (exact then initial).
  * Returns { hubspot_id, company_hubspot_id } or null.
  */
 function findCachedContact(contactsByLastName, firstName, lastName) {
-  const candidates = contactsByLastName.get(lastName.toLowerCase().trim()) ?? []
+  const candidates = contactsByLastName.get(normalizeLookupKey(lastName)) ?? []
   if (candidates.length === 0) return null
   if (!firstName) return candidates[0]
 
-  const fn = firstName.toLowerCase().trim()
+  const fn = normalizeLookupKey(firstName)
   // Exact first name match
-  const exact = candidates.find(c => (c.first_name || '').toLowerCase() === fn)
+  const exact = candidates.find(c => normalizeLookupKey(c.first_name) === fn)
   if (exact) return exact
   // First-initial match (e.g. "J. Smith" vs "John Smith")
-  const initial = candidates.find(c => (c.first_name || '').toLowerCase().startsWith(fn[0]))
+  const initial = candidates.find(c => normalizeLookupKey(c.first_name).startsWith(fn[0]))
   if (initial) return initial
 
   return candidates[0] // fall back to first contact with matching last name
@@ -55,7 +64,7 @@ function findCachedContact(contactsByLastName, firstName, lastName) {
  * Returns the HubSpot company ID or null.
  */
 function findCachedCompany(cachedCompanies, name) {
-  return cachedCompanies.get(name.toLowerCase().trim()) ?? null
+  return cachedCompanies.get(normalizeLookupKey(name)) ?? null
 }
 
 function buildCachedDealRow(userId, dealId, properties, row, existingCacheRow = null) {
@@ -422,8 +431,8 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
         }
       }
       for (const o of owners) {
-        if (o.name)  ownerNameToId[o.name.toLowerCase().trim()]  = o.id
-        if (o.email) ownerNameToId[o.email.toLowerCase().trim()] = o.id
+        if (o.name)  ownerNameToId[normalizeLookupKey(o.name)]  = o.id
+        if (o.email) ownerNameToId[normalizeLookupKey(o.email)] = o.id
       }
     } catch (err) {
       console.warn('Could not fetch pipeline/owner metadata:', err.message)
@@ -482,7 +491,7 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
           indexLast  = parts[parts.length - 1]
           indexFirst = parts.slice(0, -1).join(' ')
         }
-        const key = indexLast.toLowerCase()
+        const key = normalizeLookupKey(indexLast)
         if (!contactsByLastName.has(key)) contactsByLastName.set(key, [])
         // If the names were derived from splitting firstname, store a normalized
         // copy so findCachedContact's first-name matching works correctly.
@@ -492,7 +501,7 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
         contactsByLastName.get(key).push(entry)
       }
       for (const c of companyRows) {
-        if (c.name) cachedCompanies.set(c.name.toLowerCase().trim(), c.hubspot_id)
+        if (c.name) cachedCompanies.set(normalizeLookupKey(c.name), c.hubspot_id)
       }
 
     } catch (err) {
@@ -569,7 +578,7 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
           if (stageId) properties.dealstage = stageId
         }
 
-        const ownerKey = (row.salesPerson || '').toLowerCase().trim()
+        const ownerKey = normalizeLookupKey(row.salesPerson)
         const ownerId = ownerNameToId[ownerKey]
         if (ownerId) properties.hubspot_owner_id = ownerId
 
@@ -588,8 +597,29 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
             resolvedContactId = contact.hubspot_id
             resolvedCompanyId = contact.company_hubspot_id || null
           } else {
-            const companyId = findCachedCompany(cachedCompanies, row.referrer)
-            resolvedCompanyId = companyId || null
+            let liveContact = null
+            try {
+              liveContact = await withRetry(() => searchContact(null, firstName, lastName, session))
+            } catch (err) {
+              console.warn(`[Import] Could not live-search HubSpot contact "${row.referrer}":`, err.message)
+            }
+
+            if (liveContact?.contactId) {
+              resolvedContactId = liveContact.contactId
+              resolvedCompanyId = liveContact.companyId || null
+            } else {
+              const companyId = findCachedCompany(cachedCompanies, row.referrer)
+              resolvedCompanyId = companyId || null
+              if (!resolvedCompanyId) {
+                try {
+                  const liveCompany = await withRetry(() => searchCompany(row.referrer, session))
+                  resolvedCompanyId = liveCompany.companyId || null
+                  if (resolvedCompanyId) cachedCompanies.set(normalizeLookupKey(row.referrer), resolvedCompanyId)
+                } catch (err) {
+                  console.warn(`[Import] Could not live-search HubSpot company "${row.referrer}":`, err.message)
+                }
+              }
+            }
           }
         }
         const hasUnmatchedReferrer =
@@ -603,7 +633,7 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
           try {
             const { companyId: newId } = await withRetry(() => createCompany(row.referrer, session))
             resolvedCompanyId = newId
-            cachedCompanies.set(row.referrer.toLowerCase().trim(), newId)
+            cachedCompanies.set(normalizeLookupKey(row.referrer), newId)
           } catch (err) {
             console.warn(`[Import] Could not find/create Google company "${row.referrer}":`, err.message)
           }
@@ -892,8 +922,29 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
           let resolvedCompanyId = contact?.company_hubspot_id ?? null
 
           if (!resolvedContactId) {
-            const companyId = findCachedCompany(cachedCompanies, heldDeal.referrer)
-            resolvedCompanyId = companyId || null
+            let liveContact = null
+            try {
+              liveContact = await withRetry(() => searchContact(null, firstName, lastName, session))
+            } catch (err) {
+              console.warn(`[Import] Could not live-search HubSpot contact "${heldDeal.referrer}":`, err.message)
+            }
+
+            if (liveContact?.contactId) {
+              resolvedContactId = liveContact.contactId
+              resolvedCompanyId = liveContact.companyId || null
+            } else {
+              const companyId = findCachedCompany(cachedCompanies, heldDeal.referrer)
+              resolvedCompanyId = companyId || null
+              if (!resolvedCompanyId) {
+                try {
+                  const liveCompany = await withRetry(() => searchCompany(heldDeal.referrer, session))
+                  resolvedCompanyId = liveCompany.companyId || null
+                  if (resolvedCompanyId) cachedCompanies.set(normalizeLookupKey(heldDeal.referrer), resolvedCompanyId)
+                } catch (err) {
+                  console.warn(`[Import] Could not live-search HubSpot company "${heldDeal.referrer}":`, err.message)
+                }
+              }
+            }
           }
 
           if (resolvedContactId || resolvedCompanyId) {
