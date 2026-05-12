@@ -1,6 +1,18 @@
 import { processBatched, withRetry } from '../../src/lib/rateLimiter.js'
 import { hsDelete, hsGet, hsPatch, hsPost, hsPut } from './_getHubspotKey.js'
 
+const LAST_DEAL_REFERRED_PROPERTY = 'last_deal_referred'
+const LAST_DEAL_REFERRED_PROPERTY_BY_TYPE = {
+  contacts: {
+    groupName: 'contactinformation',
+    label: 'Last Deal Referred',
+  },
+  companies: {
+    groupName: 'companyinformation',
+    label: 'Last Deal Referred',
+  },
+}
+
 function findCachedDeal(cachedDeals, projectId) {
   return cachedDeals.get(projectId) ?? null
 }
@@ -103,6 +115,53 @@ async function createDeal(properties, associations, apiKey) {
 
 async function updateDeal(dealId, properties, apiKey) {
   return hsPatch(`/crm/v3/objects/deals/${dealId}`, { properties }, apiKey)
+}
+
+function formatHubSpotDateValue(value = new Date()) {
+  const date = new Date(value)
+  const utcMidnight = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate())
+  return String(utcMidnight)
+}
+
+async function createLastDealReferredProperty(objectType, apiKey) {
+  const spec = LAST_DEAL_REFERRED_PROPERTY_BY_TYPE[objectType]
+  if (!spec) return
+
+  await hsPost(`/crm/v3/properties/${objectType}`, {
+    name: LAST_DEAL_REFERRED_PROPERTY,
+    label: spec.label,
+    type: 'date',
+    fieldType: 'date',
+    groupName: spec.groupName,
+    description: 'Date of the most recent deal referred through the HubSpot importer.',
+  }, apiKey)
+}
+
+async function updateLastDealReferredForObject(objectType, objectId, dateValue, apiKey) {
+  if (!objectId) return
+
+  const path = `/crm/v3/objects/${objectType}/${objectId}`
+  const body = { properties: { [LAST_DEAL_REFERRED_PROPERTY]: dateValue } }
+
+  try {
+    await hsPatch(path, body, apiKey)
+    return
+  } catch (err) {
+    try {
+      await createLastDealReferredProperty(objectType, apiKey)
+      await hsPatch(path, body, apiKey)
+    } catch {
+      // Best effort only. Missing schema scopes or property issues must not fail imports.
+    }
+  }
+}
+
+async function updateLastDealReferred({ contactId, companyId, dealCreatedAt, apiKey }) {
+  const dateValue = formatHubSpotDateValue(dealCreatedAt)
+  await Promise.all([
+    updateLastDealReferredForObject('contacts', contactId, dateValue, apiKey),
+    updateLastDealReferredForObject('companies', companyId, dateValue, apiKey),
+  ])
 }
 
 async function associateDeal(dealId, objectType, objectId, apiKey) {
@@ -593,8 +652,13 @@ export async function runImportRows({
             }
           }
 
-          if (!createFallback && row.referrer && !hasUnmatchedReferrer) {
-            const wasHeld = heldQueueMap.has(row.name)
+          const wasHeld = heldQueueMap.has(row.name)
+          const shouldSyncReferrerAssociations =
+            row.referrer &&
+            !hasUnmatchedReferrer &&
+            (action === 'updated' || wasHeld)
+
+          if (!createFallback && shouldSyncReferrerAssociations) {
             madeHubspotCall = true
             const associationSync = await withRetry(() =>
               syncDealReferrerAssociations(
@@ -670,6 +734,12 @@ export async function runImportRows({
               madeHubspotCall = true
               const newDeal = await withRetry(() => createDeal(properties, associations, apiKey))
               resolvedDealId = newDeal.id
+              await updateLastDealReferred({
+                contactId: resolvedContactId,
+                companyId: resolvedCompanyId,
+                dealCreatedAt: newDeal.createdAt,
+                apiKey,
+              })
               action = 'created'
               created++
             } catch (createErr) {
@@ -813,6 +883,12 @@ export async function runImportRows({
           try {
             const newDeal = await withRetry(() => createDeal(heldDeal.properties_json || {}, associations, apiKey))
             resolvedHeldDealId = newDeal.id
+            await updateLastDealReferred({
+              contactId: resolvedContactId,
+              companyId: resolvedCompanyId,
+              dealCreatedAt: newDeal.createdAt,
+              apiKey,
+            })
             created++
           } catch (createErr) {
             const match = createErr.message.match(/(\d+) already has that value/)

@@ -122,6 +122,7 @@ export default function App() {
   const [hasAppAccess, setHasAppAccess] = useState(null) // null = loading, true/false = resolved
   const [companyName, setCompanyName] = useState(null)
   const [companyId, setCompanyId] = useState(null)
+  const [hubspotPortalId, setHubspotPortalId] = useState(null)
   const [showResetModal, setShowResetModal] = useState(false)
 
   useEffect(() => {
@@ -141,6 +142,7 @@ export default function App() {
         setHasAppAccess(null)
         setCompanyName(null)
         setCompanyId(null)
+        setHubspotPortalId(null)
       }
     })
 
@@ -167,9 +169,9 @@ export default function App() {
     // The company query returns results after the RLS migration (Step 3) is applied;
     // until then it falls back gracefully to the user's own row.
     const [{ data: userConfig }, { data: companyValid }] = await Promise.all([
-      supabase.from('hs_user_config').select('config_status').eq('user_id', userId).maybeSingle(),
+      supabase.from('hs_user_config').select('config_status, hubspot_partner_id').eq('user_id', userId).maybeSingle(),
       companyId
-        ? supabase.from('hs_user_config').select('config_status').eq('company_id', companyId).eq('config_status', 'valid').maybeSingle()
+        ? supabase.from('hs_user_config').select('config_status, hubspot_partner_id').eq('company_id', companyId).eq('config_status', 'valid').maybeSingle()
         : Promise.resolve({ data: null }),
     ])
 
@@ -184,6 +186,7 @@ export default function App() {
     setIsSuperAdmin(!!superRes.data)
     setIsAdmin(!!superRes.data || member?.role === 'admin')
     setHasAppAccess(!!access)
+    setHubspotPortalId(companyValid?.hubspot_partner_id || userConfig?.hubspot_partner_id || null)
     setConfigStatus(companyValid ? 'valid' : (userConfig?.config_status ?? 'unchecked'))
   }
 
@@ -251,7 +254,13 @@ export default function App() {
           path="/dashboard"
           element={
             <ProtectedRoute session={session} hasAppAccess={hasAppAccess}>
-              <Dashboard session={session} configStatus={configStatus} isAdmin={isAdmin} companyName={companyName} />
+              <Dashboard
+                session={session}
+                configStatus={configStatus}
+                isAdmin={isAdmin}
+                companyName={companyName}
+                hubspotPortalId={hubspotPortalId}
+              />
             </ProtectedRoute>
           }
         />

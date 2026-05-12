@@ -6,6 +6,11 @@ import AppShell from '../components/AppShell'
 const fmt = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 })
 const dateFmt = new Intl.DateTimeFormat('en-US', { dateStyle: 'medium', timeStyle: 'short' })
 
+function buildHubSpotDealUrl(portalId, dealId) {
+  if (!portalId || !dealId) return null
+  return `https://app.hubspot.com/contacts/${portalId}/record/0-3/${dealId}`
+}
+
 function StatusBadge({ status }) {
   const styles = {
     complete: 'bg-green-100 text-green-700',
@@ -34,7 +39,7 @@ function ActionBadge({ action }) {
   )
 }
 
-function DealRowDetail({ importId, userId }) {
+function DealRowDetail({ importId, userId, hubspotPortalId }) {
   const [deals, setDeals] = useState(null)
   const [loading, setLoading] = useState(true)
   const [filter, setFilter] = useState(null)
@@ -143,13 +148,15 @@ function DealRowDetail({ importId, userId }) {
                 <td className="py-2 pr-4 text-gray-700 truncate max-w-xs">{deal.job_name}</td>
                 <td className="py-2 pr-4 whitespace-nowrap"><ActionBadge action={deal.action_taken} /></td>
                 <td className="py-2 pr-4 font-mono text-gray-500 whitespace-nowrap">
-                  {deal.hubspot_deal_id
+                  {deal.hubspot_deal_id && buildHubSpotDealUrl(hubspotPortalId, deal.hubspot_deal_id)
                     ? <a
-                        href={`https://app.hubspot.com/contacts/deals/${deal.hubspot_deal_id}`}
+                        href={buildHubSpotDealUrl(hubspotPortalId, deal.hubspot_deal_id)}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="text-brand-600 hover:underline"
                       >{deal.hubspot_deal_id}</a>
+                    : deal.hubspot_deal_id
+                    ? deal.hubspot_deal_id
                     : '—'}
                 </td>
                 <td className="py-2 text-red-600 truncate max-w-xs">{deal.error_message || ''}</td>
@@ -167,7 +174,7 @@ function DealRowDetail({ importId, userId }) {
   )
 }
 
-function ImportRow({ imp, userId }) {
+function ImportRow({ imp, userId, hubspotPortalId }) {
   const [expanded, setExpanded] = useState(false)
 
   return (
@@ -199,13 +206,13 @@ function ImportRow({ imp, userId }) {
       </button>
 
       {expanded && (
-        <DealRowDetail importId={imp.id} userId={userId} />
+        <DealRowDetail importId={imp.id} userId={userId} hubspotPortalId={hubspotPortalId} />
       )}
     </div>
   )
 }
 
-export default function Dashboard({ session, configStatus, isAdmin, companyName }) {
+export default function Dashboard({ session, configStatus, isAdmin, companyName, hubspotPortalId }) {
   const navigate = useNavigate()
   const [imports, setImports] = useState([])
   const [loading, setLoading] = useState(true)
@@ -308,7 +315,7 @@ export default function Dashboard({ session, configStatus, isAdmin, companyName 
           ) : (
             <div>
               {imports.map(imp => (
-                <ImportRow key={imp.id} imp={imp} userId={session.user.id} />
+                <ImportRow key={imp.id} imp={imp} userId={session.user.id} hubspotPortalId={hubspotPortalId} />
               ))}
             </div>
           )}

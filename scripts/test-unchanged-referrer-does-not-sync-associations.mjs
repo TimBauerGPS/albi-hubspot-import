@@ -115,16 +115,16 @@ function createSupabaseMock() {
         project_id: 'JOB-1',
         deal_stage: 'sold-stage',
         pipeline: 'water-pipeline',
-        total_estimates: 500,
+        total_estimates: 1000,
         accrual_revenue: 0,
         amount: 1000,
       }],
       hs_cached_contacts: [{
         user_id: 'user-1',
-        hubspot_id: 'contact-new',
-        first_name: 'New',
+        hubspot_id: 'contact-1',
+        first_name: 'Known',
         last_name: 'Referrer',
-        company_hubspot_id: 'company-new',
+        company_hubspot_id: 'company-1',
       }],
       hs_cached_companies: [],
       hs_held_deals: [],
@@ -162,27 +162,6 @@ globalThis.fetch = async (url, options = {}) => {
   if (path.includes('/crm/v3/owners/')) {
     return Response.json({ results: [] })
   }
-  if (method === 'PATCH' && path.includes('/crm/v3/objects/deals/deal-1')) {
-    return Response.json({ id: 'deal-1' })
-  }
-  if (method === 'GET' && path.includes('/crm/v4/objects/deals/deal-1/associations/contacts')) {
-    return Response.json({ results: [{ toObjectId: 'contact-old' }] })
-  }
-  if (method === 'GET' && path.includes('/crm/v4/objects/deals/deal-1/associations/companies')) {
-    return Response.json({ results: [{ toObjectId: 'company-old' }] })
-  }
-  if (method === 'DELETE' && path.includes('/crm/v4/objects/deals/deal-1/associations/contacts/contact-old')) {
-    return new Response(null, { status: 204 })
-  }
-  if (method === 'DELETE' && path.includes('/crm/v4/objects/deals/deal-1/associations/companies/company-old')) {
-    return new Response(null, { status: 204 })
-  }
-  if (method === 'PUT' && path.includes('/crm/v4/objects/deals/deal-1/associations/default/contacts/contact-new')) {
-    return new Response(null, { status: 204 })
-  }
-  if (method === 'PUT' && path.includes('/crm/v4/objects/deals/deal-1/associations/default/companies/company-new')) {
-    return new Response(null, { status: 204 })
-  }
 
   throw new Error(`Unexpected fetch: ${method} ${path}`)
 }
@@ -199,7 +178,7 @@ try {
     rows: [{
       name: 'JOB-1',
       dealName: 'Customer - JOB-1',
-      referrer: 'New Referrer',
+      referrer: 'Known Referrer',
       salesPerson: '',
       pipeline: 'Water',
       status: 'Sold',
@@ -211,20 +190,15 @@ try {
     importId: 'import-1',
   })
 
-  const deletedOldContact = calls.some(call =>
-    call.method === 'DELETE' &&
-    call.path.includes('/crm/v4/objects/deals/deal-1/associations/contacts/contact-old')
+  assert.equal(result.summary.updated, 0, 'unchanged rows should not count as updates')
+  assert.equal(result.summary.errors, 0, 'unchanged rows should not fail on association-only work')
+  assert.equal(result.summary.skipped, 1, 'unchanged rows should be skipped')
+  assert.equal(
+    calls.some(call => call.path.includes('/crm/v4/objects/deals/deal-1/associations')),
+    false,
+    'unchanged rows should not fetch or mutate HubSpot associations'
   )
-  const deletedOldCompany = calls.some(call =>
-    call.method === 'DELETE' &&
-    call.path.includes('/crm/v4/objects/deals/deal-1/associations/companies/company-old')
-  )
-
-  assert.equal(deletedOldContact, true, 'old contact association should be deleted')
-  assert.equal(deletedOldCompany, true, 'old company association should be deleted')
-  assert.equal(result.summary.updated, 1, 'association replacement should count as an update')
-  assert.equal(result.summary.skipped, 0, 'association replacement should not be skipped')
-  assert.equal(supabase.db.inserts.hs_deals?.[0]?.action_taken, 'updated')
+  assert.equal(supabase.db.inserts.hs_deals?.[0]?.action_taken, 'skipped')
 } finally {
   globalThis.fetch = originalFetch
 }

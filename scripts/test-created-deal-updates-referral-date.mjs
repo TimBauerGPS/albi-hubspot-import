@@ -109,22 +109,13 @@ class Query {
 function createSupabaseMock() {
   const db = {
     tables: {
-      hs_cached_deals: [{
-        user_id: 'user-1',
-        hubspot_id: 'deal-1',
-        project_id: 'JOB-1',
-        deal_stage: 'sold-stage',
-        pipeline: 'water-pipeline',
-        total_estimates: 500,
-        accrual_revenue: 0,
-        amount: 1000,
-      }],
+      hs_cached_deals: [],
       hs_cached_contacts: [{
         user_id: 'user-1',
-        hubspot_id: 'contact-new',
-        first_name: 'New',
+        hubspot_id: 'contact-1',
+        first_name: 'Known',
         last_name: 'Referrer',
-        company_hubspot_id: 'company-new',
+        company_hubspot_id: 'company-1',
       }],
       hs_cached_companies: [],
       hs_held_deals: [],
@@ -148,7 +139,8 @@ const originalFetch = globalThis.fetch
 globalThis.fetch = async (url, options = {}) => {
   const path = String(url)
   const method = options.method || 'GET'
-  calls.push({ method, path })
+  const body = options.body ? JSON.parse(options.body) : null
+  calls.push({ method, path, body })
 
   if (path.includes('/crm/v3/pipelines/deals')) {
     return Response.json({
@@ -162,26 +154,25 @@ globalThis.fetch = async (url, options = {}) => {
   if (path.includes('/crm/v3/owners/')) {
     return Response.json({ results: [] })
   }
-  if (method === 'PATCH' && path.includes('/crm/v3/objects/deals/deal-1')) {
-    return Response.json({ id: 'deal-1' })
+  if (method === 'POST' && path.includes('/crm/v3/objects/deals')) {
+    return Response.json({ id: 'deal-1', createdAt: '2026-05-12T18:00:00Z' })
   }
-  if (method === 'GET' && path.includes('/crm/v4/objects/deals/deal-1/associations/contacts')) {
-    return Response.json({ results: [{ toObjectId: 'contact-old' }] })
+  if (method === 'PATCH' && path.includes('/crm/v3/objects/contacts/contact-1')) {
+    return Response.json({ id: 'contact-1' })
   }
-  if (method === 'GET' && path.includes('/crm/v4/objects/deals/deal-1/associations/companies')) {
-    return Response.json({ results: [{ toObjectId: 'company-old' }] })
+  if (method === 'PATCH' && path.includes('/crm/v3/objects/companies/company-1')) {
+    return Response.json({
+      status: 'error',
+      message: 'Property values were not valid',
+      category: 'VALIDATION_ERROR',
+    }, { status: 400 })
   }
-  if (method === 'DELETE' && path.includes('/crm/v4/objects/deals/deal-1/associations/contacts/contact-old')) {
-    return new Response(null, { status: 204 })
-  }
-  if (method === 'DELETE' && path.includes('/crm/v4/objects/deals/deal-1/associations/companies/company-old')) {
-    return new Response(null, { status: 204 })
-  }
-  if (method === 'PUT' && path.includes('/crm/v4/objects/deals/deal-1/associations/default/contacts/contact-new')) {
-    return new Response(null, { status: 204 })
-  }
-  if (method === 'PUT' && path.includes('/crm/v4/objects/deals/deal-1/associations/default/companies/company-new')) {
-    return new Response(null, { status: 204 })
+  if (method === 'POST' && path.includes('/crm/v3/properties/companies')) {
+    return Response.json({
+      status: 'error',
+      message: 'Missing scopes',
+      category: 'MISSING_SCOPES',
+    }, { status: 403 })
   }
 
   throw new Error(`Unexpected fetch: ${method} ${path}`)
@@ -199,7 +190,7 @@ try {
     rows: [{
       name: 'JOB-1',
       dealName: 'Customer - JOB-1',
-      referrer: 'New Referrer',
+      referrer: 'Known Referrer',
       salesPerson: '',
       pipeline: 'Water',
       status: 'Sold',
@@ -211,20 +202,22 @@ try {
     importId: 'import-1',
   })
 
-  const deletedOldContact = calls.some(call =>
-    call.method === 'DELETE' &&
-    call.path.includes('/crm/v4/objects/deals/deal-1/associations/contacts/contact-old')
-  )
-  const deletedOldCompany = calls.some(call =>
-    call.method === 'DELETE' &&
-    call.path.includes('/crm/v4/objects/deals/deal-1/associations/companies/company-old')
-  )
+  assert.equal(result.summary.created, 1, 'deal should still be created')
+  assert.equal(result.summary.errors, 0, 'referral date update failures should not error the import')
 
-  assert.equal(deletedOldContact, true, 'old contact association should be deleted')
-  assert.equal(deletedOldCompany, true, 'old company association should be deleted')
-  assert.equal(result.summary.updated, 1, 'association replacement should count as an update')
-  assert.equal(result.summary.skipped, 0, 'association replacement should not be skipped')
-  assert.equal(supabase.db.inserts.hs_deals?.[0]?.action_taken, 'updated')
+  const contactPatch = calls.find(call =>
+    call.method === 'PATCH' &&
+    call.path.includes('/crm/v3/objects/contacts/contact-1')
+  )
+  assert.equal(contactPatch?.body?.properties?.last_deal_referred, '1778544000000')
+
+  const companyPropertyCreate = calls.find(call =>
+    call.method === 'POST' &&
+    call.path.includes('/crm/v3/properties/companies')
+  )
+  assert.equal(companyPropertyCreate?.body?.name, 'last_deal_referred')
+  assert.equal(companyPropertyCreate?.body?.type, 'date')
+  assert.equal(companyPropertyCreate?.body?.fieldType, 'date')
 } finally {
   globalThis.fetch = originalFetch
 }
