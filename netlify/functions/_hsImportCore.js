@@ -28,16 +28,19 @@ function normalizeLookupKey(value) {
 function findCachedContact(contactsByLastName, firstName, lastName) {
   const candidates = contactsByLastName.get(normalizeLookupKey(lastName)) ?? []
   if (candidates.length === 0) return null
-  if (!firstName) return candidates[0]
+  if (!firstName) return candidates.length === 1 ? candidates[0] : null
 
   const fn = normalizeLookupKey(firstName)
   const exact = candidates.find(c => normalizeLookupKey(c.first_name) === fn)
   if (exact) return exact
 
-  const initial = candidates.find(c => normalizeLookupKey(c.first_name).startsWith(fn[0]))
-  if (initial) return initial
+  const initialKey = fn.replace(/\./g, '')
+  if (initialKey.length === 1) {
+    const initial = candidates.find(c => normalizeLookupKey(c.first_name).startsWith(initialKey))
+    if (initial) return initial
+  }
 
-  return candidates[0]
+  return null
 }
 
 function findCachedCompany(cachedCompanies, name) {
@@ -259,7 +262,9 @@ function contactMatchesName(contact, firstName, lastName) {
 
   if (wantedLast && contactLast !== wantedLast) return false
   if (!wantedFirst) return true
-  return contactFirst === wantedFirst || contactFirst.startsWith(wantedFirst[0])
+  if (contactFirst === wantedFirst) return true
+  const wantedInitial = wantedFirst.replace(/\./g, '')
+  return wantedInitial.length === 1 && contactFirst.startsWith(wantedInitial)
 }
 
 async function searchLiveContactByName(firstName, lastName, apiKey) {

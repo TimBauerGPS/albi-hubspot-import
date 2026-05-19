@@ -40,23 +40,27 @@ function normalizeLookupKey(value) {
 
 /**
  * Find a HubSpot contact by name split from the referrer string.
- * Matches on last name first, then narrows by first name (exact then initial).
+ * Matches on last name first, then narrows by first name (exact, or initial
+ * only when the CSV referrer uses an initial).
  * Returns { hubspot_id, company_hubspot_id } or null.
  */
 function findCachedContact(contactsByLastName, firstName, lastName) {
   const candidates = contactsByLastName.get(normalizeLookupKey(lastName)) ?? []
   if (candidates.length === 0) return null
-  if (!firstName) return candidates[0]
+  if (!firstName) return candidates.length === 1 ? candidates[0] : null
 
   const fn = normalizeLookupKey(firstName)
   // Exact first name match
   const exact = candidates.find(c => normalizeLookupKey(c.first_name) === fn)
   if (exact) return exact
-  // First-initial match (e.g. "J. Smith" vs "John Smith")
-  const initial = candidates.find(c => normalizeLookupKey(c.first_name).startsWith(fn[0]))
-  if (initial) return initial
+  // First-initial match only when the referrer itself is an initial.
+  const initialKey = fn.replace(/\./g, '')
+  if (initialKey.length === 1) {
+    const initial = candidates.find(c => normalizeLookupKey(c.first_name).startsWith(initialKey))
+    if (initial) return initial
+  }
 
-  return candidates[0] // fall back to first contact with matching last name
+  return null
 }
 
 /**

@@ -32,7 +32,9 @@ function contactMatchesName(contact, firstName, lastName) {
 
   if (wantedLast && contactLast !== wantedLast) return false
   if (!wantedFirst) return true
-  return contactFirst === wantedFirst || contactFirst.startsWith(wantedFirst[0])
+  if (contactFirst === wantedFirst) return true
+  const wantedInitial = wantedFirst.replace(/\./g, '')
+  return wantedInitial.length === 1 && contactFirst.startsWith(wantedInitial)
 }
 
 async function fetchContactCompanyId(contactId, apiKey) {
