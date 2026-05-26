@@ -4,8 +4,34 @@ import { runImportRows } from './_hsImportCore.js'
 import { notifyGoogleSheetImportError } from './_importAlerts.js'
 import { getAdminSupabase, getUserContextById, isInternalJobRequest } from './_supabaseAdmin.js'
 import { parseAlbiSheetValues } from '../../src/lib/parseCSV.js'
+import { createHash } from 'crypto'
 
 const ALLIED_COMPANY_NAME = 'Allied Restoration Services'
+const FINGERPRINT_PREFIX = 'source:'
+
+export function computeGoogleSheetFingerprint(sheet) {
+  const payload = {
+    spreadsheetId: sheet.spreadsheetId,
+    sheetTitle: sheet.sheetTitle,
+    values: sheet.values || [],
+    hyperlinks: sheet.hyperlinks || [],
+  }
+
+  return createHash('sha256')
+    .update(JSON.stringify(payload))
+    .digest('hex')
+    .slice(0, 16)
+}
+
+export function formatGoogleSheetImportFilename(sheet, fingerprint) {
+  return `Google Sheet: ${sheet.spreadsheetTitle} / ${sheet.sheetTitle} [${FINGERPRINT_PREFIX}${fingerprint}]`
+}
+
+export function extractGoogleSheetFingerprint(filename = '') {
+  const escapedPrefix = FINGERPRINT_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const match = String(filename).match(new RegExp(`\\[${escapedPrefix}([a-f0-9]{16})\\]$`))
+  return match?.[1] || null
+}
 
 async function shouldSkipRecentImport(supabase, userId) {
   const { data: latestImport } = await supabase
@@ -19,6 +45,20 @@ async function shouldSkipRecentImport(supabase, userId) {
 
   const lastImportedAt = latestImport?.imported_at ? new Date(latestImport.imported_at).getTime() : 0
   return Date.now() - lastImportedAt < 45 * 60 * 1000
+}
+
+async function getLatestCompletedSheetFingerprint(supabase, userId) {
+  const { data: latestImport } = await supabase
+    .from('hs_imports')
+    .select('filename')
+    .eq('user_id', userId)
+    .eq('status', 'complete')
+    .like('filename', 'Google Sheet:%')
+    .order('imported_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  return extractGoogleSheetFingerprint(latestImport?.filename)
 }
 
 async function resolveUserRequestContext(event, body) {
@@ -131,6 +171,8 @@ export const handler = async (event) => {
       rowCount: sheet.values?.length || 0,
     })
     const parsed = parseAlbiSheetValues(sheet.values, ctx.effectiveConfig || {}, sheet.hyperlinks || [])
+    const sheetFingerprint = computeGoogleSheetFingerprint(sheet)
+    const filename = formatGoogleSheetImportFilename(sheet, sheetFingerprint)
 
     if (parsed.missingColumns.length > 0) {
       await ctx.supabase
@@ -162,6 +204,40 @@ export const handler = async (event) => {
       })
     }
 
+    const latestFingerprint = await getLatestCompletedSheetFingerprint(ctx.supabase, ctx.userId)
+    if (latestFingerprint && latestFingerprint === sheetFingerprint) {
+      await ctx.supabase
+        .from('hs_imports')
+        .update({
+          filename,
+          total_rows: parsed.rows.length,
+          created_count: 0,
+          updated_count: 0,
+          error_count: 0,
+          status: 'complete',
+        })
+        .eq('id', importId)
+
+      console.log('[gs-import] skipped unchanged sheet', {
+        importId,
+        userId: ctx.userId,
+        fingerprint: sheetFingerprint,
+        rowCount: parsed.rows.length,
+      })
+
+      return jsonResponse(200, {
+        skipped: true,
+        reason: 'unchanged_sheet',
+        importId,
+        summary: { created: 0, updated: 0, skipped: parsed.rows.length, errors: 0, held: 0 },
+        sheetTitle: sheet.sheetTitle,
+        spreadsheetTitle: sheet.spreadsheetTitle,
+        filteredCount: parsed.filteredCount,
+        excludedCount: parsed.excludedCount,
+        noReferrerCount: parsed.noReferrerCount,
+      })
+    }
+
     const result = await runImportRows({
       supabase: ctx.supabase,
       userId: ctx.userId,
@@ -169,7 +245,7 @@ export const handler = async (event) => {
       userConfig: ctx.effectiveConfig || {},
       apiKey: ctx.effectiveConfig.hubspot_api_key,
       rows: parsed.rows,
-      filename: `Google Sheet: ${sheet.spreadsheetTitle} / ${sheet.sheetTitle}`,
+      filename,
       skipIfRecent: ctx.skipIfRecent,
       importId,
     })

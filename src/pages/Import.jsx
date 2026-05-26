@@ -727,11 +727,16 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
             }
           }
 
-          if (!createFallback && row.referrer && !hasUnmatchedReferrer) {
+          const wasHeld = heldQueueMap.has(row.name)
+          const shouldSyncReferrerAssociations =
+            row.referrer &&
+            !hasUnmatchedReferrer &&
+            (action === 'updated' || wasHeld)
+
+          if (!createFallback && shouldSyncReferrerAssociations) {
             // ── Referrer association sync ───────────────────────────────────
             // The import row is the source of truth for the deal's referrer.
             // Replace stale contact/company associations when the referrer changes.
-            const wasHeld = heldQueueMap.has(row.name)
             madeHubspotCall = true
             const associationSync = await withRetry(() =>
               syncDealReferrerAssociations(

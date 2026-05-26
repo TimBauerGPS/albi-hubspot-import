@@ -11,6 +11,10 @@ function buildHubSpotDealUrl(portalId, dealId) {
   return `https://app.hubspot.com/contacts/${portalId}/record/0-3/${dealId}`
 }
 
+function displayImportFilename(filename = '') {
+  return String(filename).replace(/\s*\[source:[a-f0-9]{16}\]$/, '')
+}
+
 function StatusBadge({ status }) {
   const styles = {
     complete: 'bg-green-100 text-green-700',
@@ -190,7 +194,7 @@ function ImportRow({ imp, userId, hubspotPortalId }) {
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
         </svg>
         <div className="flex-1 min-w-0">
-          <p className="text-sm font-medium text-gray-800 truncate">{imp.filename}</p>
+          <p className="text-sm font-medium text-gray-800 truncate">{displayImportFilename(imp.filename)}</p>
           <p className="text-xs text-gray-400 mt-0.5">
             {dateFmt.format(new Date(imp.imported_at))}
           </p>
