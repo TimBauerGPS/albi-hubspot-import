@@ -69,3 +69,9 @@ test('rejects invalid scheduler time values', () => {
   assert.throws(() => isDailyRunDue({ now: 'not-a-date' }), /invalid/i)
   assert.throws(() => isDailyRunDue({ now: new Date(Number.NaN) }), /invalid/i)
 })
+
+test('accepts date-only ISO strings and rejects non-ISO or timezone-free timestamps', () => {
+  assert.equal(pacificBusinessDate('2026-04-15'), '2026-04-14')
+  assert.throws(() => pacificBusinessDate('04/15/2026'), /ISO/i)
+  assert.throws(() => pacificBusinessDate('2026-04-15T09:00:00'), /ISO/i)
+})

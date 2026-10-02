@@ -1,4 +1,6 @@
 const PACIFIC_TIME_ZONE = 'America/Los_Angeles'
+const ISO_DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/
+const ISO_TIMESTAMP_PATTERN = /^(\d{4}-\d{2}-\d{2})T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/i
 
 const pacificFormatter = new Intl.DateTimeFormat('en-US', {
   timeZone: PACIFIC_TIME_ZONE,
@@ -19,6 +21,15 @@ function pacificParts(date) {
 
 function parseDate(value) {
   if (!(value instanceof Date) && typeof value !== 'string') throw new Error('Invalid date value')
+  if (typeof value === 'string') {
+    const dateMatch = ISO_DATE_PATTERN.exec(value)
+    const timestampMatch = ISO_TIMESTAMP_PATTERN.exec(value)
+    const calendarDate = dateMatch ? value : timestampMatch?.[1]
+    if (!calendarDate || !isValidCalendarDate(calendarDate)) {
+      throw new Error('Invalid date string: expected a valid ISO-8601 date or timezone-qualified timestamp')
+    }
+  }
+
   const date = value instanceof Date ? new Date(value.getTime()) : new Date(value)
   if (Number.isNaN(date.getTime())) throw new Error('Invalid date value')
   return date
@@ -31,9 +42,20 @@ function utcMillis(year, monthIndex, day, hour = 0, minute = 0, second = 0) {
   return date.getTime()
 }
 
+function isValidCalendarDate(dateString) {
+  const match = ISO_DATE_PATTERN.exec(dateString)
+  if (!match) return false
+  const [, yearText, monthText, dayText] = match
+  const year = Number(yearText)
+  const month = Number(monthText)
+  const day = Number(dayText)
+  const check = new Date(utcMillis(year, month - 1, day))
+  return check.getUTCFullYear() === year && check.getUTCMonth() + 1 === month && check.getUTCDate() === day
+}
+
 export function pacificStartOfDate(dateString) {
   if (typeof dateString !== 'string') throw new Error('Date must use YYYY-MM-DD format')
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateString)
+  const match = ISO_DATE_PATTERN.exec(dateString)
   if (!match) throw new Error('Date must use YYYY-MM-DD format')
 
   const [, yearText, monthText, dayText] = match
@@ -41,8 +63,7 @@ export function pacificStartOfDate(dateString) {
   const month = Number(monthText)
   const day = Number(dayText)
   const targetUtc = utcMillis(year, month - 1, day)
-  const check = new Date(targetUtc)
-  if (check.getUTCFullYear() !== year || check.getUTCMonth() + 1 !== month || check.getUTCDate() !== day) {
+  if (!isValidCalendarDate(dateString)) {
     throw new Error(`Invalid calendar date: ${dateString}`)
   }
 
