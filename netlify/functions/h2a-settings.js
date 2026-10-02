@@ -62,17 +62,61 @@ function toMapping(row) {
   return { mappingKind: row.mapping_kind, sourceKey: row.source_key, albiId: row.albi_id, label: row.label }
 }
 
-function redactDetails(value, secrets) {
-  if (typeof value === 'string') {
-    return secrets.filter(Boolean).reduce((text, secret) => text.split(secret).join('[redacted]'), value)
+const PREFLIGHT_CAPABILITIES = {
+  hubspot: {
+    contacts_read: 'HubSpot contact reads', companies_read: 'HubSpot company reads',
+    meetings_read: 'HubSpot meeting reads', calls_read: 'HubSpot call reads',
+    emails_read: 'HubSpot direct CRM email reads', communications_read: 'HubSpot communication reads', notes_read: 'HubSpot note reads',
+  },
+  albi: {
+    contacts_read: 'Albi contact reads', organizations_read: 'Albi organization reads',
+    contacts_create: 'Albi contact creation', organizations_create: 'Albi organization creation',
+    contacts_update: 'Albi contact updates', organizations_update: 'Albi organization updates',
+    contacts_associate_organization: 'Albi contact organization associations', activities_create: 'Albi activity creation',
+    options_read: 'Albi option reads',
+  },
+}
+const PREFLIGHT_STATUSES = new Set(['unchecked', 'running', 'valid', 'invalid'])
+const PREFLIGHT_OPTION_GROUPS = ['contactTypes', 'organizationTypes', 'relationshipTypes', 'referralSources', 'relationshipStatuses', 'activityTypes']
+
+function isRecord(value) { return value !== null && typeof value === 'object' && !Array.isArray(value) }
+
+function safeOptionText(value, protectedValues) {
+  return typeof value === 'string' && value.trim().length > 0 && value.length <= 200 &&
+    !/[\u0000-\u001f\u007f]/.test(value) && !protectedValues.some(secret => value.includes(secret)) &&
+    !/(bearer\s+|authorization\s*:|pat-[a-z0-9]+-|sqlstate|postgrest|duplicate key|database error)/i.test(value)
+}
+
+function safePreflightDetails(value, protectedValues) {
+  if (!isRecord(value)) return {}
+  const result = {}
+  // Project only this explicit nested schema. Raw provider/DB messages are never UI fields.
+  const labels = new Set(Object.values(PREFLIGHT_CAPABILITIES).flatMap(capabilities => Object.values(capabilities)))
+  if (Array.isArray(value.missing)) result.missing = value.missing.filter(label => typeof label === 'string' && labels.has(label))
+  for (const provider of ['hubspot', 'albi']) {
+    const source = value[provider]
+    if (!isRecord(source)) continue
+    const safe = {}
+    if (PREFLIGHT_STATUSES.has(source.status)) safe.status = source.status
+    if (typeof source.authenticated === 'boolean') safe.authenticated = source.authenticated
+    if (Array.isArray(source.checks)) {
+      safe.checks = source.checks.filter(check => isRecord(check) &&
+        Object.hasOwn(PREFLIGHT_CAPABILITIES[provider], check.capability) && PREFLIGHT_STATUSES.has(check.status))
+        .map(check => ({ capability: check.capability, status: check.status, label: PREFLIGHT_CAPABILITIES[provider][check.capability] }))
+    }
+    result[provider] = safe
   }
-  if (Array.isArray(value)) return value.map(item => redactDetails(item, secrets))
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value)
-      .filter(([key]) => !/(token|secret|ciphertext|envelope|authorization|api.?key|^iv$|^tag$|key.?version)/i.test(key))
-      .map(([key, item]) => [key, redactDetails(item, secrets)]))
+  if (isRecord(value.options)) {
+    result.options = {}
+    for (const group of PREFLIGHT_OPTION_GROUPS) {
+      if (!Array.isArray(value.options[group])) continue
+      result.options[group] = value.options[group].filter(option => isRecord(option) &&
+        safeOptionText(option.id, protectedValues) && /^[a-z0-9_.:-]+$/i.test(option.id) &&
+        safeOptionText(option.label, protectedValues))
+        .map(option => ({ id: option.id, label: option.label }))
+    }
   }
-  return value
+  return result
 }
 
 function validateDate(value, today) {
@@ -244,11 +288,14 @@ export function createSettingsHandler(options = {}) {
         }
       }
       const secrets = getSecrets()
+      const protectedValues = [...Object.values(secrets),
+        ...Object.values(credentials?.hubspot_envelope ?? {}), ...Object.values(credentials?.albi_envelope ?? {})]
+        .filter(value => typeof value === 'string' && value.length > 0)
       const safeConfig = Object.fromEntries(CONFIG_FIELDS.filter(field => config[field] !== undefined).map(field => [field, config[field]]))
       return response(200, {
         companyId, companyName: context.companyName,
         config: safeConfig, optionMappings: mappings.map(toMapping),
-        preflight: { status: config.preflight_status, details: redactDetails(config.preflight_details, Object.values(secrets)), checkedAt: config.preflight_checked_at },
+        preflight: { status: config.preflight_status, details: safePreflightDetails(config.preflight_details, protectedValues), checkedAt: config.preflight_checked_at },
         hubspotTokenMask: maskSecret(secrets.hubspotToken), albiApiKeyMask: maskSecret(secrets.albiApiKey),
         ...(backfillRequestId ? { backfillRequestId } : {}),
       })

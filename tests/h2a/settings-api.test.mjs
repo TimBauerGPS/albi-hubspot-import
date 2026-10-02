@@ -217,9 +217,78 @@ test('GET suppresses accidentally stored credentials and envelopes in preflight 
     provider: { albiApiKey, ciphertext: 'encrypted-data', iv: 'some-iv' } } } })
   const result = await f.request()
   assert.equal(result.statusCode, 200)
-  assert.deepEqual(result.json.preflight.details, { missing: ['Albi activity creation'], error: 'failed using [redacted]', provider: {} })
+  assert.deepEqual(result.json.preflight.details, { missing: ['Albi activity creation'] })
   assert.equal(result.body.includes(hubspotToken), false)
   assert.equal(result.body.includes(albiApiKey), false)
+})
+
+test('preflight read schema drops prefixed envelopes and arbitrary message/error strings at every depth', async () => {
+  const f = fixture({ config: { preflight_details: {} } })
+  const stored = f.privateCredentials.get('company-a')
+  const unsafe = {
+    hubspot_ciphertext: stored.hubspot_envelope.ciphertext, hubspot_iv: stored.hubspot_envelope.iv,
+    hubspot_tag: stored.hubspot_envelope.tag, hubspot_key_version: 1,
+    albi_ciphertext: stored.albi_envelope.ciphertext, albi_iv: stored.albi_envelope.iv,
+    albi_tag: stored.albi_envelope.tag, albi_key_version: 1,
+    message: 'PostgREST raw database error: credential-like-value-unknown-to-this-keyring',
+    error: `Authorization: Bearer unrelated-secret-token; ${hubspotToken}`,
+  }
+  f.tables.h2a_company_config[0].preflight_details = {
+    ...unsafe, unexpected: [{ nested: unsafe }],
+    hubspot: { status: 'valid', authenticated: true, ...unsafe,
+      checks: [{ capability: 'contacts_read', status: 'valid', ...unsafe, extra: [unsafe] }, unsafe] },
+    albi: { status: 'invalid', authenticated: true, checks: [{ capability: 'activities_create', status: 'invalid', ...unsafe }] },
+  }
+  const result = await f.request()
+  assert.equal(result.statusCode, 200)
+  assert.deepEqual(result.json.preflight.details, {
+    hubspot: { status: 'valid', authenticated: true, checks: [{ capability: 'contacts_read', status: 'valid', label: 'HubSpot contact reads' }] },
+    albi: { status: 'invalid', authenticated: true, checks: [{ capability: 'activities_create', status: 'invalid', label: 'Albi activity creation' }] },
+  })
+  for (const value of [hubspotToken, albiApiKey, ...Object.values(stored.hubspot_envelope).filter(value => typeof value === 'string'),
+    ...Object.values(stored.albi_envelope).filter(value => typeof value === 'string'), 'PostgREST', 'unrelated-secret-token']) {
+    assert.equal(result.body.includes(value), false, value)
+  }
+})
+
+test('preflight read schema retains safe checklist and option data while rejecting unknown and malformed nested entries', async () => {
+  const f = fixture({ config: { preflight_details: {} } })
+  const stored = f.privateCredentials.get('company-a')
+  f.tables.h2a_company_config[0].preflight_details = {
+    missing: ['Albi activity creation', 'unknown-free-text-error', { label: 'Albi activity creation' }, ['Albi activity creation']],
+    hubspot: { status: 'valid', authenticated: true, checks: [
+      { capability: 'notes_read', status: 'valid', label: hubspotToken, message: 'raw error' },
+      { capability: 'activities_create', status: 'valid' },
+      { capability: 'contacts_read', status: 'some-arbitrary-error' }, [{ capability: 'contacts_read', status: 'valid' }],
+    ] },
+    albi: { status: 'PostgREST failure', authenticated: 'Bearer unknown-secret', checks: 'malformed' },
+    options: {
+      contactTypes: [{ id: '101', label: 'Property Manager', hubspot_iv: stored.hubspot_envelope.iv, error: 'raw error' },
+        { id: '102', label: hubspotToken }, { id: '103', label: stored.albi_envelope.ciphertext },
+        { id: '104', label: `Authorization: Bearer other-private-value` }, [{ id: '105', label: 'Wrong nesting' }], null],
+      organizationTypes: [{ id: '201', label: 'Commercial' }],
+      activityTypes: [{ id: '301', label: 'Meeting', unknown: { message: 'raw database error' } }],
+      unknownTypes: [{ id: '401', label: 'Unknown' }], error: 'raw provider error',
+    },
+  }
+  const result = await f.request()
+  assert.equal(result.statusCode, 200)
+  assert.deepEqual(result.json.preflight.details, {
+    missing: ['Albi activity creation'],
+    hubspot: { status: 'valid', authenticated: true, checks: [{ capability: 'notes_read', status: 'valid', label: 'HubSpot note reads' }] },
+    albi: {},
+    options: {
+      contactTypes: [{ id: '101', label: 'Property Manager' }],
+      organizationTypes: [{ id: '201', label: 'Commercial' }], activityTypes: [{ id: '301', label: 'Meeting' }],
+    },
+  })
+})
+
+test('preflight read schema fails closed on non-object roots and unknown-only data', async () => {
+  for (const details of [null, 'raw error', [hubspotToken], { mystery: { message: 'raw error' } }]) {
+    const f = fixture({ config: { preflight_details: details } })
+    assert.deepEqual((await f.request()).json.preflight.details, {})
+  }
 })
 
 test('failed public invalidation never saves replacement credentials', async () => {
