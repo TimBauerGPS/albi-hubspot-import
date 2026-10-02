@@ -8,6 +8,7 @@
     "dev:local": "concurrently --names \"vite,fns\" --prefix-colors \"blue,green\" \"npm run dev\" \"npm run functions\"",
     "build": "vite build",
     "test:h2a": "node --test tests/h2a/*.test.mjs",
+    "test:h2a:schema": "node --test scripts/test-h2a-schema-contract.mjs",
     "preview": "vite preview",
     "functions": "dotenv -- netlify functions:serve --port 9999"
   },
