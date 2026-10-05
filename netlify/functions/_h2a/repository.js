@@ -28,6 +28,42 @@ async function readAll(supabase, table, companyId, filter = query => query) {
 export function createH2ARepository(supabase) {
   if (!supabase?.from || !supabase?.rpc) throw new TypeError('A server-side Supabase client is required')
   return {
+    async listConflicts(companyId, { limit, before = null }) {
+      let query = scoped(supabase, 'h2a_conflicts', companyId)
+        .order('created_at', { ascending: false }).order('id', { ascending: false }).limit(limit)
+      if (before) query = query.or(`created_at.lt.${before.createdAt},and(created_at.eq.${before.createdAt},id.lt.${before.id})`)
+      const items = checked(await query)
+      if (!Array.isArray(items)) throw new Error('Invalid conflict page')
+      return { items, hasMore: false }
+    },
+    async listConflictEvents(companyId, conflictIds) {
+      if (!Array.isArray(conflictIds) || conflictIds.length === 0) return []
+      return checked(await supabase.from('h2a_conflict_events').select('*').eq('company_id', companyId)
+        .in('conflict_id', conflictIds).order('created_at', { ascending: true }).order('id', { ascending: true }))
+    },
+    async resolveConflict(companyId, input) {
+      return checked(await supabase.rpc('h2a_resolve_conflict', {
+        p_company_id: companyId, p_conflict_id: input.conflictId, p_expected_updated_at: input.expectedUpdatedAt,
+        p_actor_id: input.actorId, p_api_action: input.action, p_db_action: input.dbAction,
+        p_request: { targetId: input.targetId, selectedFields: input.selectedFields,
+          approveManyToOne: input.approveManyToOne }, p_now: input.now,
+      }))
+    },
+    async listPendingConflictResumes(companyId, limit = 25) {
+      return checked(await scoped(supabase, 'h2a_conflict_resumes', companyId).eq('status', 'pending')
+        .order('created_at', { ascending: true }).order('id', { ascending: true }).limit(limit))
+    },
+    async claimConflictResume(companyId, resumeId, ownerToken, ttlSeconds = 120) {
+      return checked(await supabase.rpc('h2a_claim_conflict_resume', {
+        p_company_id: companyId, p_resume_id: resumeId, p_owner_token: ownerToken, p_ttl_seconds: ttlSeconds,
+      }))
+    },
+    async finishConflictResume(companyId, resumeId, ownerToken, accepted, errorCode = null) {
+      return checked(await supabase.rpc('h2a_finish_conflict_resume', {
+        p_company_id: companyId, p_resume_id: resumeId, p_owner_token: ownerToken,
+        p_accepted: accepted, p_error_code: errorCode,
+      })) === true
+    },
     async claimLease(companyId, ownerToken = randomUUID(), ttlSeconds = 900) {
       return checked(await supabase.rpc('h2a_claim_lease', { p_company_id: companyId, p_owner_token: ownerToken, p_ttl_seconds: ttlSeconds })) === true
     },

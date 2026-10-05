@@ -220,6 +220,36 @@ create table public.h2a_conflict_events (
   foreign key (company_id, conflict_id) references public.h2a_conflicts (company_id, id)
 );
 
+-- Durable, deduplicated work intent. Netlify dispatch is retried separately;
+-- the stable resume ID is the consumer idempotency key.
+create table public.h2a_conflict_resumes (
+  id uuid primary key default gen_random_uuid(),
+  company_id uuid not null references public.companies(id),
+  conflict_id uuid not null,
+  resolution_action text not null check (resolution_action in ('link_existing', 'create_new')),
+  source_object_type text not null check (source_object_type in ('contacts', 'companies', 'meetings', 'calls', 'emails', 'communications', 'notes')),
+  source_id text not null check (length(btrim(source_id)) > 0),
+  activity_object_type text check (activity_object_type in ('meetings', 'calls', 'emails', 'communications', 'notes')),
+  activity_id text,
+  originating_run_id uuid,
+  activity_delivery_id uuid,
+  status text not null default 'pending' check (status in ('pending', 'dispatched')),
+  dispatch_attempt_count integer not null default 0 check (dispatch_attempt_count >= 0),
+  dispatch_owner_token uuid,
+  dispatch_lease_expires_at timestamptz,
+  last_dispatch_error_code text check (last_dispatch_error_code in ('dispatch_failed', 'dispatch_not_accepted')),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  dispatched_at timestamptz,
+  foreign key (company_id, conflict_id) references public.h2a_conflicts (company_id, id),
+  foreign key (company_id, originating_run_id) references public.h2a_sync_runs (company_id, id),
+  foreign key (company_id, activity_delivery_id) references public.h2a_activity_deliveries (company_id, id),
+  unique (company_id, conflict_id),
+  check ((activity_object_type is null) = (activity_id is null)),
+  check ((dispatch_owner_token is null) = (dispatch_lease_expires_at is null)),
+  check ((status = 'dispatched') = (dispatched_at is not null))
+);
+
 create table public.h2a_execution_leases (
   company_id uuid primary key references public.companies(id),
   owner_token uuid not null,
@@ -260,6 +290,9 @@ create index h2a_conflicts_company_delivery_idx on public.h2a_conflicts (company
 create index h2a_conflicts_resolved_by_idx on public.h2a_conflicts (resolved_by);
 create index h2a_conflicts_company_open_idx on public.h2a_conflicts (company_id, created_at desc) where status = 'open';
 create index h2a_events_company_conflict_idx on public.h2a_conflict_events (company_id, conflict_id, created_at, id);
+create index h2a_conflict_resumes_pending_idx on public.h2a_conflict_resumes (company_id, status, created_at, id);
+create index h2a_conflict_resumes_company_run_idx on public.h2a_conflict_resumes (company_id, originating_run_id);
+create index h2a_conflict_resumes_company_delivery_idx on public.h2a_conflict_resumes (company_id, activity_delivery_id);
 
 alter table private.h2a_credentials enable row level security;
 revoke all on table private.h2a_credentials from public, anon, authenticated;
@@ -376,6 +409,10 @@ create policy h2a_conflict_events_select on public.h2a_conflict_events
     exists (select 1 from public.company_members m where m.user_id = (select auth.uid()) and m.company_id = h2a_conflict_events.company_id)
     or exists (select 1 from public.super_admins s where s.user_id = (select auth.uid()))
   );
+
+alter table public.h2a_conflict_resumes enable row level security;
+revoke all on table public.h2a_conflict_resumes from public, anon, authenticated;
+grant select on table public.h2a_conflict_resumes to service_role;
 
 alter table public.h2a_execution_leases enable row level security;
 revoke all on table public.h2a_execution_leases from public, anon, authenticated;
@@ -605,5 +642,227 @@ end;
 $$;
 revoke execute on function public.h2a_claim_daily_run(uuid, date) from public, anon, authenticated;
 grant execute on function public.h2a_claim_daily_run(uuid, date) to service_role;
+
+-- Resolution, optional identity mapping, audit, and targeted work intent commit
+-- together. No provider request is made from this transaction or endpoint.
+create function public.h2a_resolve_conflict(
+  p_company_id uuid, p_conflict_id uuid, p_expected_updated_at timestamptz, p_actor_id uuid,
+  p_api_action text, p_db_action text, p_request jsonb, p_now timestamptz
+) returns jsonb language plpgsql security definer set search_path = '' as $$
+declare
+  v_conflict public.h2a_conflicts%rowtype;
+  v_before jsonb;
+  v_source_snapshot jsonb;
+  v_candidate_snapshots jsonb;
+  v_proposed_fields jsonb;
+  v_event public.h2a_conflict_events%rowtype;
+  v_resume public.h2a_conflict_resumes%rowtype;
+  v_expected_db_action text;
+  v_target_id text;
+  v_many_to_one boolean;
+  v_field text;
+begin
+  v_expected_db_action := case p_api_action
+    when 'link_existing' then 'link_existing'
+    when 'create_new' then 'create_new'
+    when 'approve_fields' then 'approve_hubspot'
+    when 'retain_albi' then 'retain_albi'
+    when 'skip_item' then 'skip'
+    else null end;
+  if p_company_id is null or p_conflict_id is null or p_expected_updated_at is null or p_actor_id is null
+    or p_now is null or v_expected_db_action is null or p_db_action is distinct from v_expected_db_action
+    or coalesce(pg_catalog.jsonb_typeof(p_request), '') <> 'object'
+    or exists (select 1 from pg_catalog.jsonb_object_keys(p_request) as request_key(value)
+      where request_key.value not in ('targetId', 'selectedFields', 'approveManyToOne'))
+    or coalesce(pg_catalog.jsonb_typeof(p_request->'selectedFields'), '') <> 'array'
+    or coalesce(pg_catalog.jsonb_typeof(p_request->'approveManyToOne'), '') <> 'boolean' then
+    return pg_catalog.jsonb_build_object('error', 'invalid_action');
+  end if;
+  v_target_id := nullif(pg_catalog.btrim(p_request->>'targetId'), '');
+  v_many_to_one := (p_request->>'approveManyToOne')::boolean;
+  if (p_api_action = 'link_existing' and (v_target_id is null or pg_catalog.jsonb_array_length(p_request->'selectedFields') <> 0))
+    or (p_api_action <> 'link_existing' and (v_target_id is not null or v_many_to_one))
+    or (p_api_action not in ('approve_fields', 'retain_albi') and pg_catalog.jsonb_array_length(p_request->'selectedFields') <> 0)
+    or (p_api_action in ('approve_fields', 'retain_albi') and pg_catalog.jsonb_array_length(p_request->'selectedFields') = 0) then
+    return pg_catalog.jsonb_build_object('error', 'invalid_action');
+  end if;
+
+  select * into v_conflict from public.h2a_conflicts
+    where company_id = p_company_id and id = p_conflict_id for update;
+  if not found then return pg_catalog.jsonb_build_object('error', 'not_found'); end if;
+
+  if v_conflict.status <> 'open' then
+    select * into v_event from public.h2a_conflict_events e
+      where e.company_id = p_company_id and e.conflict_id = p_conflict_id
+        and e.actor_id = p_actor_id and e.resolution_action = p_db_action
+        and e.sanitized_details->>'apiAction' = p_api_action
+        and e.sanitized_details->'resolutionRequest' = p_request
+      order by e.created_at desc, e.id desc limit 1;
+    if found then
+      select * into v_resume from public.h2a_conflict_resumes r
+        where r.company_id = p_company_id and r.conflict_id = p_conflict_id;
+      return pg_catalog.jsonb_build_object('conflict', pg_catalog.to_jsonb(v_conflict),
+        'event', pg_catalog.to_jsonb(v_event), 'resume', case when v_resume.id is null then null else pg_catalog.to_jsonb(v_resume) end,
+        'replayed', true);
+    end if;
+    return pg_catalog.jsonb_build_object('error', 'not_open');
+  end if;
+  if v_conflict.updated_at <> p_expected_updated_at then return pg_catalog.jsonb_build_object('error', 'stale'); end if;
+
+  if p_api_action in ('link_existing', 'create_new') and v_conflict.object_type not in ('contacts', 'companies') then
+    return pg_catalog.jsonb_build_object('error', 'invalid_conflict_type');
+  end if;
+  if p_api_action in ('approve_fields', 'retain_albi') then
+    if v_conflict.object_type not in ('contacts', 'companies') then
+      return pg_catalog.jsonb_build_object('error', 'invalid_conflict_type');
+    end if;
+    for v_field in select pg_catalog.jsonb_array_elements_text(p_request->'selectedFields') loop
+      if v_field not in ('firstname', 'lastname', 'firstName', 'lastName', 'name', 'email', 'phone',
+        'phoneNumber', 'mobilephone', 'mobileNumber', 'domain', 'address', 'address1', 'city', 'state', 'zip', 'zipcode', 'country')
+        or not (coalesce(v_conflict.proposed_changes->'updates', '{}'::jsonb) ? v_field
+          or coalesce(v_conflict.proposed_changes->'conflicts', '{}'::jsonb) ? v_field) then
+        return pg_catalog.jsonb_build_object('error', 'invalid_action');
+      end if;
+    end loop;
+  end if;
+
+  if p_api_action = 'link_existing' then
+    if v_conflict.object_type = 'contacts' then
+      perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
+        pg_catalog.jsonb_build_array(p_company_id::text, v_conflict.portal_id, 'contact', v_target_id)::text, 0));
+      if exists (select 1 from public.h2a_contact_mappings m where m.company_id = p_company_id
+        and m.portal_id = v_conflict.portal_id and m.albi_contact_id = v_target_id and m.hubspot_id <> v_conflict.source_id)
+        and not v_many_to_one then return pg_catalog.jsonb_build_object('error', 'many_to_one_required'); end if;
+      if exists (select 1 from public.h2a_contact_mappings m where m.company_id = p_company_id
+        and m.portal_id = v_conflict.portal_id and m.hubspot_id = v_conflict.source_id and m.albi_contact_id <> v_target_id)
+        then return pg_catalog.jsonb_build_object('error', 'mapping_conflict'); end if;
+      insert into public.h2a_contact_mappings (company_id, portal_id, hubspot_id, albi_contact_id,
+        match_method, reviewed_by, reviewed_at, updated_at)
+      values (p_company_id, v_conflict.portal_id, v_conflict.source_id, v_target_id, 'reviewed', p_actor_id, p_now, p_now)
+      on conflict (company_id, portal_id, hubspot_id) do update set albi_contact_id = excluded.albi_contact_id,
+        match_method = 'reviewed', reviewed_by = excluded.reviewed_by, reviewed_at = excluded.reviewed_at, updated_at = excluded.updated_at;
+    else
+      perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
+        pg_catalog.jsonb_build_array(p_company_id::text, v_conflict.portal_id, 'organization', v_target_id)::text, 0));
+      if exists (select 1 from public.h2a_organization_mappings m where m.company_id = p_company_id
+        and m.portal_id = v_conflict.portal_id and m.albi_organization_id = v_target_id and m.hubspot_id <> v_conflict.source_id)
+        and not v_many_to_one then return pg_catalog.jsonb_build_object('error', 'many_to_one_required'); end if;
+      if exists (select 1 from public.h2a_organization_mappings m where m.company_id = p_company_id
+        and m.portal_id = v_conflict.portal_id and m.hubspot_id = v_conflict.source_id and m.albi_organization_id <> v_target_id)
+        then return pg_catalog.jsonb_build_object('error', 'mapping_conflict'); end if;
+      insert into public.h2a_organization_mappings (company_id, portal_id, hubspot_id, albi_organization_id,
+        match_method, reviewed_by, reviewed_at, updated_at)
+      values (p_company_id, v_conflict.portal_id, v_conflict.source_id, v_target_id, 'reviewed', p_actor_id, p_now, p_now)
+      on conflict (company_id, portal_id, hubspot_id) do update set albi_organization_id = excluded.albi_organization_id,
+        match_method = 'reviewed', reviewed_by = excluded.reviewed_by, reviewed_at = excluded.reviewed_at, updated_at = excluded.updated_at;
+    end if;
+  end if;
+
+  select coalesce(pg_catalog.jsonb_object_agg(source_field.key, source_field.value), '{}'::jsonb)
+    into v_source_snapshot
+    from pg_catalog.jsonb_each(coalesce(v_conflict.source_snapshot, '{}'::jsonb)) as source_field(key, value)
+    where source_field.key in ('id', 'firstname', 'lastname', 'firstName', 'lastName', 'name', 'email', 'phone',
+      'phoneNumber', 'mobilephone', 'mobileNumber', 'domain', 'address', 'address1', 'city', 'state', 'zip', 'zipcode', 'country')
+      and pg_catalog.jsonb_typeof(source_field.value) in ('string', 'number', 'boolean');
+  select coalesce(pg_catalog.jsonb_agg(candidate.safe_snapshot), '[]'::jsonb)
+    into v_candidate_snapshots
+    from (
+      select (select coalesce(pg_catalog.jsonb_object_agg(candidate_field.key, candidate_field.value), '{}'::jsonb)
+        from pg_catalog.jsonb_each(case when pg_catalog.jsonb_typeof(candidate.value) = 'object'
+          then candidate.value else '{}'::jsonb end) as candidate_field(key, value)
+        where candidate_field.key in ('id', 'firstname', 'lastname', 'firstName', 'lastName', 'name', 'email', 'phone',
+          'phoneNumber', 'mobilephone', 'mobileNumber', 'domain', 'address', 'address1', 'city', 'state', 'zip', 'zipcode', 'country')
+          and pg_catalog.jsonb_typeof(candidate_field.value) in ('string', 'number', 'boolean')) as safe_snapshot
+      from pg_catalog.jsonb_array_elements(case when pg_catalog.jsonb_typeof(v_conflict.candidate_snapshots) = 'array'
+        then v_conflict.candidate_snapshots else '[]'::jsonb end) as candidate(value)
+      limit 10
+    ) candidate;
+  select coalesce(pg_catalog.jsonb_agg(pg_catalog.to_jsonb(field_name) order by field_name), '[]'::jsonb)
+    into v_proposed_fields from (
+      select key as field_name from pg_catalog.jsonb_object_keys(coalesce(v_conflict.proposed_changes->'updates', '{}'::jsonb)) as update_field(key)
+      union
+      select key as field_name from pg_catalog.jsonb_object_keys(coalesce(v_conflict.proposed_changes->'conflicts', '{}'::jsonb)) as conflict_field(key)
+    ) proposed where field_name in ('firstname', 'lastname', 'firstName', 'lastName', 'name', 'email', 'phone',
+      'phoneNumber', 'mobilephone', 'mobileNumber', 'domain', 'address', 'address1', 'city', 'state', 'zip', 'zipcode', 'country');
+  v_before := pg_catalog.jsonb_build_object('status', v_conflict.status, 'updatedAt', v_conflict.updated_at,
+    'sourceSnapshot', v_source_snapshot, 'candidateSnapshots', v_candidate_snapshots, 'proposedFieldNames', v_proposed_fields);
+  update public.h2a_conflicts set status = case when p_api_action = 'skip_item' then 'skipped' else 'resolved' end,
+    resolved_by = p_actor_id, resolution_action = p_db_action, resolved_at = p_now, updated_at = p_now
+    where company_id = p_company_id and id = p_conflict_id and status = 'open'
+      and updated_at = p_expected_updated_at returning * into v_conflict;
+  if not found then return pg_catalog.jsonb_build_object('error', 'stale'); end if;
+
+  insert into public.h2a_conflict_events (company_id, conflict_id, event_type, actor_id, resolution_action, sanitized_details, created_at)
+  values (p_company_id, p_conflict_id, case when p_api_action = 'skip_item' then 'skipped' else 'resolved' end,
+    p_actor_id, p_db_action, pg_catalog.jsonb_build_object('apiAction', p_api_action, 'dbAction', p_db_action,
+      'resolutionRequest', p_request, 'selectedFields', p_request->'selectedFields',
+      'approveManyToOne', v_many_to_one, 'before', v_before,
+      'after', pg_catalog.jsonb_build_object('status', v_conflict.status, 'updatedAt', v_conflict.updated_at,
+        'resolvedBy', p_actor_id, 'resolutionAction', p_db_action,
+        'targetId', v_target_id, 'selectedFields', p_request->'selectedFields')), p_now)
+  returning * into v_event;
+
+  if p_api_action in ('link_existing', 'create_new') then
+    insert into public.h2a_conflict_resumes (company_id, conflict_id, resolution_action, source_object_type, source_id,
+      activity_object_type, activity_id, originating_run_id, activity_delivery_id, created_at, updated_at)
+    values (p_company_id, p_conflict_id, p_api_action, v_conflict.object_type, v_conflict.source_id,
+      v_conflict.activity_object_type, v_conflict.activity_id, v_conflict.run_id, v_conflict.activity_delivery_id, p_now, p_now)
+    on conflict (company_id, conflict_id) do nothing;
+    select * into v_resume from public.h2a_conflict_resumes r
+      where r.company_id = p_company_id and r.conflict_id = p_conflict_id;
+  end if;
+
+  return pg_catalog.jsonb_build_object('conflict', pg_catalog.to_jsonb(v_conflict), 'event', pg_catalog.to_jsonb(v_event),
+    'resume', case when v_resume.id is null then null else pg_catalog.to_jsonb(v_resume) end, 'replayed', false);
+end;
+$$;
+revoke execute on function public.h2a_resolve_conflict(uuid, uuid, timestamptz, uuid, text, text, jsonb, timestamptz) from public, anon, authenticated;
+grant execute on function public.h2a_resolve_conflict(uuid, uuid, timestamptz, uuid, text, text, jsonb, timestamptz) to service_role;
+
+create function public.h2a_claim_conflict_resume(p_company_id uuid, p_resume_id uuid, p_owner_token uuid, p_ttl_seconds integer)
+returns jsonb language plpgsql security definer set search_path = '' as $$
+declare
+  v_now timestamptz := pg_catalog.clock_timestamp();
+  v_row public.h2a_conflict_resumes%rowtype;
+begin
+  if p_company_id is null or p_resume_id is null or p_owner_token is null
+    or p_ttl_seconds is null or p_ttl_seconds <= 0 or p_ttl_seconds > 3600 then
+    raise exception 'Invalid conflict resume claim' using errcode = '22023';
+  end if;
+  select * into v_row from public.h2a_conflict_resumes r
+    where r.company_id = p_company_id and r.id = p_resume_id and r.status = 'pending'
+      and (r.dispatch_owner_token is null or r.dispatch_lease_expires_at <= v_now) for update;
+  if not found then return null; end if;
+  update public.h2a_conflict_resumes set dispatch_owner_token = p_owner_token,
+    dispatch_lease_expires_at = v_now + pg_catalog.make_interval(secs => p_ttl_seconds),
+    dispatch_attempt_count = dispatch_attempt_count + 1, last_dispatch_error_code = null, updated_at = v_now
+    where company_id = p_company_id and id = p_resume_id returning * into v_row;
+  return pg_catalog.to_jsonb(v_row);
+end;
+$$;
+revoke execute on function public.h2a_claim_conflict_resume(uuid, uuid, uuid, integer) from public, anon, authenticated;
+grant execute on function public.h2a_claim_conflict_resume(uuid, uuid, uuid, integer) to service_role;
+
+create function public.h2a_finish_conflict_resume(
+  p_company_id uuid, p_resume_id uuid, p_owner_token uuid, p_accepted boolean, p_error_code text
+) returns boolean language plpgsql security definer set search_path = '' as $$
+begin
+  if p_company_id is null or p_resume_id is null or p_owner_token is null or p_accepted is null
+    or (p_accepted and p_error_code is not null)
+    or (not p_accepted and coalesce(p_error_code, '') not in ('dispatch_failed', 'dispatch_not_accepted')) then
+    raise exception 'Invalid conflict resume result' using errcode = '22023';
+  end if;
+  update public.h2a_conflict_resumes set status = case when p_accepted then 'dispatched' else 'pending' end,
+    dispatched_at = case when p_accepted then pg_catalog.clock_timestamp() else null end,
+    dispatch_owner_token = null, dispatch_lease_expires_at = null,
+    last_dispatch_error_code = case when p_accepted then null else p_error_code end,
+    updated_at = pg_catalog.clock_timestamp()
+    where company_id = p_company_id and id = p_resume_id and status = 'pending'
+      and dispatch_owner_token = p_owner_token;
+  return found;
+end;
+$$;
+revoke execute on function public.h2a_finish_conflict_resume(uuid, uuid, uuid, boolean, text) from public, anon, authenticated;
+grant execute on function public.h2a_finish_conflict_resume(uuid, uuid, uuid, boolean, text) to service_role;
 
 commit;
