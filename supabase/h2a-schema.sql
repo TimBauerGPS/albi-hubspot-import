@@ -506,6 +506,89 @@ $$;
 revoke execute on function public.h2a_release_lease(uuid, uuid) from public, anon, authenticated;
 grant execute on function public.h2a_release_lease(uuid, uuid) to service_role;
 
+-- Delivery reservation is one transaction: new identity insert or row-locked stale/due
+-- reclaim. The returned attempt_count is the durable fencing generation.
+create function public.h2a_reserve_delivery(
+  p_company_id uuid, p_portal_id text, p_object_type text, p_activity_id text,
+  p_albi_target_type text, p_albi_target_id text, p_source_marker text,
+  p_now timestamptz, p_stale_before timestamptz, p_retry_eligible_at timestamptz
+) returns jsonb language plpgsql security definer set search_path = '' as $$
+declare
+  v_row public.h2a_activity_deliveries%rowtype;
+  v_previous jsonb;
+begin
+  if p_company_id is null or nullif(pg_catalog.btrim(p_portal_id), '') is null
+    or coalesce(p_object_type, '') not in ('meetings', 'calls', 'emails', 'communications', 'notes')
+    or nullif(pg_catalog.btrim(p_activity_id), '') is null
+    or coalesce(p_albi_target_type, '') not in ('contact', 'organization')
+    or nullif(pg_catalog.btrim(p_albi_target_id), '') is null
+    or nullif(pg_catalog.btrim(p_source_marker), '') is null
+    or p_now is null or p_stale_before is null or p_retry_eligible_at is null
+    or p_stale_before > p_now or p_retry_eligible_at > p_now then
+    raise exception 'Invalid delivery reservation' using errcode = '22023';
+  end if;
+  insert into public.h2a_activity_deliveries (
+    company_id, portal_id, object_type, activity_id, albi_target_type,
+    albi_target_id, source_marker, state, attempt_count, last_attempt_at
+  ) values (
+    p_company_id, p_portal_id, p_object_type, p_activity_id, p_albi_target_type,
+    p_albi_target_id, p_source_marker, 'reserved', 1, p_now
+  ) on conflict (company_id, portal_id, object_type, activity_id, albi_target_type, albi_target_id)
+    do nothing returning * into v_row;
+  if found then
+    return pg_catalog.jsonb_build_object('acquired', true, 'is_new', true, 'delivery', pg_catalog.to_jsonb(v_row));
+  end if;
+  select * into v_row from public.h2a_activity_deliveries
+    where company_id = p_company_id and portal_id = p_portal_id and object_type = p_object_type
+      and activity_id = p_activity_id and albi_target_type = p_albi_target_type
+      and albi_target_id = p_albi_target_id for update;
+  if not found then raise exception 'Delivery reservation disappeared' using errcode = '40001'; end if;
+  if v_row.source_marker <> p_source_marker then raise exception 'Delivery marker mismatch' using errcode = '22023'; end if;
+  if not ((v_row.state = 'reserved' and (v_row.last_attempt_at is null or v_row.last_attempt_at <= p_stale_before))
+    or (v_row.state = 'failed' and v_row.next_attempt_at is not null and v_row.next_attempt_at <= p_retry_eligible_at)) then
+    return pg_catalog.jsonb_build_object('acquired', false, 'is_new', false, 'delivery', pg_catalog.to_jsonb(v_row));
+  end if;
+  v_previous := pg_catalog.jsonb_build_object('state', v_row.state, 'last_attempt_at', v_row.last_attempt_at,
+    'next_attempt_at', v_row.next_attempt_at);
+  update public.h2a_activity_deliveries set state = 'reserved', attempt_count = attempt_count + 1,
+    last_attempt_at = p_now, next_attempt_at = null, last_error_summary = null,
+    updated_at = pg_catalog.clock_timestamp()
+    where company_id = p_company_id and id = v_row.id returning * into v_row;
+  return pg_catalog.jsonb_build_object('acquired', true, 'is_new', false,
+    'previous', v_previous, 'delivery', pg_catalog.to_jsonb(v_row));
+end;
+$$;
+revoke execute on function public.h2a_reserve_delivery(uuid, text, text, text, text, text, text, timestamptz, timestamptz, timestamptz) from public, anon, authenticated;
+grant execute on function public.h2a_reserve_delivery(uuid, text, text, text, text, text, text, timestamptz, timestamptz, timestamptz) to service_role;
+
+create function public.h2a_transition_delivery(
+  p_company_id uuid, p_delivery_id uuid, p_expected_attempt_count integer, p_patch jsonb
+) returns jsonb language plpgsql security definer set search_path = '' as $$
+declare
+  v_row public.h2a_activity_deliveries%rowtype;
+begin
+  if p_company_id is null or p_delivery_id is null or p_expected_attempt_count is null or p_expected_attempt_count < 1
+    or coalesce(pg_catalog.jsonb_typeof(p_patch), '') <> 'object'
+    or coalesce(p_patch->>'state', '') not in ('delivered', 'reconciled', 'failed')
+    or exists (select 1 from pg_catalog.jsonb_object_keys(p_patch) as patch_key(value)
+      where patch_key.value not in ('state', 'albi_activity_id', 'delivered_at', 'next_attempt_at', 'last_error_summary')) then
+    raise exception 'Invalid delivery transition' using errcode = '22023';
+  end if;
+  update public.h2a_activity_deliveries set state = p_patch->>'state',
+    albi_activity_id = coalesce(p_patch->>'albi_activity_id', albi_activity_id),
+    delivered_at = (p_patch->>'delivered_at')::timestamptz,
+    next_attempt_at = (p_patch->>'next_attempt_at')::timestamptz,
+    last_error_summary = p_patch->>'last_error_summary',
+    updated_at = pg_catalog.clock_timestamp()
+    where company_id = p_company_id and id = p_delivery_id and state = 'reserved'
+      and attempt_count = p_expected_attempt_count returning * into v_row;
+  if not found then return pg_catalog.jsonb_build_object('updated', false); end if;
+  return pg_catalog.jsonb_build_object('updated', true, 'delivery', pg_catalog.to_jsonb(v_row));
+end;
+$$;
+revoke execute on function public.h2a_transition_delivery(uuid, uuid, integer, jsonb) from public, anon, authenticated;
+grant execute on function public.h2a_transition_delivery(uuid, uuid, integer, jsonb) to service_role;
+
 -- Caller supplies its America/Los_Angeles business date, never a UTC date.
 -- Claims persist across dates so delayed duplicate scheduler calls remain no-ops.
 create function public.h2a_claim_daily_run(p_company_id uuid, p_business_date date)

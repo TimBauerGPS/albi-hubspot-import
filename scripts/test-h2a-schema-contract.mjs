@@ -94,13 +94,26 @@ test('access-path indexes and tenant-safe run/activity/conflict references are p
 
 test('all public RPCs restrict execution to service role and pin their search path', () => {
   const sql = readSchema()
-  for (const name of ['h2a_get_credentials', 'h2a_put_credentials', 'h2a_claim_lease', 'h2a_heartbeat_lease', 'h2a_release_lease', 'h2a_claim_daily_run']) {
+  for (const name of ['h2a_get_credentials', 'h2a_put_credentials', 'h2a_claim_lease', 'h2a_heartbeat_lease', 'h2a_release_lease', 'h2a_claim_daily_run', 'h2a_reserve_delivery', 'h2a_transition_delivery']) {
     const definition = sql.match(new RegExp(`create function public\\.${name}\\(([\\s\\S]*?)as \\$\\$`))?.[1]
     assert.ok(definition, name)
     assert.match(definition, /set search_path = ''/)
     assert.match(sql, new RegExp(`revoke execute on function public\\.${name}\\([^;]+\\) from public, anon, authenticated;`))
     assert.match(sql, new RegExp(`grant execute on function public\\.${name}\\([^;]+\\) to service_role;`))
   }
+})
+
+test('delivery RPCs atomically reclaim eligible attempts and fence terminal transitions', () => {
+  const sql = readSchema()
+  const reserve = functionBody(sql, 'h2a_reserve_delivery')
+  assert.match(reserve, /on conflict \(company_id, portal_id, object_type, activity_id, albi_target_type, albi_target_id\)\s+do nothing/)
+  assert.match(reserve, /company_id = p_company_id[\s\S]*?for update/)
+  assert.match(reserve, /v_row\.last_attempt_at <= p_stale_before/)
+  assert.match(reserve, /v_row\.next_attempt_at is not null and v_row\.next_attempt_at <= p_retry_eligible_at/)
+  assert.match(reserve, /attempt_count = attempt_count \+ 1/)
+  const transition = functionBody(sql, 'h2a_transition_delivery')
+  assert.match(transition, /where company_id = p_company_id and id = p_delivery_id and state = 'reserved'/)
+  assert.match(transition, /and attempt_count = p_expected_attempt_count/)
 })
 
 test('claims are atomic and heartbeat/release cannot alter a successor lease', () => {
