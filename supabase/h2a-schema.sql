@@ -727,6 +727,11 @@ begin
   end if;
 
   if p_api_action = 'link_existing' then
+    -- Serialize resolutions for this tenant-scoped source identity before taking
+    -- any target lock. Every link_existing path uses source-then-target ordering.
+    perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
+      pg_catalog.jsonb_build_array(p_company_id::text, v_conflict.portal_id, 'source',
+        v_conflict.object_type, v_conflict.source_id)::text, 0));
     if v_conflict.object_type = 'contacts' then
       perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
         pg_catalog.jsonb_build_array(p_company_id::text, v_conflict.portal_id, 'contact', v_target_id)::text, 0));
@@ -739,8 +744,7 @@ begin
       insert into public.h2a_contact_mappings (company_id, portal_id, hubspot_id, albi_contact_id,
         match_method, reviewed_by, reviewed_at, updated_at)
       values (p_company_id, v_conflict.portal_id, v_conflict.source_id, v_target_id, 'reviewed', p_actor_id, p_now, p_now)
-      on conflict (company_id, portal_id, hubspot_id) do update set albi_contact_id = excluded.albi_contact_id,
-        match_method = 'reviewed', reviewed_by = excluded.reviewed_by, reviewed_at = excluded.reviewed_at, updated_at = excluded.updated_at;
+      on conflict (company_id, portal_id, hubspot_id) do nothing;
     else
       perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
         pg_catalog.jsonb_build_array(p_company_id::text, v_conflict.portal_id, 'organization', v_target_id)::text, 0));
@@ -753,8 +757,7 @@ begin
       insert into public.h2a_organization_mappings (company_id, portal_id, hubspot_id, albi_organization_id,
         match_method, reviewed_by, reviewed_at, updated_at)
       values (p_company_id, v_conflict.portal_id, v_conflict.source_id, v_target_id, 'reviewed', p_actor_id, p_now, p_now)
-      on conflict (company_id, portal_id, hubspot_id) do update set albi_organization_id = excluded.albi_organization_id,
-        match_method = 'reviewed', reviewed_by = excluded.reviewed_by, reviewed_at = excluded.reviewed_at, updated_at = excluded.updated_at;
+      on conflict (company_id, portal_id, hubspot_id) do nothing;
     end if;
   end if;
 

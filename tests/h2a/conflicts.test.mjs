@@ -112,6 +112,15 @@ test('stale updates and a different resolution return conflict without dispatch'
   assert.equal(calls.dispatched.length, 0)
 })
 
+test('a competing target for an already mapped source is rejected without a second dispatch', async () => {
+  const { deps, result, calls } = serviceDeps()
+  result.error = 'mapping_conflict'
+  await assert.rejects(() => resolveConflict(deps, { companyId: 'company-1', actorId: 'user-1', conflictId: 'conflict-2',
+    expectedUpdatedAt: updatedAt, action: 'link_existing', targetId: 'albi-other' }), error => error.statusCode === 409)
+  assert.deepEqual(calls.resolved[0][1].targetId, 'albi-other')
+  assert.equal(calls.dispatched.length, 0)
+})
+
 test('an exact completed replay reuses its audit result and does not dispatch a second resume', async () => {
   const { deps, result, calls } = serviceDeps()
   const input = { companyId: 'company-1', actorId: 'user-1', conflictId: 'conflict-1', expectedUpdatedAt: updatedAt,
