@@ -45,6 +45,7 @@ export function createH2AReadHandler(options = {}, { estimate = false } = {}) {
       const loadCredentials = () => checked(supabase.rpc('h2a_get_credentials', { p_company_id: companyId }))
       const config = estimate ? null : await loadConfig()
       if (!estimate && !config) fail(409, 'Save H2A credentials in Settings before running preflight.')
+      if (!estimate && config.preflight_status === 'running') fail(409, 'H2A settings are changing. Run preflight again shortly.')
       const credentials = await loadCredentials()
       if (!credentials) fail(409, 'Save H2A credentials in Settings first.')
       const keyring = options.keyring ?? loadCredentialKeyring(options.env ?? process.env)

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createSettingsHandler } from '../../netlify/functions/h2a-settings.js'
+import { createPreflightHandler } from '../../netlify/functions/h2a-preflight.js'
 import { encryptSecret, decryptSecret } from '../../netlify/functions/_h2a/crypto.js'
 
 const keyring = { activeVersion: 1, keys: { 1: Buffer.alloc(32, 7) } }
@@ -43,6 +44,8 @@ function fixture({ role = 'admin', superAdmin = false, config = {}, credentials 
   }]] : [])
   const writes = []
   const rpcCalls = []
+  let beforeCredentialWrite = async () => {}
+  let afterCredentialWrite = async () => {}
   const supabase = {
     auth: { async getUser(jwt) { return jwt === 'valid-jwt' ? { data: { user: { id: 'user-1' } }, error: null } : { data: { user: null }, error: { message: 'bad token' } } } },
     from(table) {
@@ -94,11 +97,13 @@ function fixture({ role = 'admin', superAdmin = false, config = {}, credentials 
       assert.equal(name, 'h2a_put_credentials')
       const current = tables.h2a_company_config.find(row => row.company_id === args.p_company_id)
       assert.equal(current.state, 'disabled', 'private credential writes must follow public invalidation')
-      assert.equal(current.preflight_status, 'unchecked', 'private credential writes must follow public invalidation')
+      assert.equal(current.preflight_status, 'running', 'preflight must remain blocked during the private credential write')
       if (failure === name) return { data: null, error: { message: `${hubspotToken} ${albiApiKey}` } }
       assert.ok(args.p_hubspot_envelope.key_version)
       assert.ok(args.p_albi_envelope.key_version)
+      await beforeCredentialWrite()
       privateCredentials.set(args.p_company_id, { hubspot_envelope: args.p_hubspot_envelope, albi_envelope: args.p_albi_envelope, updated_by: args.p_updated_by, updated_at: now })
+      await afterCredentialWrite()
       return { data: null, error: null }
     },
   }
@@ -107,7 +112,11 @@ function fixture({ role = 'admin', superAdmin = false, config = {}, credentials 
     const response = await handle({ httpMethod, headers: { authorization: `Bearer ${jwt}` }, queryStringParameters: query, body: body === undefined ? undefined : JSON.stringify(body) })
     return { ...response, json: JSON.parse(response.body) }
   }
-  return { request, handle, supabase, tables, privateCredentials, writes, rpcCalls }
+  return {
+    request, handle, supabase, tables, privateCredentials, writes, rpcCalls,
+    setBeforeCredentialWrite(fn) { beforeCredentialWrite = fn },
+    setAfterCredentialWrite(fn) { afterCredentialWrite = fn },
+  }
 }
 
 test('member GET returns masks, configuration, mappings and preflight without credentials/envelopes', async () => {
@@ -213,6 +222,61 @@ for (const field of ['hubspotToken', 'albiApiKey']) {
     }
   })
 }
+
+test('preflight started during credential replacement cannot persist old credentials results', async () => {
+  const f = fixture({ config: {
+    state: 'live', portal_id: '111', preflight_status: 'valid', preflight_details: { options: preflightOptions },
+    preflight_checked_at: now, option_confirmation_status: 'confirmed',
+  }, mappings: optionMappings })
+  const availableOptions = Object.fromEntries(Object.keys(preflightOptions).map(group => [group, [{ id: '2', label: 'Other tenant option' }]]))
+  let clientsCreated = 0
+  const runPreflightDuringReplacement = createPreflightHandler({
+    supabase: f.supabase, keyring, now: () => new Date(now),
+    makeClients() {
+      clientsCreated += 1
+      return {
+        hubspot: {
+          async getAccountInfo() { return { portalId: '222' } },
+          async checkRead() { return [] },
+          async listActivities() { return { records: [], after: null, total: 0 } },
+        },
+        albi: {
+          async verifyCredentials() { return { authenticated: true, capabilities: {
+            contacts_create: true, organizations_create: true, activities_create: true,
+            contacts_update: true, organizations_update: true, contacts_associate_organization: true,
+          } } },
+          async listContacts() { return { records: [], cursor: null } },
+          async listOrganizations() { return { records: [], cursor: null } },
+          async listActivities() { return { records: [], cursor: null } },
+          async listOptions() { return availableOptions },
+        },
+      }
+    },
+  })
+  let interleavedPreflight
+  f.setBeforeCredentialWrite(async () => {
+    interleavedPreflight = await runPreflightDuringReplacement({
+      httpMethod: 'POST', headers: { authorization: 'Bearer valid-jwt' }, body: '{}',
+    })
+  })
+  f.setAfterCredentialWrite(async () => {
+    // Model a preflight that raced through the first invalidation before the replacement completed.
+    Object.assign(f.tables.h2a_company_config[0], {
+      state: 'disabled', portal_id: '222', preflight_status: 'valid', preflight_checked_at: now,
+      preflight_details: { options: availableOptions }, option_confirmation_status: 'unconfirmed',
+    })
+  })
+
+  const result = await f.request('PUT', { action: 'replace_credentials', hubspotToken: 'new-hubspot-token' })
+
+  assert.equal(result.statusCode, 200)
+  assert.equal(interleavedPreflight.statusCode, 409)
+  assert.equal(clientsCreated, 0)
+  assert.equal(f.tables.h2a_company_config[0].state, 'disabled')
+  assert.equal(f.tables.h2a_company_config[0].preflight_status, 'unchecked')
+  assert.deepEqual(f.tables.h2a_company_config[0].preflight_details, {})
+  assert.equal(f.tables.h2a_company_config[0].portal_id, null)
+})
 
 test('first credential save requires both secrets; malformed or absent replacements are rejected', async () => {
   for (const body of [{ hubspotToken }, {}, { hubspotToken: '' }, { hubspotToken: 1 }, { hubspotToken: '   ' }]) {

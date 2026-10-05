@@ -153,6 +153,18 @@ export function createSettingsHandler(options = {}) {
         config.selected_start_date ??= today
       }
 
+      async function finalizeCredentialInvalidation() {
+        const saved = await checked(supabase.from('h2a_company_config').update({
+          state: 'disabled', portal_id: null, preflight_status: 'unchecked', preflight_details: {}, preflight_checked_at: null,
+          option_confirmation_status: 'unconfirmed', options_confirmed_by: null, options_confirmed_at: null,
+          updated_at: getNow().toISOString(),
+        }).eq('company_id', companyId).select(CONFIG_SELECT).maybeSingle())
+        if (!saved) fail(409, 'Settings changed while credentials were being replaced. Reload and try again.')
+        storedConfig = saved
+        config = { ...defaultConfig(companyId, today), ...saved }
+        config.selected_start_date ??= today
+      }
+
       function requireReady() {
         if (!credentials || config.preflight_status !== 'valid' || config.option_confirmation_status !== 'confirmed' ||
           !completeMappings(mappings.map(toMapping)) || mappings.some(row => !row.confirmed_at) ||
@@ -172,11 +184,19 @@ export function createSettingsHandler(options = {}) {
             const hubspotEnvelope = Object.hasOwn(body, 'hubspotToken') ? toRpc(encryptSecret(body.hubspotToken, getKeyring())) : credentials.hubspot_envelope
             const albiEnvelope = Object.hasOwn(body, 'albiApiKey') ? toRpc(encryptSecret(body.albiApiKey, getKeyring())) : credentials.albi_envelope
             // Invalidate first: a failed private RPC must not leave a company active with stale preflight.
-            await saveConfig({ state: 'disabled', preflight_status: 'unchecked', preflight_details: {}, preflight_checked_at: null,
+            await saveConfig({ state: 'disabled', portal_id: null, preflight_status: 'running', preflight_details: {}, preflight_checked_at: null,
               option_confirmation_status: 'unconfirmed', options_confirmed_by: null, options_confirmed_at: null })
-            await checked(supabase.rpc('h2a_put_credentials', {
-              p_company_id: companyId, p_hubspot_envelope: hubspotEnvelope, p_albi_envelope: albiEnvelope, p_updated_by: userId,
-            }))
+            try {
+              await checked(supabase.rpc('h2a_put_credentials', {
+                p_company_id: companyId, p_hubspot_envelope: hubspotEnvelope, p_albi_envelope: albiEnvelope, p_updated_by: userId,
+              }))
+            } catch (error) {
+              // Leave a failed replacement disabled; if cleanup fails, `running` still blocks readiness.
+              try { await finalizeCredentialInvalidation() } catch { /* Keep the fail-closed running marker. */ }
+              throw error
+            }
+            // Clear any preflight result that raced between initial invalidation and the credential RPC.
+            await finalizeCredentialInvalidation()
             credentials = { hubspot_envelope: hubspotEnvelope, albi_envelope: albiEnvelope }
             break
           }
