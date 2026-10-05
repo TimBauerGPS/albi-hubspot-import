@@ -1,0 +1,48 @@
+{
+  "capturedAt": "2026-10-05",
+  "fixturePolicy": "Synthetic records use example.invalid values; they contain no tenant credentials or live customer data.",
+  "hubspot": {
+    "baseUrl": "https://api.hubapi.com",
+    "apiVersion": "2026-09",
+    "versionSources": [
+      "https://developers.hubspot.com/blog/date-based-api-versioning-migration-playbook",
+      "https://developers.hubspot.com/changelog/fall-2026-spotlight"
+    ],
+    "requiredScopes": "Object-specific CRM read scopes are required. This metadata does not claim a complete token scope set; validate the private-app token in tenant preflight.",
+    "rateLimitHeaders": ["Retry-After"],
+    "rateLimitSource": "The adapter honors Retry-After when returned. Per-endpoint rate-limit headers/quotas were not specified in the official references reviewed.",
+    "methods": {
+      "getAccountInfo": { "method": "GET", "path": "/account-info/2026-09/details", "required": "Bearer token", "pagination": "none", "fixture": "hubspot.responses.json#/account" },
+      "listOwners": { "method": "GET", "path": "/crm/owners/2026-09", "required": "Bearer token", "pagination": "after cursor; limit 100", "fixture": "hubspot.responses.json#/owners" },
+      "estimateActivities": { "method": "POST", "path": "/crm/objects/2026-09/{objectType}/search", "required": "object-specific readable properties and hs_timestamp lower-bound filter", "pagination": "search total; estimate caps at 10000", "fixture": "hubspot.responses.json#/activities" },
+      "listActivities": { "method": "POST", "path": "/crm/objects/2026-09/{objectType}/search", "required": "object-specific readable properties and hs_timestamp range filters", "pagination": "after cursor; maximum requested page size 200", "fixture": "hubspot.responses.json#/activities" },
+      "getAssociations": { "method": "GET", "path": "/crm/objects/2026-09/{objectType}/{objectId}/associations/{toObjectType}", "required": "object read/association access", "pagination": "after cursor; up to 100 source IDs per adapter call", "fixture": "hubspot.responses.json#/associations" },
+      "getContacts": { "method": "POST", "path": "/crm/objects/2026-09/contacts/batch/read", "required": "contact read access and IDs", "pagination": "adapter batches at most 100 IDs per request", "fixture": "hubspot.responses.json#/contacts" },
+      "getCompanies": { "method": "POST", "path": "/crm/objects/2026-09/companies/batch/read", "required": "company read access and IDs", "pagination": "adapter batches at most 100 IDs per request", "fixture": "hubspot.responses.json#/companies" }
+    }
+  },
+  "albi": {
+    "baseUrl": "https://api.albiware.com/v5/Integrations",
+    "apiVersion": "v5",
+    "officialReferences": [
+      "https://api.albiware.com/",
+      "https://albi.readme.io/reference/get-all-projects-copy-1"
+    ],
+    "requiredScopes": "Albi documents an ApiKey header; the public endpoint reference reviewed does not define per-operation scopes.",
+    "rateLimitHeaders": [],
+    "rateLimitSource": "The public endpoint reference reviewed does not specify rate-limit headers or quotas.",
+    "methods": {
+      "verifyCredentials": { "method": "GET + OPTIONS", "path": "/Contacts and documented create paths", "required": "ApiKey header", "pagination": "one contact read; OPTIONS has no response pagination", "fixture": "albi.responses.json#/contacts; OPTIONS responses are asserted inline", "writes": false },
+      "listOptions": { "method": "GET", "path": "/Options/GetRelationshipTypeOptions, /Options/GetReferralSourceOptions, /Options/GetRelationshipStatusOptions, /Options/GetActivityTypeOptions", "required": "ApiKey header", "pagination": "none in adapter contract", "fixture": "albi.responses.json#/relationshipTypes, #/referralSources, #/relationshipStatuses, #/activityTypes" },
+      "listContacts": { "method": "GET", "path": "/Contacts", "required": "ApiKey header", "pagination": "numeric page and pageSize; next page inferred from full page", "fixture": "albi.responses.json#/contacts" },
+      "listOrganizations": { "method": "GET", "path": "/Organizations", "required": "ApiKey header", "pagination": "numeric page and pageSize; next page inferred from full page", "fixture": "albi.responses.json#/organizations" },
+      "createContact": { "method": "POST", "path": "/Contacts/Create", "required": "firstName, lastName, contactTypeIds", "pagination": "none", "fixture": "albi.responses.json#/createContact", "preflightProbe": false },
+      "createOrganization": { "method": "POST", "path": "/Organizations/Create", "required": "name, organizationTypeIds", "pagination": "none", "fixture": "albi.responses.json#/createOrganization", "preflightProbe": false },
+      "createActivity": { "method": "POST", "path": "/Activities/Create", "required": "date, notes, and a contactId or organizationId; typeId is required by the adapter", "pagination": "none", "fixture": "albi.responses.json#/createActivity", "preflightProbe": false, "sourceFields": "source and sourceId are passed through as fields; their visibility and idempotency behavior are unverified." },
+      "updateContact": { "supported": false, "reason": "No official update contract was verified. The method returns unsupported_contract without network access." },
+      "updateOrganization": { "supported": false, "reason": "No official update contract was verified. The method returns unsupported_contract without network access." },
+      "associateContact": { "supported": false, "reason": "No official association contract was verified. The method returns unsupported_contract without network access." },
+      "listActivities": { "method": "GET", "path": "/Activities", "required": "ApiKey header; optional organizationId/contactId/date range", "pagination": "page and pageSize", "fixture": "albi.responses.json#/activities", "source": "https://albi.readme.io/reference/get-all-projects-copy-1" }
+    }
+  }
+}

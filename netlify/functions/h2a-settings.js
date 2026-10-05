@@ -3,6 +3,7 @@ import { H2AAuthError, requireH2ARequest } from './_h2a/auth.js'
 import { HUBSPOT_ACTIVITY_TYPES } from './_h2a/constants.js'
 import { decryptSecret, encryptSecret, loadCredentialKeyring, maskSecret } from './_h2a/crypto.js'
 import { pacificBusinessDate, pacificStartOfDate } from './_h2a/time.js'
+import { mappingsMatchOptions, safePreflightDetails } from './_h2a/preflight.js'
 
 const CONFIG_FIELDS = ['company_id', 'state', 'portal_id', 'selected_start_date', 'initial_start_locked_at',
   'preflight_status', 'preflight_checked_at', 'option_confirmation_status', 'options_confirmed_by',
@@ -60,63 +61,6 @@ function fromRpc({ key_version, ...rest }) { return { ...rest, keyVersion: key_v
 function toRpc({ keyVersion, ...rest }) { return { ...rest, key_version: keyVersion } }
 function toMapping(row) {
   return { mappingKind: row.mapping_kind, sourceKey: row.source_key, albiId: row.albi_id, label: row.label }
-}
-
-const PREFLIGHT_CAPABILITIES = {
-  hubspot: {
-    contacts_read: 'HubSpot contact reads', companies_read: 'HubSpot company reads',
-    meetings_read: 'HubSpot meeting reads', calls_read: 'HubSpot call reads',
-    emails_read: 'HubSpot direct CRM email reads', communications_read: 'HubSpot communication reads', notes_read: 'HubSpot note reads',
-  },
-  albi: {
-    contacts_read: 'Albi contact reads', organizations_read: 'Albi organization reads',
-    contacts_create: 'Albi contact creation', organizations_create: 'Albi organization creation',
-    contacts_update: 'Albi contact updates', organizations_update: 'Albi organization updates',
-    contacts_associate_organization: 'Albi contact organization associations', activities_create: 'Albi activity creation',
-    options_read: 'Albi option reads',
-  },
-}
-const PREFLIGHT_STATUSES = new Set(['unchecked', 'running', 'valid', 'invalid'])
-const PREFLIGHT_OPTION_GROUPS = ['contactTypes', 'organizationTypes', 'relationshipTypes', 'referralSources', 'relationshipStatuses', 'activityTypes']
-
-function isRecord(value) { return value !== null && typeof value === 'object' && !Array.isArray(value) }
-
-function safeOptionText(value, protectedValues) {
-  return typeof value === 'string' && value.trim().length > 0 && value.length <= 200 &&
-    !/[\u0000-\u001f\u007f]/.test(value) && !protectedValues.some(secret => value.includes(secret)) &&
-    !/(bearer\s+|authorization\s*:|pat-[a-z0-9]+-|sqlstate|postgrest|duplicate key|database error)/i.test(value)
-}
-
-function safePreflightDetails(value, protectedValues) {
-  if (!isRecord(value)) return {}
-  const result = {}
-  // Project only this explicit nested schema. Raw provider/DB messages are never UI fields.
-  const labels = new Set(Object.values(PREFLIGHT_CAPABILITIES).flatMap(capabilities => Object.values(capabilities)))
-  if (Array.isArray(value.missing)) result.missing = value.missing.filter(label => typeof label === 'string' && labels.has(label))
-  for (const provider of ['hubspot', 'albi']) {
-    const source = value[provider]
-    if (!isRecord(source)) continue
-    const safe = {}
-    if (PREFLIGHT_STATUSES.has(source.status)) safe.status = source.status
-    if (typeof source.authenticated === 'boolean') safe.authenticated = source.authenticated
-    if (Array.isArray(source.checks)) {
-      safe.checks = source.checks.filter(check => isRecord(check) &&
-        Object.hasOwn(PREFLIGHT_CAPABILITIES[provider], check.capability) && PREFLIGHT_STATUSES.has(check.status))
-        .map(check => ({ capability: check.capability, status: check.status, label: PREFLIGHT_CAPABILITIES[provider][check.capability] }))
-    }
-    result[provider] = safe
-  }
-  if (isRecord(value.options)) {
-    result.options = {}
-    for (const group of PREFLIGHT_OPTION_GROUPS) {
-      if (!Array.isArray(value.options[group])) continue
-      result.options[group] = value.options[group].filter(option => isRecord(option) &&
-        safeOptionText(option.id, protectedValues) && /^[a-z0-9_.:-]+$/i.test(option.id) &&
-        safeOptionText(option.label, protectedValues))
-        .map(option => ({ id: option.id, label: option.label }))
-    }
-  }
-  return result
 }
 
 function validateDate(value, today) {
@@ -211,7 +155,8 @@ export function createSettingsHandler(options = {}) {
 
       function requireReady() {
         if (!credentials || config.preflight_status !== 'valid' || config.option_confirmation_status !== 'confirmed' ||
-          !completeMappings(mappings.map(toMapping)) || mappings.some(row => !row.confirmed_at)) {
+          !completeMappings(mappings.map(toMapping)) || mappings.some(row => !row.confirmed_at) ||
+          !mappingsMatchOptions(mappings.map(toMapping), config.preflight_details?.options)) {
           fail(409, 'Valid credentials, successful preflight, and confirmed option mappings are required.')
         }
         getSecrets() // Fail closed on unavailable key versions or unauthenticated envelopes.
@@ -245,6 +190,9 @@ export function createSettingsHandler(options = {}) {
           }
           case 'confirm_option_mappings': {
             const confirmed = validateMappings(body.optionMappings)
+            if (!mappingsMatchOptions(confirmed, config.preflight_details?.options)) {
+              fail(400, 'Option mappings must use IDs from the latest tenant preflight options.')
+            }
             await saveConfig({ state: 'disabled', option_confirmation_status: 'unconfirmed', options_confirmed_by: null, options_confirmed_at: null })
             const rows = confirmed.map(mapping => ({ company_id: companyId, mapping_kind: mapping.mappingKind,
               source_key: mapping.sourceKey, albi_id: mapping.albiId, label: mapping.label,

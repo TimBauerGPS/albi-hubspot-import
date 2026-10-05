@@ -13,6 +13,10 @@ const optionMappings = [
   { mappingKind: 'default_organization_type', sourceKey: 'default', albiId: 'org-1', label: 'Organization' },
   ...activities.map(sourceKey => ({ mappingKind: 'activity_type', sourceKey, albiId: `activity-${sourceKey}`, label: sourceKey })),
 ]
+const preflightOptions = {
+  contactTypes: [{ id: 'contact-1', label: 'Contact' }], organizationTypes: [{ id: 'org-1', label: 'Organization' }],
+  activityTypes: activities.map(type => ({ id: `activity-${type}`, label: type })),
+}
 const dbMapping = mapping => ({
   company_id: 'company-a', mapping_kind: mapping.mappingKind, source_key: mapping.sourceKey,
   albi_id: mapping.albiId, label: mapping.label, confirmed_by: 'user-1', confirmed_at: now,
@@ -27,7 +31,7 @@ function fixture({ role = 'admin', superAdmin = false, config = {}, credentials 
     super_admins: superAdmin ? [{ user_id: 'user-1' }] : [],
     h2a_company_config: config === null ? [] : [{
       company_id: 'company-a', state: 'disabled', selected_start_date: '2026-10-02', initial_start_locked_at: null,
-      preflight_status: 'unchecked', preflight_details: {}, preflight_checked_at: null,
+      preflight_status: 'unchecked', preflight_details: { options: preflightOptions }, preflight_checked_at: null,
       option_confirmation_status: 'unconfirmed', options_confirmed_by: null, options_confirmed_at: null,
       updated_at: '2026-10-01T10:00:00.000Z', ...config,
     }],
@@ -119,6 +123,34 @@ test('member GET returns masks, configuration, mappings and preflight without cr
   for (const forbidden of [hubspotToken, albiApiKey, 'ciphertext', 'key_version', 'hubspot_envelope', 'albi_envelope']) assert.equal(result.body.includes(forbidden), false)
   assert.equal(result.headers['Cache-Control'], 'no-store')
   assert.equal(f.writes.length, 0)
+})
+
+test('option confirmation and live activation reject IDs absent from tenant preflight options', async () => {
+  const f = fixture({ config: { preflight_status: 'valid', option_confirmation_status: 'confirmed', state: 'dry_run', initial_start_locked_at: now }, mappings: optionMappings })
+  const unavailable = optionMappings.map(mapping => ({ ...mapping, albiId: 'other-tenant-option' }))
+  assert.equal((await f.request('PUT', { action: 'confirm_option_mappings', optionMappings: unavailable })).statusCode, 400)
+  f.tables.h2a_option_mappings[0].albi_id = 'deleted-option'
+  assert.equal((await f.request('PUT', { action: 'activate_live' })).statusCode, 409)
+})
+
+test('malformed stored option groups fail closed without turning mapping validation into a server error', async () => {
+  const config = { preflight_status: 'valid', option_confirmation_status: 'unconfirmed', preflight_details: {
+    options: { ...preflightOptions, activityTypes: { id: 'not-a-list' } },
+  } }
+  const f = fixture({ config })
+  const result = await f.request('PUT', { action: 'confirm_option_mappings', optionMappings })
+  assert.equal(result.statusCode, 400)
+  assert.equal(f.writes.length, 0)
+})
+
+test('settings safe projection retains distinct activity reads and required option labels', async () => {
+  const f = fixture({ config: { preflight_details: {
+    missing: ['Albi activity reads', 'Albi contact type options', 'Albi organization type options', 'Albi activity type options', 'raw failure'],
+    albi: { status: 'invalid', checks: [{ capability: 'activities_read', status: 'invalid', error: 'private' }] },
+  } } })
+  const result = await f.request()
+  assert.deepEqual(result.json.preflight.details.missing, ['Albi activity reads', 'Albi contact type options', 'Albi organization type options', 'Albi activity type options'])
+  assert.deepEqual(result.json.preflight.details.albi.checks, [{ capability: 'activities_read', status: 'invalid', label: 'Albi activity reads' }])
 })
 
 test('first GET defaults to the current Pacific date without writing configuration', async () => {
