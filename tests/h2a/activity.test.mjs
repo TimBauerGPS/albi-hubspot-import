@@ -42,6 +42,7 @@ test('organization fallback requires zero associated contacts and exactly one sa
 test('builds concise plain text activity with occurrence, owner, title, outcome, and marker', () => {
   const activity = buildAlbiActivity({
     objectType: 'emails', activityId: '123', occurredAt: '2026-10-01T17:21:00.000Z',
+    emailEvidence: { source: 'hubspot_crm_engagement', objectType: 'emails', direction: 'EMAIL' },
     activityTypeId: '6711', ownerName: 'Alex Owner', subject: 'Welcome', outcome: 'Connected',
     body: '<p>Hello&nbsp;🌲 <strong>there</strong></p><script>bad()</script><img src="x">',
     target: { type: 'contact', id: '99' },
@@ -62,6 +63,7 @@ test('builds concise plain text activity with occurrence, owner, title, outcome,
 
 test('caps excerpts on Unicode boundaries and excludes email attachments and thread bodies', () => {
   const input = { objectType: 'emails', activityId: '4', occurredAt: '2026-10-01T17:21:00Z',
+    emailEvidence: { source: 'hubspot_crm_engagement', objectType: 'emails', direction: 'EMAIL' },
     activityTypeId: '8', body: '🌲'.repeat(10000), attachments: ['file.pdf'], thread: 'full thread text',
     target: { type: 'organization', id: '3' }, maxExcerptLength: 20 }
   const result = buildAlbiActivity(input)
@@ -74,8 +76,27 @@ test('caps excerpts on Unicode boundaries and excludes email attachments and thr
 
 test('rejects bulk marketing email activities and unsupported object types', () => {
   for (const data of [
-    { objectType: 'emails', isBulkMarketing: true },
+    { objectType: 'emails', emailEvidence: { source: 'hubspot_crm_engagement', objectType: 'emails', direction: 'EMAIL' }, isBulkMarketing: true },
     { objectType: 'marketing_emails' },
   ]) assert.throws(() => buildAlbiActivity({ ...data, activityId: '1', occurredAt: '2026-10-01T00:00:00Z',
     activityTypeId: '2', target: { type: 'contact', id: '3' } }))
+})
+
+test('HTML encoded tags remain escaped for Albi HTML-rendered notes', () => {
+  const result = buildAlbiActivity({ objectType: 'notes', activityId: '8', occurredAt: '2026-10-01T00:00:00Z',
+    activityTypeId: '2', body: '&lt;img src=x onerror=alert(1)&gt; safe &amp; sound', target: { type: 'contact', id: '3' } })
+  assert.match(result.notes, /&lt;img src=x onerror=alert\(1\)&gt;/)
+  assert.doesNotMatch(result.notes, /<img\b/i)
+})
+
+test('emails require explicit direct CRM engagement evidence with an allowed direction', () => {
+  const base = { objectType: 'emails', activityId: '1', occurredAt: '2026-10-01T00:00:00Z',
+    activityTypeId: '2', target: { type: 'contact', id: '3' } }
+  for (const emailEvidence of [undefined, {}, { source: 'hubspot_crm_engagement', objectType: 'emails', direction: '' },
+    { source: 'marketing_campaign', objectType: 'emails', direction: 'EMAIL' },
+    { source: 'hubspot_crm_engagement', objectType: 'emails', direction: 'MARKETING' }]) {
+    assert.throws(() => buildAlbiActivity({ ...base, emailEvidence }))
+  }
+  assert.doesNotThrow(() => buildAlbiActivity({ ...base,
+    emailEvidence: { source: 'hubspot_crm_engagement', objectType: 'emails', direction: 'EMAIL' } }))
 })

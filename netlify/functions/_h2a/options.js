@@ -1,8 +1,16 @@
 const text = value => typeof value === 'string' && value.trim() !== '' ? value.trim() : null
 const truthy = value => value === true || value === 'true'
+const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/
+
+function validConfirmationTimestamp(value) {
+  if (typeof value !== 'string' || !ISO_TIMESTAMP.test(value) || !Number.isFinite(Date.parse(value))) return false
+  const date = value.slice(0, 10)
+  return new Date(`${date}T00:00:00.000Z`).toISOString().slice(0, 10) === date
+}
 
 function confirmed(mapping) {
-  return Boolean(mapping && truthy(mapping.confirmed ?? mapping.is_confirmed ?? mapping.confirmed_at))
+  return Boolean(mapping && (truthy(mapping.confirmed) || truthy(mapping.is_confirmed) ||
+    validConfirmationTimestamp(mapping.confirmed_at)))
 }
 
 function byKind(mappings, kind) {
@@ -30,7 +38,9 @@ export function resolveContactType(input = {}) {
     if (contactTypeId) return { action: 'resolved', contactTypeId, source: 'default' }
   }
   const directDefault = text(input.defaultContactTypeId)
-  if (directDefault && truthy(input.defaultConfirmed)) return { action: 'resolved', contactTypeId: directDefault, source: 'default' }
+  if (directDefault && (truthy(input.defaultConfirmed) || validConfirmationTimestamp(input.defaultConfirmedAt))) {
+    return { action: 'resolved', contactTypeId: directDefault, source: 'default' }
+  }
   return resultConflict('default_contact_type')
 }
 

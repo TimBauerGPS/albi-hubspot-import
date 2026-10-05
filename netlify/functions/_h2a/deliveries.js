@@ -14,12 +14,16 @@ function normalizeIdentity(identity) {
 function dispositionForExisting(row, now) {
   if (row.state === 'delivered') return 'delivered'
   if (row.state === 'reconciled') return 'reconciled'
-  if (row.state === 'failed' && row.next_attempt_at && Date.parse(row.next_attempt_at) > Date.parse(now)) return 'retry_scheduled'
+  if (row.state === 'failed') {
+    const retryAt = Date.parse(row.next_attempt_at)
+    if (row.next_attempt_at && Number.isFinite(retryAt) && retryAt > Date.parse(now)) return 'retry_scheduled'
+    if (!row.next_attempt_at || !Number.isFinite(retryAt)) return 'failed'
+  }
   return 'in_progress'
 }
 
 function versionOf(row) {
-  const value = Number(row.version ?? row.attempt_count)
+  const value = Number(row.attempt_count)
   if (!Number.isSafeInteger(value) || value < 1) throw new TypeError('Delivery reservation is missing a fencing version')
   return value
 }
@@ -36,9 +40,9 @@ function matchingActivity(records, reservation, nativeExternalIdSupported) {
   const marker = reservation.sourceMarker
   return (Array.isArray(records) ? records : []).find(record => {
     if (!record || typeof record !== 'object') return false
-    if (nativeExternalIdSupported && String(record.sourceId ?? '') === expectedId) return true
+    if (nativeExternalIdSupported && record.source === 'hubspot' && String(record.sourceId ?? '') === expectedId) return true
     const notes = String(record.notes ?? record.description ?? '')
-    return notes.includes(marker)
+    return notes.split(/\r?\n/u).some(line => line.trim() === marker)
   }) ?? null
 }
 
@@ -57,27 +61,57 @@ export async function reserveDelivery(input = {}) {
   if (!input.store || typeof input.store.reserve !== 'function') throw new TypeError('A delivery store is required')
   const identity = normalizeIdentity(input.identity ?? input)
   const now = typeof input.now === 'function' ? input.now() : (input.now ?? new Date().toISOString())
+  const nowMs = Date.parse(now)
+  if (!Number.isFinite(nowMs)) throw new TypeError('A valid reservation time is required')
+  const staleAfterMs = Number.isInteger(input.staleAfterMs) ? Math.min(60 * 60_000, Math.max(30_000, input.staleAfterMs)) : 5 * 60_000
+  const staleBefore = new Date(nowMs - staleAfterMs).toISOString()
   const sourceMarker = makeSourceMarker({ objectType: SINGULAR_TYPES[identity.objectType], activityId: identity.activityId })
-  const attemptToken = typeof input.createAttemptToken === 'function' ? input.createAttemptToken() : null
   const reservationResult = await input.store.reserve({
     identity,
     key: identity.key,
     source_marker: sourceMarker,
-    attemptToken,
     now,
-    // Persistence uses attempt_count as a monotonically increasing CAS version;
-    // transitions must compare it with state='reserved' after the HTTP call.
+    staleBefore,
+    retryEligibleAt: now,
+    // The store atomically inserts or reclaims an eligible row and increments attempt_count.
+    // That persisted generation is the fencing token used by conditional transitions.
   })
   if (!reservationResult?.row) throw new TypeError('Delivery store returned no reservation row')
   const row = reservationResult.row
   if (!reservationResult.acquired) {
     return { disposition: dispositionForExisting(row, now), identity, sourceMarker, id: row.id, delivery: row }
   }
+  if (typeof reservationResult.isNew !== 'boolean') throw new TypeError('Delivery store must identify new versus reclaimed reservations')
+  const previous = reservationResult.previous
+  if (!reservationResult.isNew) {
+    if (!previous || typeof previous !== 'object') throw new TypeError('Reclaimed reservations must include their prior eligibility state')
+    const retryWasDue = previous.state === 'failed' && previous.next_attempt_at &&
+      Number.isFinite(Date.parse(previous.next_attempt_at)) && Date.parse(previous.next_attempt_at) <= nowMs
+    const reservedWasStale = previous.state === 'reserved' &&
+      (previous.last_attempt_at == null || (Number.isFinite(Date.parse(previous.last_attempt_at)) &&
+        Date.parse(previous.last_attempt_at) <= Date.parse(staleBefore)))
+    if (!retryWasDue && !reservedWasStale) throw new TypeError('Delivery store reclaimed an ineligible attempt')
+  }
+  const version = versionOf(row)
   const reservation = {
     disposition: 'reserved', identity, sourceMarker, id: row.id, delivery: row,
-    attemptToken, version: versionOf(row), attemptCount: Number(row.attempt_count ?? row.version),
+    attemptToken: String(version), version, attemptCount: version,
+    safeToCreate: reservationResult.isNew, reconciledBeforeCreate: false,
+    previousState: previous?.state ?? null,
   }
-  return reservation
+  const requiresReconciliation = !reservationResult.isNew
+  if (!requiresReconciliation) return { ...reservation, safeToCreate: true }
+  if (!input.albi || typeof input.albi.listActivities !== 'function') {
+    throw new TypeError('Reclaimed delivery attempts require Albi reconciliation before create')
+  }
+  const reconciled = await reconcileDelivery({
+    reservation, store: input.store, albi: input.albi,
+    nativeExternalIdSupported: input.nativeExternalIdSupported === true,
+    query: input.reconcileQuery, now: input.now,
+    maxPages: input.maxReconcilePages,
+  })
+  if (reconciled.disposition !== 'not_found') return reconciled
+  return { ...reservation, safeToCreate: true, reconciledBeforeCreate: true }
 }
 
 export async function reconcileDelivery(input = {}) {
@@ -87,11 +121,27 @@ export async function reconcileDelivery(input = {}) {
   }
   const query = input.query ?? {}
   const targetKey = reservation.identity.albiTargetType === 'contact' ? 'contactId' : 'organizationId'
-  const response = await albi.listActivities({ ...query, [targetKey]: reservation.identity.albiTargetId })
-  const match = matchingActivity(response?.records, reservation, input.nativeExternalIdSupported === true)
+  const maxPages = Number.isInteger(input.maxPages) ? Math.min(50, Math.max(1, input.maxPages)) : 25
+  const seen = new Set()
+  let page = 1
+  let match = null
+  for (let count = 0; count < maxPages; count++) {
+    if (seen.has(String(page))) throw new Error('Albi reconciliation pagination repeated a page')
+    seen.add(String(page))
+    const response = await albi.listActivities({ ...query, [targetKey]: reservation.identity.albiTargetId, page })
+    if (!response || !Array.isArray(response.records)) throw new Error('Albi reconciliation returned an invalid page')
+    match = matchingActivity(response.records, reservation, input.nativeExternalIdSupported === true)
+    if (match) break
+    if (response.cursor == null) break
+    const nextPage = String(response.cursor)
+    if (!/^[1-9]\d*$/u.test(nextPage) || Number(nextPage) <= Number(page)) throw new Error('Albi reconciliation returned an invalid cursor')
+    if (count === maxPages - 1) throw new Error('Albi reconciliation page limit exceeded')
+    page = nextPage
+  }
   if (!match) return { disposition: 'not_found', delivery: reservation.delivery }
+  const deliveredAt = typeof input.now === 'function' ? input.now() : (input.now ?? new Date().toISOString())
   return conditionalTransition({ reservation, store, state: 'reconciled', patch: {
-    albi_activity_id: String(match.id), delivered_at: input.now?.() ?? new Date().toISOString(),
+    albi_activity_id: String(match.id), delivered_at: deliveredAt,
     next_attempt_at: null, last_error_summary: null,
   } })
 }
@@ -101,6 +151,7 @@ export async function completeDelivery(input = {}) {
   if (!reservation || reservation.disposition !== 'reserved' || !store || typeof store.transition !== 'function') {
     throw new TypeError('An active reservation and delivery store are required')
   }
+  if (reservation.safeToCreate !== true) throw new TypeError('Delivery must be reconciled before create or completion')
   const now = typeof input.now === 'function' ? input.now() : (input.now ?? new Date().toISOString())
   if (!input.error) {
     const activityId = input.result?.id === undefined || input.result?.id === null ? '' : String(input.result.id)

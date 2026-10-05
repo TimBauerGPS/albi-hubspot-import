@@ -2,6 +2,7 @@ import { HUBSPOT_ACTIVITY_TYPES } from './constants.js'
 import { makeSourceMarker } from './keys.js'
 
 const SINGULAR_TYPES = Object.freeze({ meetings: 'meeting', calls: 'call', emails: 'email', communications: 'communication', notes: 'note' })
+const DIRECT_EMAIL_DIRECTIONS = new Set(['EMAIL'])
 const text = value => typeof value === 'string' ? value.trim() : ''
 const identity = value => value === undefined || value === null || String(value).trim() === '' ? null : String(value)
 
@@ -81,13 +82,23 @@ function plainTextExcerpt(value, maxLength) {
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ' ')
     .replace(/\s+/gu, ' ')
     .trim()
-  return Array.from(plain).slice(0, maxLength).join('')
+  const safe = plain.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  return Array.from(safe).slice(0, maxLength).join('')
+}
+
+function hasDirectEmailEvidence(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) &&
+    value.source === 'hubspot_crm_engagement' && value.objectType === 'emails' &&
+    DIRECT_EMAIL_DIRECTIONS.has(text(value.direction).toUpperCase())
 }
 
 function validActivity(input) {
   if (!HUBSPOT_ACTIVITY_TYPES.includes(input.objectType) || !identity(input.activityId)) throw new TypeError('Unsupported HubSpot activity identity')
-  if (input.objectType === 'emails' && (input.isBulkMarketing === true || input.isMarketingEmail === true || input.marketingCampaignId)) {
-    throw new TypeError('Bulk marketing email activities are not eligible')
+  if (input.objectType === 'emails') {
+    if (input.isBulkMarketing === true || input.isMarketingEmail === true || input.marketingCampaignId) {
+      throw new TypeError('Bulk marketing email activities are not eligible')
+    }
+    if (!hasDirectEmailEvidence(input.emailEvidence)) throw new TypeError('Direct CRM email evidence is required')
   }
   if (typeof input.occurredAt !== 'string' || !Number.isFinite(Date.parse(input.occurredAt))) throw new TypeError('Activity occurrence time is required')
   if (!identity(input.activityTypeId)) throw new TypeError('A confirmed tenant activity type ID is required')
