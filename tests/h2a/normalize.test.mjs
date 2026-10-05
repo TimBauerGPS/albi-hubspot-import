@@ -11,7 +11,7 @@ import {
 } from '../../netlify/functions/_h2a/normalize.js'
 
 test('normalizes ten-digit US phones and common punctuation for comparison and Albi writes', () => {
-  for (const value of ['4155550123', '(415) 555-0123', '415.555.0123', '+1 415-555-0123', '1 (415) 555-0123']) {
+  for (const value of ['4155550123', '(415) 555-0123', '415.555.0123', '+1 415-555-0123', '1 (415) 555-0123', '+14155550123']) {
     assert.deepEqual(normalizePhone(value), {
       comparable: '4155550123', writable: '415-555-0123', extension: null, conflictReason: null,
     })

@@ -54,6 +54,24 @@ test('conflicts on duplicate exact contact email or phone candidates', () => {
   }
 })
 
+test('does not treat unsupported phone extensions as exact identity evidence', () => {
+  const result = decideContactMatch({
+    sourceId: 'hs-1', source: { phone: '415-555-0123 ext 204' },
+    candidates: [contact('albi-1', { phoneNumber: '415-555-0123 ext 205' })],
+  })
+  assert.equal(result.action, 'conflict')
+  assert.equal(result.reason, 'unsupported_phone_evidence')
+})
+
+test('exact email match conflicts when both records have different phone identity evidence', () => {
+  const result = decideContactMatch({
+    sourceId: 'hs-1', source: { email: 'jane@example.com', phone: '4155550123' },
+    candidates: [contact('albi-1', { email: 'jane@example.com', phoneNumber: '5105550199' })],
+  })
+  assert.equal(result.action, 'conflict')
+  assert.equal(result.reason, 'email_phone_disagree')
+})
+
 test('routes name-only contact candidates to review and creates when none exist', () => {
   const review = decideContactMatch({
     source: { firstName: 'Jane', lastName: 'Doe' },
@@ -69,7 +87,7 @@ test('routes name-only contact candidates to review and creates when none exist'
 
 test('honors an existing contact mapping unless another source already owns its target', () => {
   const mapped = decideContactMatch({
-    sourceId: 'hs-1', source: {}, candidates: [], existingMapping: { targetId: 'albi-1' },
+    sourceId: 'hs-1', source: {}, candidates: [], existingMapping: { sourceId: 'hs-1', targetId: 'albi-1' },
   })
   assert.deepEqual([mapped.action, mapped.targetId, mapped.reason], ['link', 'albi-1', 'existing_mapping'])
   const collision = decideContactMatch({
@@ -88,6 +106,28 @@ test('conflicts instead of creating a second contact source mapping automaticall
   })
   assert.equal(result.action, 'conflict')
   assert.equal(result.reason, 'target_already_mapped')
+})
+
+test('fails closed on target ownership when the current source ID is missing', () => {
+  const result = decideContactMatch({
+    source: { email: 'jane@example.com' },
+    candidates: [contact('albi-1', { email: 'jane@example.com' })],
+    mappings: [{ hubspot_id: 'hs-owner', albi_contact_id: 'albi-1' }],
+  })
+  assert.equal(result.action, 'conflict')
+  assert.equal(result.reason, 'target_already_mapped')
+})
+
+test('matches directly from HubSpot adapter properties and Albi contact fields', () => {
+  const result = decideContactMatch({
+    sourceContact: { id: 'hs-1', properties: {
+      firstname: 'Jane', lastname: 'Doe', email: 'JANE@example.com', mobilephone: '4155550123',
+    } },
+    candidates: [contact('albi-1', { firstName: 'Jane', lastName: 'Doe', email: 'jane@example.com', mobileNumber: '415-555-0123' })],
+  })
+  assert.equal(result.action, 'link')
+  assert.equal(result.reason, 'unique_exact_match')
+  assert.ok(result.evidence.includes('mobilePhone'))
 })
 
 test('accepts the persisted H2A mapping column names and checks target ownership', () => {
@@ -148,24 +188,62 @@ test('conflicts for organization name only, duplicates, and contradictory eviden
 
 test('applies shared field policy: equal unchanged, blank filled, different nonblank proposed', () => {
   const changes = decideFieldChanges({
+    entityType: 'contact',
     source: { email: 'JANE@example.com', phone: '(415) 555-0123', address: '1 Oak Rd.' },
-    target: { email: 'jane@EXAMPLE.com', phone: null, address: '2 Pine Rd.' },
+    target: { email: 'jane@EXAMPLE.com', phoneNumber: null, address1: '2 Pine Rd.' },
   })
   assert.deepEqual(changes, {
-    updates: { phone: '(415) 555-0123' },
-    conflicts: { address: { current: '2 Pine Rd.', proposed: '1 Oak Rd.' } },
+    updates: { phoneNumber: '415-555-0123' },
+    conflicts: { address1: { current: '2 Pine Rd.', proposed: '1 Oak Rd.' } },
     unchanged: ['email'],
   })
 })
 
 test('routes phone values that cannot be safely written into field review', () => {
   const changes = decideFieldChanges({
+    entityType: 'contact',
     source: { phone: '+1 415-555-0123 ext 9' },
-    target: { phone: null },
+    target: { phoneNumber: null },
   })
   assert.deepEqual(changes, {
     updates: {},
-    conflicts: { phone: { current: null, proposed: '+1 415-555-0123 ext 9', reason: 'extension_not_supported' } },
+    conflicts: { phoneNumber: { current: null, proposed: '+1 415-555-0123 ext 9', reason: 'extension_not_supported' } },
     unchanged: [],
   })
+})
+
+test('emits only canonical Albi contact fields and ignores source aliases and unknown keys', () => {
+  const changes = decideFieldChanges({
+    entityType: 'contact',
+    source: {
+      id: 'hs-1', firstname: 'Jane', firstName: 'JANE', lastname: 'Doe', email: 'jane@example.com',
+      phone: '4155550123', phoneNumber: '4155550123', mobilephone: '5105550199',
+      address: '1 Oak St.', city: 'Oakland', zip: '94601', website: 'example.com', unknownField: 'drop me',
+    },
+    target: { id: 'albi-id', firstName: '', lastName: null, email: '', phoneNumber: '', mobileNumber: '', address1: '', city: '', zipcode: '' },
+  })
+  assert.deepEqual(changes.updates, {
+    firstName: 'JANE', lastName: 'Doe', email: 'jane@example.com', phoneNumber: '415-555-0123',
+    mobileNumber: '510-555-0199', address1: '1 Oak St.', city: 'Oakland', zipcode: '94601',
+  })
+})
+
+test('treats whitespace-only Albi values as blank when filling allowed fields', () => {
+  const changes = decideFieldChanges({
+    entityType: 'contact', source: { email: 'jane@example.com' }, target: { email: '   ' },
+  })
+  assert.deepEqual(changes.updates, { email: 'jane@example.com' })
+})
+
+test('uses Albi address1 as organization address corroboration and requires a name for creation', () => {
+  const linked = decideOrganizationMatch({
+    sourceCompany: { id: 'hs-org', properties: { name: 'Acme', address: '123 Main St.' } },
+    candidates: [org('albi-org', { name: 'ACME', address1: '123 Main Street' })],
+  })
+  assert.equal(linked.action, 'link')
+  assert.deepEqual(linked.evidence, ['name', 'address'])
+
+  const missingName = decideOrganizationMatch({ source: { domain: 'new.example' }, candidates: [] })
+  assert.equal(missingName.action, 'conflict')
+  assert.equal(missingName.reason, 'missing_required_name')
 })

@@ -23,7 +23,8 @@ export function normalizePhone(value) {
   const digits = main.replace(/\D/g, '')
   const hasInternationalPrefix = /^\s*(?:\+|00)/.test(main)
 
-  if (hasInternationalPrefix && !/^\s*\+?1(?:\D|$)/.test(main)) {
+  const isE164Us = /^\s*\+1\d{10}\s*$/.test(main)
+  if (hasInternationalPrefix && !isE164Us && !/^\s*\+?1(?:\D|$)/.test(main)) {
     return { comparable: null, writable: null, extension, conflictReason: 'unsupported_international_format' }
   }
 
