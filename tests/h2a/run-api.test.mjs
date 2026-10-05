@@ -151,3 +151,38 @@ test('scheduled background dispatch checks the stable run, tenant and Pacific bu
   assert.equal((await handler({ httpMethod: 'POST', body: JSON.stringify({ ...body, businessDate: '2026-02-30' }) })).statusCode, 400)
   assert.equal(invoked, 1)
 })
+
+test('scheduled lease collision is retryable and leaves the stable queued run reclaimable', async () => {
+  const claimId = '00000000-0000-4000-8000-000000000001'
+  let retired = false
+  const handler = createRunHandler({ requireRequest: async () => ({ companyId: 'c1' }), repository: {
+    getRun: async (companyId, id) => ({ id, company_id: companyId, trigger: 'scheduled', business_date: '2026-10-05', status: 'queued' }),
+    markRunCollision: async () => { retired = true },
+  }, makeClients: async () => ({ hubspot: {}, albi: {} }),
+  runSync: async () => ({ status: 'already_running', companyId: 'c1' }) }, { background: true })
+  const response = await handler({ httpMethod: 'POST', body: JSON.stringify({ companyId: 'c1', mode: 'live', trigger: 'scheduled',
+    runId: claimId, schedulerClaimId: claimId, businessDate: '2026-10-05' }) })
+  assert.equal(response.statusCode, 409)
+  assert.equal(JSON.parse(response.body).status, 'retryable')
+  assert.equal(retired, false)
+})
+
+test('thrown persisted failure attempts one tenant-scoped notification without masking the sanitized 502', async () => {
+  const runId = '00000000-0000-4000-8000-000000000002'
+  const notifications = []
+  const error = Object.assign(new Error('sensitive provider response'), { h2aPersistedFailure: {
+    runId, totals: { failed: 1 }, newConflictCount: 0,
+  } })
+  const handler = createRunHandler({ requireRequest: async () => ({ companyId: 'tenant-1', companyName: 'Tenant One', supabase: {} }),
+    repository: {}, makeClients: async () => ({ hubspot: {}, albi: {} }), runSync: async () => { throw error },
+    notifyRunExceptions: async (options, input) => { notifications.push({ options, input }); throw Error('email secret') },
+  }, { background: true })
+  const response = await handler({ httpMethod: 'POST', body: JSON.stringify({ companyId: 'tenant-1', mode: 'live', trigger: 'scheduled',
+    runId, schedulerClaimId: runId, businessDate: '2026-10-05' }) })
+  assert.equal(response.statusCode, 502)
+  assert.deepEqual(JSON.parse(response.body), { error: 'Unable to start H2A sync.' })
+  assert.equal(notifications.length, 1)
+  assert.equal(notifications[0].input.companyId, 'tenant-1')
+  assert.deepEqual(notifications[0].input.run, { id: runId, status: 'failed', totals: { failed: 1 } })
+  assert.equal(JSON.stringify(response).includes('sensitive provider response'), false)
+})

@@ -8,6 +8,25 @@ test('lease collision returns stable already-running result without provider acc
   assert.deepEqual(result, { status: 'already_running', companyId: 'c1' })
 })
 
+test('a persisted orchestrator failure carries only durable notification metadata to its caller', async () => {
+  const transitions = []
+  const repository = {
+    claimLease: async () => true, releaseLease: async () => {},
+    getConfig: async () => ({ state: 'live', portal_id: '123', selected_start_date: '2026-10-01', preflight_status: 'valid' }),
+    startRun: async () => ({ id: 'run-failed' }),
+    getMappings: async () => { throw Error('private provider detail') },
+    totals: async () => ({ failed: 1 }),
+    finishRun: async (_company, runId, status, totals) => { transitions.push({ runId, status, totals }) },
+  }
+  await assert.rejects(() => runCompanySync({ repository, albi: {}, hubspot: {} },
+    { companyId: 'c1', mode: 'live', trigger: 'scheduled', runId: 'run-failed' }), error => {
+      assert.deepEqual(error.h2aPersistedFailure, { runId: 'run-failed', totals: { failed: 1 }, newConflictCount: 0 })
+      assert.equal(error.message, 'private provider detail')
+      return true
+    })
+  assert.deepEqual(transitions, [{ runId: 'run-failed', status: 'failed', totals: { failed: 1 } }])
+})
+
 test('dry run records previews and leaves every live mutation unused', async () => {
   const items = []
   const repo = {

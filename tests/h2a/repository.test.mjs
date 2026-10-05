@@ -174,3 +174,24 @@ test('targeted resume intent and skipped conflict lookups carry explicit tenant 
   assert.ok(calls.some(call => call[0] === 'eq' && call[1] === 'company_id' && call[2] === 'company-1'))
   assert.equal(calls.filter(call => call[0] === 'from').every(call => ['h2a_conflict_resumes', 'h2a_conflicts'].includes(call[1])), true)
 })
+
+test('a skipped activity in an old portal does not suppress that ID in a new portal', async () => {
+  const oldPortalSkip = { company_id: 'company-1', portal_id: 'old-portal', object_type: 'calls', source_id: 'activity-1',
+    activity_object_type: null, activity_id: null, status: 'skipped' }
+  const filtersByLookup = []
+  const supabase = { from: table => {
+    assert.equal(table, 'h2a_conflicts')
+    const filters = []
+    const query = { select() { return this }, eq(key, value) { filters.push([key, value]); return this },
+      is(key, value) { filters.push([key, value]); return this }, limit() { return this },
+      maybeSingle: async () => {
+        filtersByLookup.push(filters)
+        return { data: filters.every(([key, value]) => oldPortalSkip[key] === value) ? oldPortalSkip : null, error: null }
+      } }
+    return query
+  }, rpc: async () => ({ data: true }) }
+  const repository = createH2ARepository(supabase)
+  assert.equal(await repository.isSkippedItem('company-1', 'new-portal', 'calls', 'activity-1'), false)
+  assert.equal(filtersByLookup.length, 2)
+  assert.ok(filtersByLookup.every(filters => filters.some(([key, value]) => key === 'portal_id' && value === 'new-portal')))
+})

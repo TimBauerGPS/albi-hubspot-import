@@ -80,6 +80,7 @@ export function createRunHandler(options = {}, { background = false } = {}) {
     if (event.httpMethod !== 'POST') return reply(405, { error: 'Method not allowed.' })
     let acceptedRun
     let acceptedResume
+    let notificationContext
     try {
       const body = requestBody(event)
       if (background && (typeof body.companyId !== 'string' || !body.companyId.trim())) fail(400, 'Company ID is required.')
@@ -90,6 +91,7 @@ export function createRunHandler(options = {}, { background = false } = {}) {
         requestedCompanyId: body.companyId,
       })
       const companyId = auth.companyId
+      notificationContext = { auth, companyId }
       const repository = options.repository ?? createH2ARepository(auth.supabase)
       if (!background) {
         const config = await repository.getConfig(companyId)
@@ -143,10 +145,20 @@ export function createRunHandler(options = {}, { background = false } = {}) {
         companyId, mode: body.mode, trigger: body.trigger ?? 'scheduled', runId: body.runId ?? null,
         schedulerClaimId: body.schedulerClaimId ?? null,
       })
-      if (result.status === 'already_running' && body.runId && body.trigger !== 'scheduled') await repository.markRunCollision(companyId, body.runId)
+      if (result.status === 'already_running' && body.runId && body.trigger === 'scheduled') {
+        return reply(409, { status: 'retryable', companyId })
+      }
+      if (result.status === 'already_running' && body.runId) await repository.markRunCollision(companyId, body.runId)
       await notifyAfterRun(options, auth, companyId, result)
       return reply(200, result)
     } catch (error) {
+      const persistedFailure = error?.h2aPersistedFailure
+      if (persistedFailure && notificationContext) {
+        await notifyAfterRun(options, notificationContext.auth, notificationContext.companyId, {
+          status: 'failed', runId: persistedFailure.runId, totals: persistedFailure.totals,
+          newConflictCount: persistedFailure.newConflictCount,
+        })
+      }
       if (acceptedResume) {
         try { await acceptedResume.repository.requeueConflictResume?.(acceptedResume.companyId, acceptedResume.resumeId) }
         catch { /* The intent remains visible for operational recovery. */ }

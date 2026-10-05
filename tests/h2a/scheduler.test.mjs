@@ -70,6 +70,21 @@ test('same stable daily run identity is retried after dispatch failure and claim
   assert.deepEqual(accepted, [false, true])
 })
 
+test('scheduled lease collision leaves daily claim pending and retries the same run identity', async () => {
+  let claimState = { id: 'claim-stable', acquired: true }
+  const runIds = [], outcomes = []
+  let attempt = 0
+  const { handler } = fixture({ claim: async () => claimState,
+    dispatch: async payload => { runIds.push(payload.runId); attempt += 1; return attempt > 1 },
+    finish: async args => { outcomes.push(args.p_accepted); claimState = args.p_accepted
+      ? { id: 'claim-stable', acquired: false } : { id: 'claim-stable', acquired: true }; return true } })
+  await handler({})
+  await handler({})
+  await handler({})
+  assert.deepEqual(runIds, ['claim-stable', 'claim-stable'])
+  assert.deepEqual(outcomes, [false, true])
+})
+
 test('schedule metadata uses the hourly Netlify cron expression', async () => {
   const mod = await import('../../netlify/functions/nightly-h2a-sync.js')
   assert.deepEqual(mod.config, { schedule: '17 * * * *' })

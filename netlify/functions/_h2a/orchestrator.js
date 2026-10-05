@@ -341,7 +341,7 @@ export async function runCompanySync(deps, input = {}) {
   const ownerToken = deps.ownerToken ?? randomUUID()
   const acquired = await repo.claimLease(companyId, ownerToken, 900)
   if (!acquired) return { status: 'already_running', companyId }
-  let run, status = 'completed', totals = {}, continuation = false, response, continuationPayload
+  let run, ctx, status = 'completed', totals = {}, continuation = false, response, continuationPayload
   const budget = Math.max(1000, Math.min(13 * 60_000, input.timeBudgetMs ?? 13 * 60_000))
   const deadline = clockMs(deps) + budget
   try {
@@ -361,7 +361,7 @@ export async function runCompanySync(deps, input = {}) {
     let owners = []
     try { owners = deps.hubspot.listOwners ? await retryRead(deps, () => deps.hubspot.listOwners(), deadline) : [] }
     catch { /* Owner names are optional metadata; activity sync remains eligible. */ }
-    const ctx = { companyId, runId: run.id, portalId: config.portal_id, mode, mappings, indexes,
+    ctx = { companyId, runId: run.id, portalId: config.portal_id, mode, mappings, indexes,
       owners: new Map(owners.map(owner => [String(owner.id), owner])), activity: null, newConflictCount: 0 }
     if (input.resumeId) {
       const intent = await repo.getConflictResume(companyId, input.resumeId)
@@ -467,6 +467,8 @@ export async function runCompanySync(deps, input = {}) {
     if (run) {
       totals = await repo.totals(companyId, run.id)
       await repo.finishRun(companyId, run.id, 'failed', totals, safeError(error))
+      if (!(error instanceof Error)) error = new Error('H2A run failed')
+      error.h2aPersistedFailure = { runId: run.id, totals, newConflictCount: ctx?.newConflictCount ?? 0 }
       if (input.resumeId) await repo.requeueConflictResume?.(companyId, input.resumeId)
     }
     throw error
