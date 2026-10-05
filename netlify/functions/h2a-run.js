@@ -119,7 +119,7 @@ export function createRunHandler(options = {}, { background = false } = {}) {
           return reply(200, { status: 'already_accepted', companyId, resumeId: body.resumeId, runId: existing.id })
         }
         const clients = await clientsFor(companyId, repository, options)
-        const result = await (options.runSync ?? runCompanySync)({ ...clients, repository,
+        const result = await (options.runSync ?? runCompanySync)({ ...clients, repository, logger: options.logger,
           dispatchContinuation: payload => dispatchBackground(payload, options) }, { companyId, mode: 'live', trigger: 'conflict_resolution', resumeId: body.resumeId })
         await notifyAfterRun(options, auth, companyId, result)
         return reply(200, result)
@@ -141,7 +141,7 @@ export function createRunHandler(options = {}, { background = false } = {}) {
       }
       const clients = await clientsFor(companyId, repository, options)
       const result = await (options.runSync ?? runCompanySync)({ ...clients, repository,
-        dispatchContinuation: payload => dispatchBackground(payload, options) }, {
+        logger: options.logger, dispatchContinuation: payload => dispatchBackground(payload, options) }, {
         companyId, mode: body.mode, trigger: body.trigger ?? 'scheduled', runId: body.runId ?? null,
         schedulerClaimId: body.schedulerClaimId ?? null,
       })

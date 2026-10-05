@@ -17,6 +17,11 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 const ERROR_CATEGORIES = new Set(['auth', 'permission', 'validation', 'permanent', 'transient', 'rate_limit'])
 const ERROR_CODES = new Set(['pagination_loop', 'malformed_response', 'application_error', 'unsupported_contract', 'timeout', 'network'])
 const safeError = error => `${ERROR_CATEGORIES.has(error?.category) ? error.category : 'error'}:${ERROR_CODES.has(error?.code) ? error.code : 'operation_failed'}`
+function logCleanupFailure(deps, phase, error) {
+  const logger = deps.logger ?? console
+  try { (logger.warn ?? logger.error)?.call(logger, 'H2A cleanup failed', { phase, reason: safeError(error) }) }
+  catch { /* Cleanup logging is best-effort and never replaces run state. */ }
+}
 const SNAPSHOT_FIELDS = ['id', 'firstname', 'lastname', 'firstName', 'lastName', 'name', 'email', 'phone', 'phoneNumber',
   'mobilephone', 'mobileNumber', 'domain', 'address', 'address1', 'city', 'state', 'zip', 'zipcode', 'country']
 function safeSnapshot(record) {
@@ -341,7 +346,7 @@ export async function runCompanySync(deps, input = {}) {
   const ownerToken = deps.ownerToken ?? randomUUID()
   const acquired = await repo.claimLease(companyId, ownerToken, 900)
   if (!acquired) return { status: 'already_running', companyId }
-  let run, ctx, status = 'completed', totals = {}, continuation = false, response, continuationPayload
+  let run, ctx, primaryError = null, status = 'completed', totals = {}, continuation = false, response, continuationPayload
   const budget = Math.max(1000, Math.min(13 * 60_000, input.timeBudgetMs ?? 13 * 60_000))
   const deadline = clockMs(deps) + budget
   try {
@@ -464,16 +469,25 @@ export async function runCompanySync(deps, input = {}) {
     response = { status, companyId, runId: run.id, totals, newConflictCount: ctx.newConflictCount, continuation }
     if (continuation) continuationPayload = { companyId, mode, trigger: 'resume', runId: run.id }
   } catch (error) {
+    primaryError = error instanceof Error ? error : new Error('H2A run failed')
     if (run) {
-      totals = await repo.totals(companyId, run.id)
-      await repo.finishRun(companyId, run.id, 'failed', totals, safeError(error))
-      if (!(error instanceof Error)) error = new Error('H2A run failed')
-      error.h2aPersistedFailure = { runId: run.id, totals, newConflictCount: ctx?.newConflictCount ?? 0 }
-      if (input.resumeId) await repo.requeueConflictResume?.(companyId, input.resumeId)
+      try {
+        totals = await repo.totals(companyId, run.id)
+        await repo.finishRun(companyId, run.id, 'failed', totals, safeError(primaryError))
+        primaryError.h2aPersistedFailure = { runId: run.id, totals, newConflictCount: ctx?.newConflictCount ?? 0 }
+      } catch (persistError) { logCleanupFailure(deps, 'failure_persist', persistError) }
+      if (input.resumeId) {
+        try { await repo.requeueConflictResume?.(companyId, input.resumeId) }
+        catch (cleanupError) { logCleanupFailure(deps, 'resume_requeue', cleanupError) }
+      }
     }
-    throw error
+    throw primaryError
   } finally {
-    await repo.releaseLease(companyId, ownerToken)
+    try { await repo.releaseLease(companyId, ownerToken) }
+    catch (cleanupError) {
+      logCleanupFailure(deps, 'lease_release', cleanupError)
+      if (!primaryError) throw cleanupError
+    }
   }
   // The next worker must not race the lease held by this invocation.
   if (continuationPayload) await deps.dispatchContinuation?.(continuationPayload)

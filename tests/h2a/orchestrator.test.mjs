@@ -27,6 +27,53 @@ test('a persisted orchestrator failure carries only durable notification metadat
   assert.deepEqual(transitions, [{ runId: 'run-failed', status: 'failed', totals: { failed: 1 } }])
 })
 
+test('a failed resume keeps its persisted failure primary when requeue cleanup throws', async () => {
+  const cleanupLogs = []
+  const primary = Error('source operation failed')
+  const repository = {
+    claimLease: async () => true, releaseLease: async () => {},
+    getConfig: async () => ({ state: 'live', portal_id: '123', selected_start_date: '2026-10-01', preflight_status: 'valid' }),
+    startRun: async () => ({ id: 'run-resume', status: 'queued' }), getMappings: async () => { throw primary },
+    totals: async () => ({ failed: 1 }), finishRun: async () => {},
+    requeueConflictResume: async () => { throw Error('secret requeue details') },
+  }
+  await assert.rejects(() => runCompanySync({ repository, albi: {}, hubspot: {}, logger: { warn: (_message, data) => cleanupLogs.push(data) } },
+    { companyId: 'c1', mode: 'live', trigger: 'conflict_resolution', resumeId: 'resume-1' }), error => {
+      assert.equal(error, primary)
+      assert.deepEqual(error.h2aPersistedFailure, { runId: 'run-resume', totals: { failed: 1 }, newConflictCount: 0 })
+      return true
+    })
+  assert.deepEqual(cleanupLogs, [{ phase: 'resume_requeue', reason: 'error:operation_failed' }])
+})
+
+test('a failed run keeps its persisted failure primary when lease release throws', async () => {
+  const cleanupLogs = []
+  const primary = Error('source operation failed')
+  const repository = {
+    claimLease: async () => true, releaseLease: async () => { throw Error('secret lease details') },
+    getConfig: async () => ({ state: 'live', portal_id: '123', selected_start_date: '2026-10-01', preflight_status: 'valid' }),
+    startRun: async () => ({ id: 'run-release' }), getMappings: async () => { throw primary },
+    totals: async () => ({ failed: 1 }), finishRun: async () => {},
+  }
+  await assert.rejects(() => runCompanySync({ repository, albi: {}, hubspot: {}, logger: { warn: (_message, data) => cleanupLogs.push(data) } },
+    { companyId: 'c1', mode: 'live', trigger: 'scheduled' }), error => {
+      assert.equal(error, primary)
+      assert.deepEqual(error.h2aPersistedFailure, { runId: 'run-release', totals: { failed: 1 }, newConflictCount: 0 })
+      return true
+    })
+  assert.deepEqual(cleanupLogs, [{ phase: 'lease_release', reason: 'error:operation_failed' }])
+})
+
+test('lease release failure remains observable when the run itself succeeded', async () => {
+  const deps = liveFixture({ activities: [] })
+  const cleanupLogs = []
+  deps.repository.releaseLease = async () => { throw Error('lease release failed') }
+  deps.logger = { warn: (_message, values) => cleanupLogs.push(values) }
+  await assert.rejects(() => runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' }), /lease release failed/)
+  assert.ok(deps.events.includes('finish'))
+  assert.deepEqual(cleanupLogs, [{ phase: 'lease_release', reason: 'error:operation_failed' }])
+})
+
 test('dry run records previews and leaves every live mutation unused', async () => {
   const items = []
   const repo = {

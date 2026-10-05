@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createRunHandler } from '../../netlify/functions/h2a-run.js'
 import { H2AAuthError } from '../../netlify/functions/_h2a/auth.js'
+import { runCompanySync } from '../../netlify/functions/_h2a/orchestrator.js'
 
 test('manual run authorizes selected company and queues without invoking providers', async () => {
   const calls = []
@@ -185,4 +186,39 @@ test('thrown persisted failure attempts one tenant-scoped notification without m
   assert.equal(notifications[0].input.companyId, 'tenant-1')
   assert.deepEqual(notifications[0].input.run, { id: runId, status: 'failed', totals: { failed: 1 } })
   assert.equal(JSON.stringify(response).includes('sensitive provider response'), false)
+})
+
+test('persisted failure notification survives both resume-requeue and lease-release cleanup failures', async () => {
+  const resumeId = '00000000-0000-4000-8000-000000000003'
+  const notifications = []
+  const logs = []
+  const intent = { id: resumeId, company_id: 'tenant-1', status: 'pending', resolution_action: 'link_existing',
+    source_object_type: 'contacts', source_id: '10', activity_object_type: null, activity_id: null,
+    originating_run_id: null, activity_delivery_id: null }
+  const repository = {
+    getConflictResume: async () => intent,
+    claimLease: async () => true, releaseLease: async () => { throw Error('secret release detail') },
+    getConfig: async () => ({ state: 'live', portal_id: '123', selected_start_date: '2026-10-01', preflight_status: 'valid' }),
+    startRun: async () => ({ id: 'run-failed', status: 'queued' }),
+    getMappings: async () => { throw Error('sensitive source failure') },
+    totals: async () => ({ failed: 1 }), finishRun: async () => {},
+    requeueConflictResume: async () => { throw Error('secret requeue detail') },
+  }
+  const handler = createRunHandler({ requireRequest: async () => ({ companyId: 'tenant-1', supabase: {} }), repository,
+    makeClients: async () => ({ hubspot: {}, albi: {} }), runSync: runCompanySync,
+    logger: { warn: (message, values) => logs.push({ message, values }) },
+    notifyRunExceptions: async (_options, input) => { notifications.push(input); throw Error('secret mail detail') },
+  }, { background: true })
+  const response = await handler({ httpMethod: 'POST', body: JSON.stringify({ companyId: 'tenant-1', mode: 'live', trigger: 'conflict_resolution',
+    resumeId, sourceObjectType: 'contacts', sourceId: '10' }) })
+  assert.equal(response.statusCode, 502)
+  assert.equal(notifications.length, 1)
+  assert.equal(notifications[0].companyId, 'tenant-1')
+  assert.deepEqual(notifications[0].run, { id: 'run-failed', status: 'failed', totals: { failed: 1 } })
+  assert.deepEqual(logs.map(log => log.values), [
+    { phase: 'resume_requeue', reason: 'error:operation_failed' },
+    { phase: 'lease_release', reason: 'error:operation_failed' },
+  ])
+  assert.equal(JSON.stringify(response).includes('sensitive source failure'), false)
+  assert.equal(JSON.stringify(response).includes('secret'), false)
 })
