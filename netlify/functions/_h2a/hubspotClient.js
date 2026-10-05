@@ -122,6 +122,15 @@ export class HubSpotClient {
   }
   async getContacts(ids) { return this.#getRecords('contacts', ids) }
   async getCompanies(ids) { return this.#getRecords('companies', ids) }
+  async getActivity(objectType, activityId) {
+    if (!HUBSPOT_ACTIVITY_TYPES.includes(objectType)) invalid('getActivity')
+    const activity = id(activityId, 'getActivity')
+    const data = await this.#request(`${ROOT}/${objectType}/batch/read`, { method: 'POST', retrySafe: true, operation: 'getActivity',
+      body: { inputs: [{ id: activity }], properties: PROPERTIES[objectType] } })
+    if (data?.status !== 'COMPLETE' || data.numErrors > 0 || data.errors?.length) malformed('getActivity')
+    const records = page(data, 'getActivity').results.map(value => record(value, objectType, 'getActivity'))
+    return records.find(value => value.id === activity) ?? null
+  }
   async checkRead(objectType) {
     if (!['contacts', 'companies'].includes(objectType)) invalid('checkRead')
     const data = page(await this.#request(`${ROOT}/${objectType}?limit=1&properties=${PROPERTIES[objectType].join(',')}`, { operation: 'checkRead' }), 'checkRead')

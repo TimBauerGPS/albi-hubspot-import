@@ -15,6 +15,16 @@ const CONFLICT_FIELDS = ['id', 'portal_id', 'object_type', 'source_id', 'conflic
   'activity_object_type', 'activity_id', 'resolved_by', 'resolution_action', 'resolved_at', 'created_at', 'updated_at']
 const SECRET_KEY = /(?:token|secret|credential|cipher|authorization|password|raw|error|body|api.?key|message|response)/i
 
+export function conflictResumePayload(intent) {
+  return {
+    companyId: intent.company_id, mode: 'live', trigger: 'conflict_resolution', resumeId: intent.id,
+    sourceObjectType: intent.source_object_type, sourceId: intent.source_id,
+    ...(intent.activity_object_type && intent.activity_id ? { activityObjectType: intent.activity_object_type, activityId: intent.activity_id } : {}),
+    ...(intent.originating_run_id ? { originatingRunId: intent.originating_run_id } : {}),
+    ...(intent.activity_delivery_id ? { activityDeliveryId: intent.activity_delivery_id } : {}),
+  }
+}
+
 export class H2AConflictError extends Error {
   constructor(statusCode, message) {
     super(message)

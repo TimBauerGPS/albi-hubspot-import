@@ -24,7 +24,7 @@ function transport(responses) {
 
 test('contract metadata covers every adapter method and records unsupported Albi contracts', () => {
   assert.deepEqual(Object.keys(contractMetadata.hubspot.methods).sort(), [
-    'estimateActivities', 'getAccountInfo', 'getAssociations', 'getCompanies', 'getContacts', 'listActivities', 'listOwners',
+    'estimateActivities', 'getAccountInfo', 'getActivity', 'getAssociations', 'getCompanies', 'getContacts', 'listActivities', 'listOwners',
   ])
   assert.deepEqual(Object.keys(contractMetadata.albi.methods).sort(), [
     'associateContact', 'createActivity', 'createContact', 'createOrganization', 'listActivities', 'listContacts', 'listOptions',
@@ -83,6 +83,18 @@ test('associations traverse all pages and normalize IDs; contacts/companies use 
   assert.equal((await c.getCompanies(['301']))[0].id, '301')
   assert.equal(f.calls[2].url.pathname, '/crm/objects/2026-09/contacts/batch/read')
   assert.deepEqual(f.calls[2].body.inputs, [{ id: '201' }])
+})
+
+test('targeted activity read requests exactly the conflict activity identity', async () => {
+  const activity = hs.activities.results[0]
+  const f = transport([{ status: 'COMPLETE', numErrors: 0, results: [activity] }])
+  const c = new HubSpotClient({ token: 'token', fetch: f.fetch })
+  assert.equal((await c.getActivity('emails', '101')).occurredAt, '2026-10-01T10:00:00.000Z')
+  assert.equal(f.calls[0].url.pathname, '/crm/objects/2026-09/emails/batch/read')
+  assert.deepEqual(f.calls[0].body.inputs, [{ id: '101' }])
+  assert.equal(f.calls[0].body.properties.includes('hs_email_direction'), true)
+  await assert.rejects(c.getActivity('marketing_emails', '101'), { category: 'validation' })
+  assert.equal(f.calls.length, 1)
 })
 
 test('HTTP honors Retry-After then bounded transient retry, without exposing provider text', async () => {

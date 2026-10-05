@@ -7,11 +7,12 @@ import { mappingsMatchOptions, safePreflightDetails } from './_h2a/preflight.js'
 
 const CONFIG_FIELDS = ['company_id', 'state', 'portal_id', 'selected_start_date', 'initial_start_locked_at',
   'preflight_status', 'preflight_checked_at', 'option_confirmation_status', 'options_confirmed_by',
-  'options_confirmed_at', 'created_at', 'updated_at']
+  'options_confirmed_at', 'notification_recipients', 'created_at', 'updated_at']
 const CONFIG_SELECT = [...CONFIG_FIELDS, 'preflight_details'].join(', ')
 const MAPPING_SELECT = 'mapping_kind, source_key, albi_id, label, confirmed_by, confirmed_at'
 const ACTION_FIELDS = {
   replace_credentials: ['hubspotToken', 'albiApiKey'],
+  save_notification_recipients: ['notificationRecipients'],
   save_start_date: ['startDate'],
   confirm_option_mappings: ['optionMappings'],
   enter_dry_run: [], activate_live: [], disable: [], request_earlier_backfill: ['startDate'],
@@ -54,6 +55,7 @@ function defaultConfig(companyId, today) {
     company_id: companyId, state: 'disabled', selected_start_date: today, initial_start_locked_at: null,
     preflight_status: 'unchecked', preflight_details: {}, preflight_checked_at: null,
     option_confirmation_status: 'unconfirmed', options_confirmed_by: null, options_confirmed_at: null,
+    notification_recipients: [],
   }
 }
 
@@ -69,6 +71,14 @@ function validateDate(value, today) {
   }
   try { pacificStartOfDate(value) } catch { fail(400, 'Start date must be a valid YYYY-MM-DD calendar date.') }
   return value
+}
+
+function validateNotificationRecipients(value) {
+  if (!Array.isArray(value) || value.length > 20 || value.some(email => typeof email !== 'string' || email.length > 254 ||
+    !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(email.trim()))) {
+    fail(400, 'Notification recipients must be valid email addresses (up to 20).')
+  }
+  return [...new Set(value.map(email => email.trim().toLowerCase()))].sort()
 }
 
 function completeMappings(mappings) {
@@ -138,7 +148,7 @@ export function createSettingsHandler(options = {}) {
         if (storedConfig) {
           request = supabase.from('h2a_company_config').update({ ...patch, updated_at: timestamp }).eq('company_id', companyId)
           // Reject stale transitions; in particular, never overwrite a concurrent start-date lock.
-          for (const field of ['updated_at', 'state', 'preflight_status', 'option_confirmation_status', 'initial_start_locked_at', 'selected_start_date']) {
+          for (const field of ['updated_at', 'state', 'preflight_status', 'option_confirmation_status', 'initial_start_locked_at', 'selected_start_date', 'notification_recipients']) {
             const value = storedConfig[field]
             if (value === null) request = request.is(field, null)
             else if (value !== undefined) request = request.eq(field, value)
@@ -206,6 +216,10 @@ export function createSettingsHandler(options = {}) {
               fail(409, startDate < config.selected_start_date ? 'Use request_earlier_backfill for an earlier date.' : 'The initial start date is fixed and cannot move forward.')
             }
             if (!storedConfig?.selected_start_date || startDate !== config.selected_start_date) await saveConfig({ selected_start_date: startDate })
+            break
+          }
+          case 'save_notification_recipients': {
+            await saveConfig({ notification_recipients: validateNotificationRecipients(body.notificationRecipients) })
             break
           }
           case 'confirm_option_mappings': {

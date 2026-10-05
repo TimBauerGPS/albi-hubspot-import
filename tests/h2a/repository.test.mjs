@@ -149,3 +149,28 @@ test('a terminal run cannot be revived by a delayed background resume', async ()
     runId: 'run1', mode: 'live', trigger: 'resume',
   }), /Run is not resumable/)
 })
+
+test('daily run claim and finish use owner-fenced, retryable service RPCs', async () => {
+  const calls = []
+  const repository = createH2ARepository({ from: () => { throw Error('table access unexpected') }, rpc: async (name, args) => {
+    calls.push([name, args]); return { data: name === 'h2a_claim_daily_run' ? { acquired: true, claim: { id: 'claim-1', attempt_count: 2 } } : true }
+  } })
+  const claim = await repository.claimDailyRun('company-1', '2026-10-05', 'owner-1', 180)
+  assert.deepEqual(claim, { id: 'claim-1', attempt_count: 2, acquired: true })
+  assert.equal(await repository.finishDailyRun('company-1', 'claim-1', 'owner-1', false, 'dispatch_failed'), true)
+  assert.deepEqual(calls.map(([name, args]) => [name, args.p_company_id]), [
+    ['h2a_claim_daily_run', 'company-1'], ['h2a_finish_daily_run', 'company-1'],
+  ])
+})
+
+test('targeted resume intent and skipped conflict lookups carry explicit tenant predicates', async () => {
+  const calls = []
+  const query = { select() { return this }, eq(key, value) { calls.push(['eq', key, value]); return this },
+    is(key, value) { calls.push(['is', key, value]); return this }, limit() { return this },
+    maybeSingle: async () => ({ data: null, error: null }) }
+  const repository = createH2ARepository({ from: table => { calls.push(['from', table]); return query }, rpc: async () => ({ data: true }) })
+  await repository.getConflictResume('company-1', 'resume-1')
+  assert.equal(await repository.isSkippedItem('company-1', 'portal-1', 'calls', 'activity-1'), false)
+  assert.ok(calls.some(call => call[0] === 'eq' && call[1] === 'company_id' && call[2] === 'company-1'))
+  assert.equal(calls.filter(call => call[0] === 'from').every(call => ['h2a_conflict_resumes', 'h2a_conflicts'].includes(call[1])), true)
+})

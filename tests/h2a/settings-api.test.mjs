@@ -134,6 +134,16 @@ test('member GET returns masks, configuration, mappings and preflight without cr
   assert.equal(f.writes.length, 0)
 })
 
+test('admins can manage a tenant-scoped, normalized notification recipient list', async () => {
+  const f = fixture()
+  const saved = await f.request('PUT', { action: 'save_notification_recipients', notificationRecipients: [' Ops@Example.com ', 'ops@example.com'] })
+  assert.equal(saved.statusCode, 200)
+  assert.deepEqual(f.tables.h2a_company_config[0].notification_recipients, ['ops@example.com'])
+  assert.deepEqual(saved.json.config.notification_recipients, ['ops@example.com'])
+  assert.equal((await f.request('PUT', { action: 'save_notification_recipients', notificationRecipients: ['not-an-email'] })).statusCode, 400)
+  assert.equal((await f.request('PUT', { action: 'save_notification_recipients', notificationRecipients: [], otherTenant: 'x' })).statusCode, 400)
+})
+
 test('option confirmation and live activation reject IDs absent from tenant preflight options', async () => {
   const f = fixture({ config: { preflight_status: 'valid', option_confirmation_status: 'confirmed', state: 'dry_run', initial_start_locked_at: now }, mappings: optionMappings })
   const unavailable = optionMappings.map(mapping => ({ ...mapping, albiId: 'other-tenant-option' }))

@@ -74,7 +74,7 @@ async function recordOnce(repo, companyId, runId, row) {
 async function conflict(deps, ctx, data) {
   const { companyId, runId, portalId, activity } = ctx
   if (ctx.mode !== 'dry_run') {
-    await deps.repository.recordConflict(companyId, {
+    const persisted = await deps.repository.recordConflict(companyId, {
       portal_id: portalId, object_type: data.objectType, source_id: data.sourceId,
       conflict_type: data.type, reason: data.reason,
       match_evidence: { evidence: data.evidence ?? [] },
@@ -83,6 +83,7 @@ async function conflict(deps, ctx, data) {
       proposed_changes: data.proposedChanges ?? {}, status: 'open', run_id: runId,
       activity_object_type: activity.objectType, activity_id: activity.id,
     })
+    if (persisted?.inserted === true) ctx.newConflictCount = (ctx.newConflictCount ?? 0) + 1
   }
   await recordOnce(deps.repository, companyId, runId, { portal_id: portalId, object_type: data.objectType,
     source_id: data.sourceId, outcome: ctx.mode === 'dry_run' ? 'dry_run' : 'conflict',
@@ -219,6 +220,11 @@ async function resolveContact(deps, ctx, source, organization) {
 async function processActivity(deps, ctx, activity, deadline) {
   const { companyId, runId, portalId, mappings } = ctx
   const sourceId = idOf(activity)
+  if (await deps.repository.isSkippedItem?.(companyId, portalId, activity.objectType, sourceId)) {
+    await recordOnce(deps.repository, companyId, runId, { portal_id: portalId, object_type: activity.objectType,
+      source_id: sourceId, outcome: 'skipped', sanitized_details: { reason: 'reviewer_skipped' } })
+    return true
+  }
   if (activity.objectType === 'emails' && activity.properties?.hs_email_direction !== 'EMAIL') {
     await recordOnce(deps.repository, companyId, runId, { portal_id: portalId, object_type: 'emails', source_id: sourceId,
       outcome: 'skipped', sanitized_details: { reason: 'not_verified_direct_crm_email' } })
@@ -344,7 +350,11 @@ export async function runCompanySync(deps, input = {}) {
       (mode === 'dry_run' ? !['dry_run', 'ready', 'live'].includes(config.state) : config.state !== 'live')) {
       throw new Error('H2A company configuration is not ready for this run')
     }
-    run = await repo.startRun(companyId, { runId, mode, trigger, requestedBy: input.requestedBy ?? null })
+    run = await repo.startRun(companyId, { runId, mode, trigger, requestedBy: input.requestedBy ?? null,
+      schedulerClaimId: input.schedulerClaimId ?? null, resumeId: input.resumeId ?? null })
+    if (input.resumeId && !['queued', 'running', 'paused', 'partially_failed', 'failed'].includes(run.status)) {
+      return { status: 'already_accepted', companyId, runId: run.id, resumeId: input.resumeId }
+    }
     const mappings = await repo.getMappings(companyId)
     const indexes = { contacts: await listAll(deps, deps.albi, 'listContacts', deadline),
       organizations: await listAll(deps, deps.albi, 'listOrganizations', deadline) }
@@ -352,7 +362,23 @@ export async function runCompanySync(deps, input = {}) {
     try { owners = deps.hubspot.listOwners ? await retryRead(deps, () => deps.hubspot.listOwners(), deadline) : [] }
     catch { /* Owner names are optional metadata; activity sync remains eligible. */ }
     const ctx = { companyId, runId: run.id, portalId: config.portal_id, mode, mappings, indexes,
-      owners: new Map(owners.map(owner => [String(owner.id), owner])), activity: null }
+      owners: new Map(owners.map(owner => [String(owner.id), owner])), activity: null, newConflictCount: 0 }
+    if (input.resumeId) {
+      const intent = await repo.getConflictResume(companyId, input.resumeId)
+      if (!intent || intent.company_id !== companyId || !['pending', 'dispatched'].includes(intent.status) ||
+        !['link_existing', 'create_new'].includes(intent.resolution_action)) throw new Error('Targeted resume intent is unavailable')
+      if (intent.activity_object_type && intent.activity_id) {
+        const activity = await deps.hubspot.getActivity(intent.activity_object_type, intent.activity_id)
+        if (!activity || String(activity.id) !== intent.activity_id) throw new Error('Targeted HubSpot activity is unavailable')
+        ctx.activity = activity
+        await processActivity(deps, ctx, activity, deadline)
+      }
+      totals = await repo.totals(companyId, run.id)
+      status = totals.failed || totals.conflict ? 'partially_failed' : 'completed'
+      await repo.finishRun(companyId, run.id, status, totals)
+      if (status === 'partially_failed') await repo.requeueConflictResume?.(companyId, input.resumeId)
+      return { status, companyId, runId: run.id, resumeId: input.resumeId, totals, newConflictCount: ctx.newConflictCount, continuation: false }
+    }
     for (const objectType of HUBSPOT_ACTIVITY_TYPES) {
       if (clockMs(deps) >= deadline - 5000) { continuation = true; break }
       const seeds = mode === 'backfill' ? await repo.listBackfillWindows(companyId, objectType) : [null]
@@ -435,12 +461,13 @@ export async function runCompanySync(deps, input = {}) {
     if (totals.failed || totals.conflict) status = 'partially_failed'
     if (continuation) status = 'paused'
     await repo.finishRun(companyId, run.id, status, totals)
-    response = { status, companyId, runId: run.id, totals, continuation }
+    response = { status, companyId, runId: run.id, totals, newConflictCount: ctx.newConflictCount, continuation }
     if (continuation) continuationPayload = { companyId, mode, trigger: 'resume', runId: run.id }
   } catch (error) {
     if (run) {
       totals = await repo.totals(companyId, run.id)
       await repo.finishRun(companyId, run.id, 'failed', totals, safeError(error))
+      if (input.resumeId) await repo.requeueConflictResume?.(companyId, input.resumeId)
     }
     throw error
   } finally {

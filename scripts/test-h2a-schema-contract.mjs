@@ -34,9 +34,10 @@ test('all tenant tables have UUID keys, ownership, RLS, and authenticated read-o
     assert.match(body, /company_id uuid (?:primary key|not null)/)
     assert.match(sql, new RegExp(`alter table public\\.${table} enable row level security;`))
     assert.match(sql, new RegExp(`revoke all on table public\\.${table} from public, anon, authenticated;`))
-    if (table === 'h2a_conflict_resumes') {
+    if (['h2a_conflict_resumes', 'h2a_daily_claims'].includes(table)) {
       assert.doesNotMatch(sql, /grant [^;]*on (?:table )?public\.h2a_conflict_resumes to authenticated;/)
-      assert.doesNotMatch(sql, /create policy[^;]+on public\.h2a_conflict_resumes/)
+      assert.doesNotMatch(sql, new RegExp(`grant [^;]*on (?:table )?public\\.${table} to authenticated;`))
+      assert.doesNotMatch(sql, new RegExp(`create policy[^;]+on public\\.${table}`))
       continue
     }
     if (['h2a_contact_mappings', 'h2a_organization_mappings'].includes(table)) {
@@ -82,7 +83,9 @@ test('idempotency includes every delivery identity and permits reviewed many-to-
     assert.match(body, /reviewed_by uuid references auth\.users\(id\)/)
   }
   assert.match(tableBody(sql, 'public.h2a_daily_claims'), /unique \(company_id, business_date\)/)
+  assert.match(tableBody(sql, 'public.h2a_conflict_resumes'), /worker_failed boolean not null default false/)
   assert.match(tableBody(sql, 'public.h2a_company_config'), /selected_start_date date/)
+  assert.match(tableBody(sql, 'public.h2a_company_config'), /notification_recipients text\[\].*cardinality\(notification_recipients\) <= 20/)
   assert.match(tableBody(sql, 'public.h2a_company_config'), /'disabled', 'ready', 'dry_run', 'live'/)
   assert.match(tableBody(sql, 'public.h2a_option_mappings'), /'activity_type', 'default_contact_type', 'default_organization_type', 'organization_to_contact_type'/)
   assert.match(tableBody(sql, 'public.h2a_activity_deliveries'), /'reserved', 'delivered', 'reconciled', 'failed'/)
@@ -107,7 +110,7 @@ test('all public RPCs restrict execution to service role and pin their search pa
   const sql = readSchema()
   for (const name of ['h2a_get_credentials', 'h2a_put_credentials', 'h2a_claim_lease', 'h2a_heartbeat_lease', 'h2a_release_lease',
     'h2a_claim_daily_run', 'h2a_reserve_delivery', 'h2a_transition_delivery', 'h2a_resolve_conflict',
-    'h2a_save_mapping', 'h2a_claim_conflict_resume', 'h2a_finish_conflict_resume']) {
+    'h2a_save_mapping', 'h2a_claim_conflict_resume', 'h2a_finish_conflict_resume', 'h2a_requeue_conflict_resume']) {
     const definition = sql.match(new RegExp(`create function public\\.${name}\\(([\\s\\S]*?)as \\$\\$`))?.[1]
     assert.ok(definition, name)
     assert.match(definition, /set search_path = ''/)
@@ -136,7 +139,7 @@ test('claims are atomic and heartbeat/release cannot alter a successor lease', (
     assert.match(functionBody(sql, name), /p_ttl_seconds is null or p_ttl_seconds <= 0 or p_ttl_seconds > 3600/)
   }
   assert.match(sql, /create function public\.h2a_release_lease\(p_company_id uuid, p_owner_token uuid\)\s+returns boolean/)
-  assert.match(sql, /create function public\.h2a_claim_daily_run\(p_company_id uuid, p_business_date date\)\s+returns boolean/)
+  assert.match(sql, /create function public\.h2a_claim_daily_run\(p_company_id uuid, p_business_date date, p_owner_token uuid, p_ttl_seconds integer default 180\)\s+returns jsonb/)
   const claim = functionBody(sql, 'h2a_claim_lease')
   assert.match(claim, /insert into public\.h2a_execution_leases/)
   assert.match(claim, /on conflict \(company_id\) do update/)
@@ -149,6 +152,16 @@ test('claims are atomic and heartbeat/release cannot alter a successor lease', (
   const daily = functionBody(sql, 'h2a_claim_daily_run')
   assert.match(daily, /on conflict \(company_id, business_date\) do nothing/)
   assert.match(daily, /p_business_date is null/)
+  assert.match(daily, /v_row\.status = 'dispatched'/)
+  assert.match(daily, /lease_expires_at > v_now/)
+  assert.match(daily, /attempt_count = attempt_count \+ 1/)
+  const finish = functionBody(sql, 'h2a_finish_daily_run')
+  assert.match(finish, /owner_token = p_owner_token/)
+  assert.match(finish, /status = case when p_accepted then 'dispatched' else 'pending' end/)
+  assert.match(tableBody(sql, 'public.h2a_sync_runs'), /scheduler_claim_id uuid/)
+  assert.match(tableBody(sql, 'public.h2a_sync_runs'), /resume_id uuid/)
+  assert.match(sql, /create unique index h2a_runs_company_scheduler_claim_uidx/)
+  assert.match(sql, /create unique index h2a_runs_company_resume_uidx/)
 })
 
 test('conflict resolution is an atomic tenant-scoped CAS that appends audit, mapping, and unique resume intent', () => {
@@ -214,6 +227,7 @@ test('targeted resume dispatch claims are fenced and remain retryable until acce
   }
   assert.match(functionBody(sql, 'h2a_claim_conflict_resume'), /dispatch_owner_token is null or .*dispatch_lease_expires_at <= v_now/)
   assert.match(functionBody(sql, 'h2a_claim_conflict_resume'), /dispatch_attempt_count = dispatch_attempt_count \+ 1/)
-  assert.match(functionBody(sql, 'h2a_finish_conflict_resume'), /p_accepted then 'dispatched' else 'pending'/)
+  assert.match(functionBody(sql, 'h2a_finish_conflict_resume'), /p_accepted and not worker_failed then 'dispatched' else 'pending'/)
   assert.match(functionBody(sql, 'h2a_finish_conflict_resume'), /dispatch_owner_token = p_owner_token/)
+  assert.match(functionBody(sql, 'h2a_requeue_conflict_resume'), /worker_failed = true/)
 })

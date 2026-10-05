@@ -34,6 +34,7 @@ create table public.h2a_company_config (
   preflight_details jsonb not null default '{}'::jsonb check (jsonb_typeof(preflight_details) = 'object'),
   preflight_checked_at timestamptz,
   option_confirmation_status text not null default 'unconfirmed' check (option_confirmation_status in ('unconfirmed', 'confirmed')),
+  notification_recipients text[] not null default '{}'::text[] check (cardinality(notification_recipients) <= 20),
   options_confirmed_by uuid references auth.users(id) on delete set null,
   options_confirmed_at timestamptz,
   created_at timestamptz not null default now(),
@@ -63,6 +64,8 @@ create table public.h2a_sync_runs (
   totals jsonb not null default '{}'::jsonb check (jsonb_typeof(totals) = 'object'),
   requested_by uuid references auth.users(id) on delete set null,
   business_date date,
+  scheduler_claim_id uuid,
+  resume_id uuid,
   started_at timestamptz,
   finished_at timestamptz,
   error_summary text,
@@ -235,6 +238,7 @@ create table public.h2a_conflict_resumes (
   activity_delivery_id uuid,
   status text not null default 'pending' check (status in ('pending', 'dispatched')),
   dispatch_attempt_count integer not null default 0 check (dispatch_attempt_count >= 0),
+  worker_failed boolean not null default false,
   dispatch_owner_token uuid,
   dispatch_lease_expires_at timestamptz,
   last_dispatch_error_code text check (last_dispatch_error_code in ('dispatch_failed', 'dispatch_not_accepted')),
@@ -264,7 +268,15 @@ create table public.h2a_daily_claims (
   company_id uuid not null references public.companies(id),
   business_date date not null,
   claimed_at timestamptz not null default now(),
-  unique (company_id, business_date)
+  status text not null default 'pending' check (status in ('pending', 'dispatched')),
+  owner_token uuid,
+  lease_expires_at timestamptz,
+  attempt_count integer not null default 0 check (attempt_count >= 0),
+  last_dispatch_error_code text check (last_dispatch_error_code in ('dispatch_failed', 'dispatch_not_accepted')),
+  dispatched_at timestamptz,
+  unique (company_id, business_date),
+  check ((owner_token is null) = (lease_expires_at is null)),
+  check ((status = 'dispatched') = (dispatched_at is not null))
 );
 
 -- Company-leading primary/unique indexes cover tenant predicates and company FKs.
@@ -274,6 +286,8 @@ create index h2a_config_confirmed_by_idx on public.h2a_company_config (options_c
 create index h2a_options_confirmed_by_idx on public.h2a_option_mappings (confirmed_by);
 create index h2a_runs_requested_by_idx on public.h2a_sync_runs (requested_by);
 create index h2a_runs_company_started_idx on public.h2a_sync_runs (company_id, started_at desc);
+create unique index h2a_runs_company_scheduler_claim_uidx on public.h2a_sync_runs (company_id, scheduler_claim_id) where scheduler_claim_id is not null;
+create unique index h2a_runs_company_resume_uidx on public.h2a_sync_runs (company_id, resume_id) where resume_id is not null;
 create index h2a_backfills_requested_by_idx on public.h2a_backfill_windows (requested_by);
 create index h2a_backfills_company_run_idx on public.h2a_backfill_windows (company_id, run_id);
 create index h2a_backfills_company_pending_idx on public.h2a_backfill_windows (company_id, start_at) where status in ('pending', 'running');
@@ -428,13 +442,7 @@ create policy h2a_execution_leases_select on public.h2a_execution_leases
 alter table public.h2a_daily_claims enable row level security;
 revoke all on table public.h2a_daily_claims from public, anon, authenticated;
 revoke all on table public.h2a_daily_claims from service_role;
-grant select on table public.h2a_daily_claims to authenticated;
 grant select on table public.h2a_daily_claims to service_role;
-create policy h2a_daily_claims_select on public.h2a_daily_claims
-  for select to authenticated using (
-    exists (select 1 from public.company_members m where m.user_id = (select auth.uid()) and m.company_id = h2a_daily_claims.company_id)
-    or exists (select 1 from public.super_admins s where s.user_id = (select auth.uid()))
-  );
 
 create function private.h2a_reject_audit_mutation()
 returns trigger language plpgsql security invoker set search_path = '' as $$
@@ -628,20 +636,52 @@ grant execute on function public.h2a_transition_delivery(uuid, uuid, integer, js
 
 -- Caller supplies its America/Los_Angeles business date, never a UTC date.
 -- Claims persist across dates so delayed duplicate scheduler calls remain no-ops.
-create function public.h2a_claim_daily_run(p_company_id uuid, p_business_date date)
-returns boolean language plpgsql security definer set search_path = '' as $$
+create function public.h2a_claim_daily_run(p_company_id uuid, p_business_date date, p_owner_token uuid, p_ttl_seconds integer default 180)
+returns jsonb language plpgsql security definer set search_path = '' as $$
+declare
+  v_now timestamptz := pg_catalog.clock_timestamp();
+  v_row public.h2a_daily_claims%rowtype;
 begin
-  if p_company_id is null or p_business_date is null then
+  if p_company_id is null or p_business_date is null or p_owner_token is null
+    or p_ttl_seconds is null or p_ttl_seconds <= 0 or p_ttl_seconds > 3600 then
     raise exception 'Company and Pacific business date are required' using errcode = '22023';
   end if;
-  insert into public.h2a_daily_claims (company_id, business_date)
-  values (p_company_id, p_business_date)
-  on conflict (company_id, business_date) do nothing;
+  insert into public.h2a_daily_claims (company_id, business_date, owner_token, lease_expires_at, attempt_count)
+  values (p_company_id, p_business_date, p_owner_token, v_now + pg_catalog.make_interval(secs => p_ttl_seconds), 1)
+  on conflict (company_id, business_date) do nothing returning * into v_row;
+  if found then return pg_catalog.jsonb_build_object('acquired', true, 'claim', pg_catalog.to_jsonb(v_row)); end if;
+  select * into v_row from public.h2a_daily_claims c where c.company_id = p_company_id and c.business_date = p_business_date for update;
+  if v_row.status = 'dispatched' or v_row.owner_token is not null and v_row.lease_expires_at > v_now then
+    return pg_catalog.jsonb_build_object('acquired', false, 'claim', pg_catalog.to_jsonb(v_row));
+  end if;
+  update public.h2a_daily_claims set owner_token = p_owner_token,
+    lease_expires_at = v_now + pg_catalog.make_interval(secs => p_ttl_seconds),
+    attempt_count = attempt_count + 1, last_dispatch_error_code = null
+    where id = v_row.id returning * into v_row;
+  return pg_catalog.jsonb_build_object('acquired', true, 'claim', pg_catalog.to_jsonb(v_row));
+end;
+$$;
+revoke execute on function public.h2a_claim_daily_run(uuid, date, uuid, integer) from public, anon, authenticated;
+grant execute on function public.h2a_claim_daily_run(uuid, date, uuid, integer) to service_role;
+
+create function public.h2a_finish_daily_run(p_company_id uuid, p_claim_id uuid, p_owner_token uuid, p_accepted boolean, p_error_code text)
+returns boolean language plpgsql security definer set search_path = '' as $$
+begin
+  if p_company_id is null or p_claim_id is null or p_owner_token is null or p_accepted is null
+    or (p_accepted and p_error_code is not null)
+    or (not p_accepted and coalesce(p_error_code, '') not in ('dispatch_failed', 'dispatch_not_accepted')) then
+    raise exception 'Invalid daily run result' using errcode = '22023';
+  end if;
+  update public.h2a_daily_claims set status = case when p_accepted then 'dispatched' else 'pending' end,
+    dispatched_at = case when p_accepted then pg_catalog.clock_timestamp() else null end,
+    owner_token = null, lease_expires_at = null,
+    last_dispatch_error_code = case when p_accepted then null else p_error_code end
+    where company_id = p_company_id and id = p_claim_id and status = 'pending' and owner_token = p_owner_token;
   return found;
 end;
 $$;
-revoke execute on function public.h2a_claim_daily_run(uuid, date) from public, anon, authenticated;
-grant execute on function public.h2a_claim_daily_run(uuid, date) to service_role;
+revoke execute on function public.h2a_finish_daily_run(uuid, uuid, uuid, boolean, text) from public, anon, authenticated;
+grant execute on function public.h2a_finish_daily_run(uuid, uuid, uuid, boolean, text) to service_role;
 
 -- All contact/organization mapping writes take this source identity lock.
 -- Service-role table grants are read-only so callers cannot bypass it.
@@ -924,7 +964,7 @@ begin
   if not found then return null; end if;
   update public.h2a_conflict_resumes set dispatch_owner_token = p_owner_token,
     dispatch_lease_expires_at = v_now + pg_catalog.make_interval(secs => p_ttl_seconds),
-    dispatch_attempt_count = dispatch_attempt_count + 1, last_dispatch_error_code = null, updated_at = v_now
+    dispatch_attempt_count = dispatch_attempt_count + 1, last_dispatch_error_code = null, worker_failed = false, updated_at = v_now
     where company_id = p_company_id and id = p_resume_id returning * into v_row;
   return pg_catalog.to_jsonb(v_row);
 end;
@@ -941,8 +981,8 @@ begin
     or (not p_accepted and coalesce(p_error_code, '') not in ('dispatch_failed', 'dispatch_not_accepted')) then
     raise exception 'Invalid conflict resume result' using errcode = '22023';
   end if;
-  update public.h2a_conflict_resumes set status = case when p_accepted then 'dispatched' else 'pending' end,
-    dispatched_at = case when p_accepted then pg_catalog.clock_timestamp() else null end,
+  update public.h2a_conflict_resumes set status = case when p_accepted and not worker_failed then 'dispatched' else 'pending' end,
+    dispatched_at = case when p_accepted and not worker_failed then pg_catalog.clock_timestamp() else null end,
     dispatch_owner_token = null, dispatch_lease_expires_at = null,
     last_dispatch_error_code = case when p_accepted then null else p_error_code end,
     updated_at = pg_catalog.clock_timestamp()
@@ -953,5 +993,21 @@ end;
 $$;
 revoke execute on function public.h2a_finish_conflict_resume(uuid, uuid, uuid, boolean, text) from public, anon, authenticated;
 grant execute on function public.h2a_finish_conflict_resume(uuid, uuid, uuid, boolean, text) to service_role;
+
+create function public.h2a_requeue_conflict_resume(p_company_id uuid, p_resume_id uuid)
+returns boolean language plpgsql security definer set search_path = '' as $$
+begin
+  if p_company_id is null or p_resume_id is null then
+    raise exception 'Invalid conflict resume retry' using errcode = '22023';
+  end if;
+  update public.h2a_conflict_resumes set worker_failed = true,
+    status = case when status = 'dispatched' then 'pending' else status end,
+    dispatched_at = null, updated_at = pg_catalog.clock_timestamp()
+    where company_id = p_company_id and id = p_resume_id and status in ('pending', 'dispatched');
+  return found;
+end;
+$$;
+revoke execute on function public.h2a_requeue_conflict_resume(uuid, uuid) from public, anon, authenticated;
+grant execute on function public.h2a_requeue_conflict_resume(uuid, uuid) to service_role;
 
 commit;

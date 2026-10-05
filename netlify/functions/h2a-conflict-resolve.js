@@ -1,6 +1,6 @@
 import { H2AAuthError, requireH2ARequest } from './_h2a/auth.js'
 import { createH2ARepository } from './_h2a/repository.js'
-import { H2AConflictError, resolveConflict } from './_h2a/conflicts.js'
+import { H2AConflictError, conflictResumePayload, resolveConflict } from './_h2a/conflicts.js'
 
 const response = (statusCode, body) => ({ statusCode, headers: {
   'Content-Type': 'application/json', 'Cache-Control': 'no-store',
@@ -28,10 +28,7 @@ async function defaultDispatchResume(intent, options) {
   const target = new URL(endpoint, base)
   const result = await (options.fetch ?? fetch)(target.toString(), {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Internal-Cron-Secret': secret },
-    body: JSON.stringify({ companyId: intent.company_id, resumeId: intent.id, trigger: 'conflict_resolution',
-      sourceObjectType: intent.source_object_type, sourceId: intent.source_id,
-      activityObjectType: intent.activity_object_type, activityId: intent.activity_id,
-      runId: intent.originating_run_id, activityDeliveryId: intent.activity_delivery_id }),
+    body: JSON.stringify(conflictResumePayload(intent)),
   })
   return result.ok
 }

@@ -64,6 +64,26 @@ export function createH2ARepository(supabase) {
         p_accepted: accepted, p_error_code: errorCode,
       })) === true
     },
+    async getConflictResume(companyId, resumeId) {
+      return checked(await scoped(supabase, 'h2a_conflict_resumes', companyId).eq('id', resumeId).maybeSingle())
+    },
+    async getResumeRun(companyId, resumeId) {
+      return checked(await scoped(supabase, 'h2a_sync_runs', companyId).eq('resume_id', resumeId).maybeSingle())
+    },
+    async getRun(companyId, runId) {
+      return checked(await scoped(supabase, 'h2a_sync_runs', companyId).eq('id', runId).maybeSingle())
+    },
+    async requeueConflictResume(companyId, resumeId) {
+      return checked(await supabase.rpc('h2a_requeue_conflict_resume', { p_company_id: companyId, p_resume_id: resumeId })) === true
+    },
+    async isSkippedItem(companyId, portalId, objectType, activityId) {
+      const source = checked(await scoped(supabase, 'h2a_conflicts', companyId).eq('portal_id', portalId)
+        .eq('object_type', objectType).eq('source_id', activityId).is('activity_object_type', null).is('activity_id', null)
+        .eq('status', 'skipped').limit(1).maybeSingle())
+      if (source) return true
+      return Boolean(checked(await scoped(supabase, 'h2a_conflicts', companyId).eq('portal_id', portalId)
+        .eq('activity_object_type', objectType).eq('activity_id', activityId).eq('status', 'skipped').limit(1).maybeSingle()))
+    },
     async claimLease(companyId, ownerToken = randomUUID(), ttlSeconds = 900) {
       return checked(await supabase.rpc('h2a_claim_lease', { p_company_id: companyId, p_owner_token: ownerToken, p_ttl_seconds: ttlSeconds })) === true
     },
@@ -81,10 +101,37 @@ export function createH2ARepository(supabase) {
       const lease = checked(await scoped(supabase, 'h2a_execution_leases', companyId).maybeSingle())
       return lease && Date.parse(lease.expires_at) > Date.now() ? lease : null
     },
-    async queueRun(companyId, { mode, trigger, requestedBy = null }) {
-      return checked(await supabase.from('h2a_sync_runs').insert({ company_id: companyId,
+    async queueRun(companyId, { mode, trigger, requestedBy = null, runId = null, businessDate = null }) {
+      const payload = { ...(runId ? { id: runId } : {}), company_id: companyId,
         mode: mode === 'backfill' ? 'live' : mode, trigger: mode === 'backfill' ? 'backfill' : trigger,
-        requested_by: requestedBy, status: 'queued' }).select('*').single())
+        requested_by: requestedBy, business_date: businessDate, status: 'queued' }
+      try { return checked(await supabase.from('h2a_sync_runs').insert(payload).select('*').single()) }
+      catch (error) {
+        if (!runId) throw error
+        const existing = checked(await scoped(supabase, 'h2a_sync_runs', companyId).eq('id', runId).maybeSingle())
+        if (existing?.trigger === 'scheduled' && existing.business_date === businessDate) return existing
+        throw error
+      }
+    },
+    async queueScheduledRun(companyId, claimId, businessDate) {
+      try {
+        return checked(await supabase.from('h2a_sync_runs').insert({ id: claimId, company_id: companyId, mode: 'live', trigger: 'scheduled',
+          scheduler_claim_id: claimId, business_date: businessDate, status: 'queued' }).select('*').single())
+      } catch (error) {
+        const existing = checked(await scoped(supabase, 'h2a_sync_runs', companyId).eq('scheduler_claim_id', claimId).maybeSingle())
+        if (existing?.business_date === businessDate && existing.trigger === 'scheduled') return existing
+        throw error
+      }
+    },
+    async claimDailyRun(companyId, businessDate, ownerToken, ttlSeconds = 180) {
+      const result = checked(await supabase.rpc('h2a_claim_daily_run', { p_company_id: companyId,
+        p_business_date: businessDate, p_owner_token: ownerToken, p_ttl_seconds: ttlSeconds }))
+      if (!result || typeof result !== 'object') throw new Error('Invalid daily claim response')
+      return { ...result.claim, acquired: result.acquired === true }
+    },
+    async finishDailyRun(companyId, claimId, ownerToken, accepted, errorCode = null) {
+      return checked(await supabase.rpc('h2a_finish_daily_run', { p_company_id: companyId, p_claim_id: claimId,
+        p_owner_token: ownerToken, p_accepted: accepted, p_error_code: errorCode })) === true
     },
     async markQueueFailed(companyId, runId) {
       const now = new Date().toISOString()
@@ -106,7 +153,19 @@ export function createH2ARepository(supabase) {
       ])
       return { contacts, organizations, options }
     },
-    async startRun(companyId, { runId, mode, trigger, requestedBy = null }) {
+    async startRun(companyId, { runId, mode, trigger, requestedBy = null, schedulerClaimId = null, resumeId = null }) {
+      if (resumeId) {
+        const existing = await this.getResumeRun(companyId, resumeId)
+        if (existing && !['queued', 'running', 'paused', 'partially_failed', 'failed'].includes(existing.status)) return existing
+        if (existing) {
+          checked(await supabase.from('h2a_sync_runs').update({ status: 'running', started_at: existing.started_at ?? new Date().toISOString(),
+            updated_at: new Date().toISOString() }).eq('company_id', companyId).eq('id', existing.id)
+            .in('status', ['queued', 'running', 'paused', 'partially_failed', 'failed']).select('id').single())
+          return existing
+        }
+        return checked(await supabase.from('h2a_sync_runs').insert({ company_id: companyId, mode: 'live', trigger: 'conflict_resolution',
+          status: 'running', resume_id: resumeId, started_at: new Date().toISOString() }).select('*').single())
+      }
       if (runId) {
         const run = checked(await scoped(supabase, 'h2a_sync_runs', companyId).eq('id', runId).maybeSingle())
         if (!run || run.mode !== (mode === 'backfill' ? 'live' : mode)) throw new Error('Run is missing or belongs to another mode')
@@ -119,6 +178,7 @@ export function createH2ARepository(supabase) {
       const storedMode = mode === 'backfill' ? 'live' : mode
       return checked(await supabase.from('h2a_sync_runs').insert({ company_id: companyId, mode: storedMode,
         trigger: mode === 'backfill' ? 'backfill' : trigger, status: 'running', requested_by: requestedBy,
+        scheduler_claim_id: schedulerClaimId,
         started_at: new Date().toISOString() }).select('*').single())
     },
     async finishRun(companyId, runId, status, totals, errorSummary = null) {
@@ -186,8 +246,8 @@ export function createH2ARepository(supabase) {
         : query.is('activity_object_type', null)
       query = conflict.activity_id ? query.eq('activity_id', conflict.activity_id) : query.is('activity_id', null)
       const existing = checked(await query.eq('status', 'open').maybeSingle())
-      if (existing) return existing
-      return checked(await supabase.from('h2a_conflicts').insert({ ...conflict, company_id: companyId }).select('*').single())
+      if (existing) return { ...existing, inserted: false }
+      return { ...checked(await supabase.from('h2a_conflicts').insert({ ...conflict, company_id: companyId }).select('*').single()), inserted: true }
     },
     deliveryStore(companyId) {
       if (typeof companyId !== 'string' || !companyId.trim()) throw new TypeError('Company ID is required')

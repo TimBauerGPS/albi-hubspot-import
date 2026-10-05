@@ -89,3 +89,65 @@ test('background lease collision retires a queued duplicate run', async () => {
   assert.equal(result.statusCode, 200)
   assert.deepEqual(retired, ['c1', 'run1'])
 })
+
+test('internal targeted resume validates persisted identity and invokes only the resume consumer', async () => {
+  const resumeId = '00000000-0000-4000-8000-000000000001'
+  const accepted = []
+  const intent = { id: resumeId, company_id: 'c1', status: 'pending', resolution_action: 'create_new',
+    source_object_type: 'contacts', source_id: '10', activity_object_type: 'calls', activity_id: '50',
+    originating_run_id: null, activity_delivery_id: null }
+  const handler = createRunHandler({
+    requireRequest: async (_event, args) => { assert.equal(args.internalJob, true); return { companyId: 'c1', supabase: {} } },
+    repository: { getConflictResume: async (companyId, id) => { assert.equal(companyId, 'c1'); assert.equal(id, resumeId); return intent } },
+    makeClients: async () => ({ hubspot: {}, albi: {} }), runSync: async (_deps, input) => { accepted.push(input); return { status: 'completed' } },
+  }, { background: true })
+  const response = await handler({ httpMethod: 'POST', headers: { 'X-Internal-Cron-Secret': 'secret' }, body: JSON.stringify({
+    companyId: 'c1', mode: 'live', trigger: 'conflict_resolution', resumeId, sourceObjectType: 'contacts', sourceId: '10',
+    activityObjectType: 'calls', activityId: '50',
+  }) })
+  assert.equal(response.statusCode, 200)
+  assert.deepEqual(accepted, [{ companyId: 'c1', mode: 'live', trigger: 'conflict_resolution', resumeId }])
+})
+
+test('targeted resume rejects tampered or extra payload fields before processing', async () => {
+  let invoked = false
+  const resumeId = '00000000-0000-4000-8000-000000000001'
+  const handler = createRunHandler({ requireRequest: async () => ({ companyId: 'c1' }), repository: {
+    getConflictResume: async () => ({ id: resumeId, company_id: 'c1', status: 'pending', resolution_action: 'link_existing',
+      source_object_type: 'contacts', source_id: '10', activity_object_type: null, activity_id: null }),
+  }, runSync: async () => { invoked = true } }, { background: true })
+  const payload = { companyId: 'c1', mode: 'live', trigger: 'conflict_resolution', resumeId,
+    sourceObjectType: 'contacts', sourceId: 'other' }
+  const mismatch = await handler({ httpMethod: 'POST', body: JSON.stringify(payload) })
+  assert.equal(mismatch.statusCode, 409)
+  const extra = await handler({ httpMethod: 'POST', body: JSON.stringify({ ...payload, fullCompanyScan: true }) })
+  assert.equal(extra.statusCode, 400)
+  assert.equal(invoked, false)
+})
+
+test('duplicate targeted resume with a completed persisted run is acknowledged without reprocessing', async () => {
+  const resumeId = '00000000-0000-4000-8000-000000000001'
+  let invoked = false
+  const intent = { id: resumeId, company_id: 'c1', status: 'dispatched', resolution_action: 'link_existing',
+    source_object_type: 'contacts', source_id: '10', activity_object_type: null, activity_id: null,
+    originating_run_id: null, activity_delivery_id: null }
+  const handler = createRunHandler({ requireRequest: async () => ({ companyId: 'c1' }), repository: {
+    getConflictResume: async () => intent, getResumeRun: async () => ({ id: 'run1', status: 'completed' }),
+  }, runSync: async () => { invoked = true } }, { background: true })
+  const response = await handler({ httpMethod: 'POST', body: JSON.stringify({ companyId: 'c1', mode: 'live', trigger: 'conflict_resolution',
+    resumeId, sourceObjectType: 'contacts', sourceId: '10' }) })
+  assert.equal(JSON.parse(response.body).status, 'already_accepted')
+  assert.equal(invoked, false)
+})
+
+test('scheduled background dispatch checks the stable run, tenant and Pacific business date', async () => {
+  const claimId = '00000000-0000-4000-8000-000000000001'
+  let invoked = 0
+  const repository = { getRun: async (companyId, id) => ({ id, company_id: companyId, trigger: 'scheduled', business_date: '2026-10-05', status: 'queued' }) }
+  const handler = createRunHandler({ requireRequest: async () => ({ companyId: 'c1' }), repository,
+    makeClients: async () => ({ hubspot: {}, albi: {} }), runSync: async () => { invoked += 1; return { status: 'completed' } } }, { background: true })
+  const body = { companyId: 'c1', mode: 'live', trigger: 'scheduled', runId: claimId, schedulerClaimId: claimId, businessDate: '2026-10-05' }
+  assert.equal((await handler({ httpMethod: 'POST', body: JSON.stringify(body) })).statusCode, 200)
+  assert.equal((await handler({ httpMethod: 'POST', body: JSON.stringify({ ...body, businessDate: '2026-02-30' }) })).statusCode, 400)
+  assert.equal(invoked, 1)
+})

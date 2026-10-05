@@ -134,6 +134,37 @@ test('new records write US phone in Albi format', async () => {
   assert.equal(contactPayload.phoneNumber, undefined)
 })
 
+test('targeted conflict resume loads and processes only its persisted activity without moving cursors', async () => {
+  const deps = liveFixture()
+  const calls = []
+  const intent = { id: 'resume-1', company_id: 'c1', status: 'pending', resolution_action: 'link_existing',
+    source_object_type: 'contacts', source_id: '10', activity_object_type: 'calls', activity_id: '50' }
+  deps.repository.getConflictResume = async (companyId, resumeId) => { assert.equal(companyId, 'c1'); assert.equal(resumeId, 'resume-1'); return intent }
+  deps.repository.getResumeRun = async () => null
+  deps.repository.startRun = async (_company, input) => { assert.equal(input.resumeId, 'resume-1'); return { id: 'run-resume', status: 'running' } }
+  deps.repository.totals = async () => ({ delivered: 1 })
+  deps.repository.isSkippedItem = async () => false
+  deps.hubspot.listActivities = async () => { throw Error('targeted resume must not scan') }
+  deps.hubspot.getActivity = async (type, id) => { calls.push([type, id]); return { id, objectType: type,
+    occurredAt: '2026-10-02T12:00:00Z', properties: { hs_timestamp: '2026-10-02T12:00:00Z' } } }
+  const result = await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'conflict_resolution', resumeId: 'resume-1' })
+  assert.equal(result.status, 'completed')
+  assert.deepEqual(calls, [['calls', '50']])
+  assert.equal(deps.cursors.length, 0)
+  assert.ok(deps.events.includes('create:activity'))
+})
+
+test('reviewer skip remains terminal in later broad cursor overlap', async () => {
+  const deps = liveFixture()
+  let created = false
+  deps.repository.isSkippedItem = async (_company, _portal, type, id) => type === 'calls' && id === '50'
+  deps.albi.createActivity = async () => { created = true; return { id: '300' } }
+  const result = await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
+  assert.equal(result.status, 'completed')
+  assert.equal(created, false)
+  assert.ok(deps.items.some(item => item.source_id === '50' && item.outcome === 'skipped' && item.sanitized_details.reason === 'reviewer_skipped'))
+})
+
 test('same-timestamp page boundary does not advance cursor before next page is durable', async () => {
   const deps = liveFixture()
   let calls = 0
