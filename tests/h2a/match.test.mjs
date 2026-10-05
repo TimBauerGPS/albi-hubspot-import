@@ -72,6 +72,26 @@ test('exact email match conflicts when both records have different phone identit
   assert.equal(result.reason, 'email_phone_disagree')
 })
 
+test('exact phone match conflicts when both records have different nonblank emails', () => {
+  const result = decideContactMatch({
+    source: { email: 'new@example.com', phone: '4155550123' },
+    candidates: [contact('c1', { email: 'old@example.com', phoneNumber: '4155550123' })],
+  })
+  assert.equal(result.action, 'conflict')
+  assert.equal(result.reason, 'email_phone_disagree')
+})
+
+test('allows a unique phone match when either email is blank', () => {
+  for (const [source, candidate] of [
+    [{ email: '', phone: '4155550123' }, { email: 'old@example.com', phoneNumber: '4155550123' }],
+    [{ email: 'new@example.com', phone: '4155550123' }, { email: '   ', phoneNumber: '4155550123' }],
+  ]) {
+    const result = decideContactMatch({ source, candidates: [contact('c1', candidate)] })
+    assert.equal(result.action, 'link')
+    assert.equal(result.targetId, 'c1')
+  }
+})
+
 test('routes name-only contact candidates to review and creates when none exist', () => {
   const review = decideContactMatch({
     source: { firstName: 'Jane', lastName: 'Doe' },

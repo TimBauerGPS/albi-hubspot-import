@@ -267,6 +267,11 @@ export function decideContactMatch(input = {}) {
   if (candidate) {
     const targetId = idOf(candidate)
     if (matchDecisionConflict(sourceId, targetId, input)) return result('conflict', 'target_already_mapped', targetId)
+    const sourceEmail = normalizeEmail(rawValue(propertiesOf(source), ['email', 'emailAddress']))
+    const candidateEmail = normalizeEmail(rawValue(propertiesOf(candidate), ['email', 'emailAddress']))
+    if (sourceEmail && candidateEmail && sourceEmail !== candidateEmail) {
+      return result('conflict', 'email_phone_disagree', targetId)
+    }
     const phoneEntry = phoneResults.find((entry) => entry.candidate === candidate)
     if (phoneEntry && phoneSetsContradict(phoneEntry.sourcePhones.map((item) => item.value), phoneEntry.candidatePhones.map((item) => item.value))) {
       return result('conflict', 'email_phone_disagree', targetId)
