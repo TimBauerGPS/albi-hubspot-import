@@ -38,6 +38,38 @@ test('delivery repository passes tenant identity to atomic reserve and transitio
   ])
 })
 
+test('saveMapping uses the atomic tenant RPC and returns its same-target replay row without table upsert', async () => {
+  const calls = []
+  const mapping = { company_id: 'company-1', portal_id: '123', hubspot_id: '42', albi_contact_id: '7', match_method: 'automatic' }
+  const repository = createH2ARepository({ from: () => { throw Error('mapping table access is forbidden') },
+    rpc: async (name, args) => { calls.push({ name, args }); return { data: mapping, error: null } } })
+  const result = await repository.saveMapping('company-1', 'contact', { portal_id: '123', hubspot_id: '42',
+    albi_contact_id: '7', match_method: 'automatic', reviewed_by: null })
+  assert.equal(result, mapping)
+  assert.deepEqual(calls, [{ name: 'h2a_save_mapping', args: { p_company_id: 'company-1', p_portal_id: '123',
+    p_object_type: 'contacts', p_source_id: '42', p_target_id: '7', p_match_method: 'automatic',
+    p_reviewed_by: null, p_now: calls[0].args.p_now } }])
+  assert.equal(Number.isNaN(Date.parse(calls[0].args.p_now)), false)
+})
+
+test('saveMapping rejects a competing source target returned by the atomic RPC', async () => {
+  const calls = []
+  const repository = createH2ARepository({ from: () => { throw Error('mapping table access is forbidden') },
+    rpc: async (name, args) => { calls.push([name, args]); return { data: { error: 'mapping_conflict' }, error: null } } })
+  await assert.rejects(() => repository.saveMapping('company-1', 'organization', { portal_id: '123', hubspot_id: '42',
+    albi_organization_id: 'different-target', match_method: 'created' }), error => error.code === 'mapping_conflict')
+  assert.equal(calls[0][0], 'h2a_save_mapping')
+  assert.equal(calls[0][1].p_object_type, 'companies')
+})
+
+test('saveMapping rejects unsupported kinds before RPC or table access', async () => {
+  let rpcCalls = 0
+  const repository = createH2ARepository({ from: () => { throw Error('unexpected table access') },
+    rpc: async () => { rpcCalls += 1; return { data: null, error: null } } })
+  await assert.rejects(() => repository.saveMapping('company-1', 'deal', { portal_id: '123', hubspot_id: '42' }), /mapping kind/i)
+  assert.equal(rpcCalls, 0)
+})
+
 test('totals page through more than the default thousand persisted items', async () => {
   const rows = Array.from({ length: 1001 }, (_, index) => ({ id: String(index), object_type: 'calls', source_id: String(index),
     albi_target_type: 'contact', albi_target_id: '7', outcome: 'delivered', created_at: '2026-10-01T00:00:00Z' }))

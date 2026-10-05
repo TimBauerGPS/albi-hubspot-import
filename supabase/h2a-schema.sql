@@ -351,8 +351,8 @@ create policy h2a_backfill_windows_select on public.h2a_backfill_windows
 
 alter table public.h2a_contact_mappings enable row level security;
 revoke all on table public.h2a_contact_mappings from public, anon, authenticated;
-grant select on table public.h2a_contact_mappings to authenticated;
-grant select, insert, update, delete on table public.h2a_contact_mappings to service_role;
+revoke insert, update, delete on table public.h2a_contact_mappings from service_role;
+grant select on table public.h2a_contact_mappings to authenticated, service_role;
 create policy h2a_contact_mappings_select on public.h2a_contact_mappings
   for select to authenticated using (
     exists (select 1 from public.company_members m where m.user_id = (select auth.uid()) and m.company_id = h2a_contact_mappings.company_id)
@@ -361,8 +361,8 @@ create policy h2a_contact_mappings_select on public.h2a_contact_mappings
 
 alter table public.h2a_organization_mappings enable row level security;
 revoke all on table public.h2a_organization_mappings from public, anon, authenticated;
-grant select on table public.h2a_organization_mappings to authenticated;
-grant select, insert, update, delete on table public.h2a_organization_mappings to service_role;
+revoke insert, update, delete on table public.h2a_organization_mappings from service_role;
+grant select on table public.h2a_organization_mappings to authenticated, service_role;
 create policy h2a_organization_mappings_select on public.h2a_organization_mappings
   for select to authenticated using (
     exists (select 1 from public.company_members m where m.user_id = (select auth.uid()) and m.company_id = h2a_organization_mappings.company_id)
@@ -643,6 +643,80 @@ $$;
 revoke execute on function public.h2a_claim_daily_run(uuid, date) from public, anon, authenticated;
 grant execute on function public.h2a_claim_daily_run(uuid, date) to service_role;
 
+-- All contact/organization mapping writes take this source identity lock.
+-- Service-role table grants are read-only so callers cannot bypass it.
+create function public.h2a_save_mapping(
+  p_company_id uuid, p_portal_id text, p_object_type text, p_source_id text,
+  p_target_id text, p_match_method text, p_reviewed_by uuid, p_now timestamptz
+) returns jsonb language plpgsql security definer set search_path = '' as $$
+declare
+  v_contact public.h2a_contact_mappings%rowtype;
+  v_organization public.h2a_organization_mappings%rowtype;
+begin
+  if p_company_id is null or nullif(pg_catalog.btrim(p_portal_id), '') is null
+    or p_object_type is null or p_object_type not in ('contacts', 'companies')
+    or nullif(pg_catalog.btrim(p_source_id), '') is null
+    or nullif(pg_catalog.btrim(p_target_id), '') is null
+    or p_match_method is null or p_match_method not in ('automatic', 'created', 'reviewed') or p_now is null
+    or (p_match_method = 'reviewed' and p_reviewed_by is null)
+    or (p_match_method <> 'reviewed' and p_reviewed_by is not null) then
+    return pg_catalog.jsonb_build_object('error', 'invalid_mapping');
+  end if;
+
+  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
+    pg_catalog.jsonb_build_array(p_company_id::text, p_portal_id, 'source', p_object_type, p_source_id)::text, 0));
+
+  if p_object_type = 'contacts' then
+    select * into v_contact from public.h2a_contact_mappings m
+      where m.company_id = p_company_id and m.portal_id = p_portal_id and m.hubspot_id = p_source_id;
+    if found then
+      if v_contact.albi_contact_id <> p_target_id then
+        return pg_catalog.jsonb_build_object('error', 'mapping_conflict');
+      end if;
+      -- A same-target retry is a read-only replay; do not downgrade reviewed metadata.
+      return pg_catalog.to_jsonb(v_contact);
+    end if;
+    insert into public.h2a_contact_mappings (company_id, portal_id, hubspot_id, albi_contact_id,
+      match_method, reviewed_by, reviewed_at, updated_at)
+    values (p_company_id, p_portal_id, p_source_id, p_target_id, p_match_method, p_reviewed_by,
+      case when p_match_method = 'reviewed' then p_now else null end, p_now)
+    on conflict (company_id, portal_id, hubspot_id) do nothing returning * into v_contact;
+    if not found then
+      select * into v_contact from public.h2a_contact_mappings m
+        where m.company_id = p_company_id and m.portal_id = p_portal_id and m.hubspot_id = p_source_id;
+      if not found or v_contact.albi_contact_id <> p_target_id then
+        return pg_catalog.jsonb_build_object('error', 'mapping_conflict');
+      end if;
+    end if;
+    return pg_catalog.to_jsonb(v_contact);
+  end if;
+
+  select * into v_organization from public.h2a_organization_mappings m
+    where m.company_id = p_company_id and m.portal_id = p_portal_id and m.hubspot_id = p_source_id;
+  if found then
+    if v_organization.albi_organization_id <> p_target_id then
+      return pg_catalog.jsonb_build_object('error', 'mapping_conflict');
+    end if;
+    return pg_catalog.to_jsonb(v_organization);
+  end if;
+  insert into public.h2a_organization_mappings (company_id, portal_id, hubspot_id, albi_organization_id,
+    match_method, reviewed_by, reviewed_at, updated_at)
+  values (p_company_id, p_portal_id, p_source_id, p_target_id, p_match_method, p_reviewed_by,
+    case when p_match_method = 'reviewed' then p_now else null end, p_now)
+  on conflict (company_id, portal_id, hubspot_id) do nothing returning * into v_organization;
+  if not found then
+    select * into v_organization from public.h2a_organization_mappings m
+      where m.company_id = p_company_id and m.portal_id = p_portal_id and m.hubspot_id = p_source_id;
+    if not found or v_organization.albi_organization_id <> p_target_id then
+      return pg_catalog.jsonb_build_object('error', 'mapping_conflict');
+    end if;
+  end if;
+  return pg_catalog.to_jsonb(v_organization);
+end;
+$$;
+revoke execute on function public.h2a_save_mapping(uuid, text, text, text, text, text, uuid, timestamptz) from public, anon, authenticated;
+grant execute on function public.h2a_save_mapping(uuid, text, text, text, text, text, uuid, timestamptz) to service_role;
+
 -- Resolution, optional identity mapping, audit, and targeted work intent commit
 -- together. No provider request is made from this transaction or endpoint.
 create function public.h2a_resolve_conflict(
@@ -741,10 +815,16 @@ begin
       if exists (select 1 from public.h2a_contact_mappings m where m.company_id = p_company_id
         and m.portal_id = v_conflict.portal_id and m.hubspot_id = v_conflict.source_id and m.albi_contact_id <> v_target_id)
         then return pg_catalog.jsonb_build_object('error', 'mapping_conflict'); end if;
-      insert into public.h2a_contact_mappings (company_id, portal_id, hubspot_id, albi_contact_id,
-        match_method, reviewed_by, reviewed_at, updated_at)
-      values (p_company_id, v_conflict.portal_id, v_conflict.source_id, v_target_id, 'reviewed', p_actor_id, p_now, p_now)
-      on conflict (company_id, portal_id, hubspot_id) do nothing;
+      update public.h2a_contact_mappings set match_method = 'reviewed', reviewed_by = p_actor_id,
+        reviewed_at = p_now, updated_at = p_now
+        where company_id = p_company_id and portal_id = v_conflict.portal_id
+          and hubspot_id = v_conflict.source_id and albi_contact_id = v_target_id;
+      if not found then
+        insert into public.h2a_contact_mappings (company_id, portal_id, hubspot_id, albi_contact_id,
+          match_method, reviewed_by, reviewed_at, updated_at)
+        values (p_company_id, v_conflict.portal_id, v_conflict.source_id, v_target_id, 'reviewed', p_actor_id, p_now, p_now)
+        on conflict (company_id, portal_id, hubspot_id) do nothing;
+      end if;
     else
       perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
         pg_catalog.jsonb_build_array(p_company_id::text, v_conflict.portal_id, 'organization', v_target_id)::text, 0));
@@ -754,10 +834,16 @@ begin
       if exists (select 1 from public.h2a_organization_mappings m where m.company_id = p_company_id
         and m.portal_id = v_conflict.portal_id and m.hubspot_id = v_conflict.source_id and m.albi_organization_id <> v_target_id)
         then return pg_catalog.jsonb_build_object('error', 'mapping_conflict'); end if;
-      insert into public.h2a_organization_mappings (company_id, portal_id, hubspot_id, albi_organization_id,
-        match_method, reviewed_by, reviewed_at, updated_at)
-      values (p_company_id, v_conflict.portal_id, v_conflict.source_id, v_target_id, 'reviewed', p_actor_id, p_now, p_now)
-      on conflict (company_id, portal_id, hubspot_id) do nothing;
+      update public.h2a_organization_mappings set match_method = 'reviewed', reviewed_by = p_actor_id,
+        reviewed_at = p_now, updated_at = p_now
+        where company_id = p_company_id and portal_id = v_conflict.portal_id
+          and hubspot_id = v_conflict.source_id and albi_organization_id = v_target_id;
+      if not found then
+        insert into public.h2a_organization_mappings (company_id, portal_id, hubspot_id, albi_organization_id,
+          match_method, reviewed_by, reviewed_at, updated_at)
+        values (p_company_id, v_conflict.portal_id, v_conflict.source_id, v_target_id, 'reviewed', p_actor_id, p_now, p_now)
+        on conflict (company_id, portal_id, hubspot_id) do nothing;
+      end if;
     end if;
   end if;
 

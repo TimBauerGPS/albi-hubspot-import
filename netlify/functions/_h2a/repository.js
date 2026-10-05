@@ -162,8 +162,20 @@ export function createH2ARepository(supabase) {
       return totals
     },
     async saveMapping(companyId, kind, row) {
-      const table = kind === 'contact' ? 'h2a_contact_mappings' : 'h2a_organization_mappings'
-      return checked(await supabase.from(table).upsert({ ...row, company_id: companyId }, { onConflict: 'company_id,portal_id,hubspot_id' }).select('*').single())
+      const objectType = kind === 'contact' ? 'contacts' : kind === 'organization' ? 'companies' : null
+      if (!objectType) throw new TypeError('Unsupported mapping kind')
+      const targetId = kind === 'contact' ? row?.albi_contact_id : row?.albi_organization_id
+      const result = checked(await supabase.rpc('h2a_save_mapping', {
+        p_company_id: companyId, p_portal_id: row?.portal_id, p_object_type: objectType,
+        p_source_id: row?.hubspot_id, p_target_id: targetId, p_match_method: row?.match_method,
+        p_reviewed_by: row?.reviewed_by ?? null, p_now: new Date().toISOString(),
+      }))
+      if (result?.error === 'mapping_conflict') {
+        throw Object.assign(new Error('A different Albi target is already mapped for this HubSpot source'), { code: 'mapping_conflict' })
+      }
+      if (result?.error === 'invalid_mapping') throw new TypeError('Invalid source mapping')
+      if (!result || result.error) throw new Error('Invalid source mapping response')
+      return result
     },
     async recordConflict(companyId, conflict) {
       let query = scoped(supabase, 'h2a_conflicts', companyId)

@@ -39,7 +39,13 @@ test('all tenant tables have UUID keys, ownership, RLS, and authenticated read-o
       assert.doesNotMatch(sql, /create policy[^;]+on public\.h2a_conflict_resumes/)
       continue
     }
-    assert.match(sql, new RegExp(`grant select on table public\\.${table} to authenticated;`))
+    if (['h2a_contact_mappings', 'h2a_organization_mappings'].includes(table)) {
+      assert.match(sql, new RegExp(`revoke insert, update, delete on table public\\.${table} from service_role;`))
+      assert.match(sql, new RegExp(`grant select on table public\\.${table} to authenticated, service_role;`))
+      assert.doesNotMatch(sql, new RegExp(`grant [^;]*on table public\\.${table} to service_role;`))
+    } else {
+      assert.match(sql, new RegExp(`grant select on table public\\.${table} to authenticated;`))
+    }
     const policy = sql.match(new RegExp(`create policy ${table}_select on public\\.${table}([\\s\\S]*?);`))?.[1]
     assert.ok(policy, `${table} requires a read policy`)
     assert.match(policy, /for select to authenticated/)
@@ -101,7 +107,7 @@ test('all public RPCs restrict execution to service role and pin their search pa
   const sql = readSchema()
   for (const name of ['h2a_get_credentials', 'h2a_put_credentials', 'h2a_claim_lease', 'h2a_heartbeat_lease', 'h2a_release_lease',
     'h2a_claim_daily_run', 'h2a_reserve_delivery', 'h2a_transition_delivery', 'h2a_resolve_conflict',
-    'h2a_claim_conflict_resume', 'h2a_finish_conflict_resume']) {
+    'h2a_save_mapping', 'h2a_claim_conflict_resume', 'h2a_finish_conflict_resume']) {
     const definition = sql.match(new RegExp(`create function public\\.${name}\\(([\\s\\S]*?)as \\$\\$`))?.[1]
     assert.ok(definition, name)
     assert.match(definition, /set search_path = ''/)
@@ -162,6 +168,8 @@ test('conflict resolution is an atomic tenant-scoped CAS that appends audit, map
   assert.ok(organizationTargetLock > sourceIdentityLock, 'organization target lock must follow the source lock')
   assert.match(body, /hubspot_id = v_conflict\.source_id and m\.albi_contact_id <> v_target_id/)
   assert.match(body, /hubspot_id = v_conflict\.source_id and m\.albi_organization_id <> v_target_id/)
+  assert.match(body, /update public\.h2a_contact_mappings[\s\S]*?set match_method = 'reviewed', reviewed_by = p_actor_id,\s*reviewed_at = p_now, updated_at = p_now[\s\S]*?and albi_contact_id = v_target_id/)
+  assert.match(body, /update public\.h2a_organization_mappings[\s\S]*?set match_method = 'reviewed', reviewed_by = p_actor_id,\s*reviewed_at = p_now, updated_at = p_now[\s\S]*?and albi_organization_id = v_target_id/)
   assert.doesNotMatch(body, /on conflict \(company_id, portal_id, hubspot_id\) do update set albi_(?:contact|organization)_id/)
   assert.match(body, /insert into public\.h2a_contact_mappings/)
   assert.match(body, /insert into public\.h2a_organization_mappings/)
@@ -173,6 +181,26 @@ test('conflict resolution is an atomic tenant-scoped CAS that appends audit, map
   assert.match(body, /approvemanytoone/)
   assert.match(tableBody(sql, 'public.h2a_conflict_resumes'), /unique \(company_id, conflict_id\)/)
   assert.match(sql, /create index h2a_conflict_resumes_pending_idx on public\.h2a_conflict_resumes \(company_id, status, created_at, id\)/)
+})
+
+test('generic mapping saves share source locking, preserve target identity, and reject replacement', () => {
+  const sql = readSchema()
+  const save = functionBody(sql, 'h2a_save_mapping')
+  const resolve = functionBody(sql, 'h2a_resolve_conflict')
+  assert.match(save, /p_object_type not in \('contacts', 'companies'\)/)
+  assert.match(save, /pg_advisory_xact_lock\(pg_catalog\.hashtextextended\(/)
+  assert.match(save, /jsonb_build_array\(p_company_id::text, p_portal_id, 'source', p_object_type, p_source_id\)::text, 0\)/)
+  assert.equal((save.match(/where m\.company_id = p_company_id and m\.portal_id = p_portal_id and m\.hubspot_id = p_source_id/g) ?? []).length, 4)
+  assert.match(resolve, /jsonb_build_array\(p_company_id::text, v_conflict\.portal_id, 'source',[\s\S]*?v_conflict\.object_type, v_conflict\.source_id\)::text, 0\)/)
+  for (const target of ['albi_contact_id', 'albi_organization_id']) {
+    assert.match(save, new RegExp(`${target} <> p_target_id[\\s\\S]*?mapping_conflict`))
+    assert.doesNotMatch(save, new RegExp(`set ${target} =`))
+  }
+  assert.match(save, /if found then[\s\S]*?if v_contact\.albi_contact_id <> p_target_id then[\s\S]*?mapping_conflict[\s\S]*?return pg_catalog\.to_jsonb\(v_contact\);/)
+  assert.match(save, /if found then[\s\S]*?if v_organization\.albi_organization_id <> p_target_id then[\s\S]*?mapping_conflict[\s\S]*?return pg_catalog\.to_jsonb\(v_organization\);/)
+  const repository = readFileSync(new URL('../netlify/functions/_h2a/repository.js', import.meta.url), 'utf8')
+  assert.match(repository, /rpc\('h2a_save_mapping'/)
+  assert.doesNotMatch(repository, /from\(table\)\.upsert/)
 })
 
 test('targeted resume dispatch claims are fenced and remain retryable until accepted', () => {
