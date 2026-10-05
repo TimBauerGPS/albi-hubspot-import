@@ -8,6 +8,7 @@ import Import from './pages/Import'
 import Dashboard from './pages/Dashboard'
 import HeldDeals from './pages/HeldDeals'
 import Admin from './pages/Admin'
+import HubSpotToAlbiLayout, { HubSpotToAlbiPlaceholder } from './features/hubspotToAlbi/HubSpotToAlbiLayout'
 
 function Spinner() {
   return (
@@ -96,8 +97,9 @@ function SetNewPasswordModal({ onDone }) {
  * Shows spinner while session or app access is still resolving.
  */
 function ProtectedRoute({ session, hasAppAccess, children }) {
-  if (session === undefined || hasAppAccess === null) return <Spinner />
+  if (session === undefined) return <Spinner />
   if (!session) return <Navigate to="/login" replace />
+  if (hasAppAccess === null) return <Spinner />
   if (!hasAppAccess) return <Navigate to="/no-access" replace />
   return children
 }
@@ -272,6 +274,33 @@ export default function App() {
             </ProtectedRoute>
           }
         />
+        <Route
+          path="/hubspot-to-albi"
+          element={
+            <ProtectedRoute session={session} hasAppAccess={hasAppAccess}>
+              <HubSpotToAlbiLayout
+                session={session}
+                companyId={companyId}
+                companyName={companyName}
+                isAdmin={isAdmin}
+                isSuperAdmin={isSuperAdmin}
+              />
+            </ProtectedRoute>
+          }
+        >
+          <Route
+            index
+            element={<HubSpotToAlbiPlaceholder title="Overview" description="Sync status and recent activity will appear here." />}
+          />
+          <Route
+            path="conflicts"
+            element={<HubSpotToAlbiPlaceholder title="Conflicts" description="Items that need review will appear here." />}
+          />
+          <Route
+            path="settings"
+            element={<HubSpotToAlbiPlaceholder title="Settings" description="Guided connection and sync controls will appear here." />}
+          />
+        </Route>
 
         {/* Admin-only */}
         <Route
