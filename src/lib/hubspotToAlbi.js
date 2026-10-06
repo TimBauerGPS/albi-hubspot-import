@@ -26,6 +26,8 @@ const SAFE_SERVER_MESSAGES = Object.freeze({
   'H2A settings are changing. Run preflight again shortly.': 'H2A settings are changing. Run preflight again shortly.',
   'Invalid conflict cursor.': 'Invalid conflict cursor.',
   'Invalid conflict page size.': 'Invalid conflict page size.',
+  'Invalid overview cursor.': 'Invalid overview cursor.',
+  'Invalid overview page size.': 'Invalid overview page size.',
   'Invalid conflict resolution payload.': 'Invalid conflict resolution payload.',
   'Invalid option mapping source.': 'Invalid option mapping source.',
   'Invalid option mapping.': 'Invalid option mapping.',
@@ -35,8 +37,10 @@ const SAFE_SERVER_MESSAGES = Object.freeze({
   'Many-to-one approval must be boolean.': 'Many-to-one approval must be boolean.',
   'Manual runs cannot resume or select a trigger.': 'Manual runs cannot resume or select a trigger.',
   'Notification recipients must be valid email addresses (up to 20).': 'Notification recipients must be valid email addresses (up to 20).',
+  'Overview page size must be between 1 and 100.': 'Overview page size must be between 1 and 100.',
   'Option mappings must use IDs from the latest tenant preflight options.': 'Option mappings must use IDs from the latest tenant preflight options.',
   'Resume requires a run ID.': 'Resume requires a run ID.',
+  'Resolution was saved; its targeted resume remains pending for retry.': 'Resolution was saved; its targeted resume remains pending for retry.',
   'Save H2A credentials in Settings before running preflight.': 'Save H2A credentials in Settings before running preflight.',
   'Save H2A credentials in Settings first.': 'Save H2A credentials in Settings first.',
   'Settings changed concurrently. Reload and try again.': 'Settings changed concurrently. Reload and try again.',
@@ -175,6 +179,10 @@ export function getH2AOverview(session, companyId, { cursor, limit, signal } = {
 
 export function getH2AConflicts(session, companyId, { cursor, limit, signal } = {}) {
   return request(session, 'h2a-conflicts', { companyId, query: { limit, cursor }, signal })
+}
+
+export function getH2AConflict(session, companyId, conflictId, { signal } = {}) {
+  return request(session, 'h2a-conflicts', { companyId, query: { conflictId }, signal })
 }
 
 export function resolveH2AConflict(session, companyId, resolution, { signal } = {}) {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { listConflicts, resolveConflict } from '../../netlify/functions/_h2a/conflicts.js'
+import { getConflict, listConflicts, resolveConflict } from '../../netlify/functions/_h2a/conflicts.js'
 import { createConflictListHandler } from '../../netlify/functions/h2a-conflicts.js'
 import { createConflictResolveHandler } from '../../netlify/functions/h2a-conflict-resolve.js'
 import { H2AAuthError } from '../../netlify/functions/_h2a/auth.js'
@@ -60,6 +60,20 @@ test('conflict listing bounds page sizes and produces the next tuple cursor', as
   const page = await listConflicts({ repository: deps.repository, companyId: 'company-1', limit: 10000 })
   assert.equal(page.items.length, 100)
   assert.deepEqual(page.nextCursor, { createdAt: updatedAt, id: '00000000-0000-4000-8000-000000000099' })
+})
+
+test('focused conflict refresh scopes the item and audit read to one tenant', async () => {
+  const { deps, calls } = serviceDeps()
+  deps.repository.getConflict = async (companyId, conflictId) => {
+    calls.listed.push(['getConflict', companyId, conflictId])
+    return conflict
+  }
+  const value = await getConflict({ repository: deps.repository, companyId: 'company-1', conflictId: 'conflict-1' })
+  assert.deepEqual(calls.listed[0], ['getConflict', 'company-1', 'conflict-1'])
+  assert.deepEqual(calls.listed[1], ['company-1', ['conflict-1']])
+  assert.equal(value.id, 'conflict-1')
+  assert.equal(value.audit.length, 1)
+  assert.equal(value.company_id, undefined)
 })
 
 test('identity link requires explicit target and explicit many-to-one approval when required', async () => {
@@ -159,6 +173,17 @@ test('members may list conflicts while resolution endpoint requests admin author
   const listed = await listHandler({ httpMethod: 'GET', queryStringParameters: {} })
   assert.equal(listed.statusCode, 200)
   assert.equal(calls[0].requireAdmin, false)
+  const focusedHandler = createConflictListHandler({
+    requireRequest: async (_event, options) => { calls.push(options); return { companyId: 'company-1', supabase: {} } },
+    repository: {
+      getConflict: async () => conflict,
+      listConflictEvents: async () => [],
+    },
+  })
+  const focused = await focusedHandler({ httpMethod: 'GET', queryStringParameters: { conflictId: 'conflict-1' } })
+  assert.equal(focused.statusCode, 200)
+  assert.equal(JSON.parse(focused.body).item.id, 'conflict-1')
+  assert.equal(calls[1].requireAdmin, false)
   const resolveHandler = createConflictResolveHandler({
     requireRequest: async (_event, options) => { calls.push(options); return { companyId: 'company-1', userId: 'user-1', supabase: {} } },
     repository: { resolveConflict: async () => ({ error: 'stale' }) },
@@ -166,7 +191,7 @@ test('members may list conflicts while resolution endpoint requests admin author
   const response = await resolveHandler({ httpMethod: 'POST', body: JSON.stringify({ conflictId: 'conflict-1',
     expectedUpdatedAt: updatedAt, action: 'skip_item' }) })
   assert.equal(response.statusCode, 409)
-  assert.equal(calls[1].requireAdmin, true)
+  assert.equal(calls[2].requireAdmin, true)
   const denied = createConflictResolveHandler({
     requireRequest: async (_event, options) => { assert.equal(options.requireAdmin, true); throw new H2AAuthError(403, 'Admin only.') },
     repository: { resolveConflict: async () => { throw Error('unauthorized mutation') } },

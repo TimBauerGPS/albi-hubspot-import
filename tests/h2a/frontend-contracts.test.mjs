@@ -27,14 +27,15 @@ async function captureRequests(run, reply = {}) {
 }
 
 test('read requests authenticate and strictly encode optional tenant query values', async () => {
-  const { getH2ASettings, getH2AOverview, getH2AConflicts } = await import('../../src/lib/hubspotToAlbi.js')
+  const { getH2ASettings, getH2AOverview, getH2AConflicts, getH2AConflict } = await import('../../src/lib/hubspotToAlbi.js')
   const calls = await captureRequests(async () => {
     await getH2ASettings(session, 'company/a & b')
     await getH2AOverview(session, null)
     await getH2AConflicts(session, 'company/a & b', { limit: 25, cursor: 'next/page==' })
+    await getH2AConflict(session, 'company/a & b', 'conflict/7')
   })
 
-  assert.equal(calls.length, 3)
+  assert.equal(calls.length, 4)
   for (const call of calls) {
     assert.equal(call.options.method, 'GET')
     assert.equal(call.options.headers.Authorization, 'Bearer supabase-session-token')
@@ -43,6 +44,7 @@ test('read requests authenticate and strictly encode optional tenant query value
   assert.equal(calls[0].url, '/.netlify/functions/h2a-settings?companyId=company%2Fa+%26+b')
   assert.equal(calls[1].url, '/.netlify/functions/h2a-overview')
   assert.equal(calls[2].url, '/.netlify/functions/h2a-conflicts?companyId=company%2Fa+%26+b&limit=25&cursor=next%2Fpage%3D%3D')
+  assert.equal(calls[3].url, '/.netlify/functions/h2a-conflicts?companyId=company%2Fa+%26+b&conflictId=conflict%2F7')
 })
 
 test('mutating requests carry the bearer token and selected company in JSON only', async () => {
@@ -94,6 +96,9 @@ test('client exposes actionable fixed endpoint errors and keeps unknown text gen
     ['Invalid conflict cursor.', 'Invalid conflict cursor.', 400],
     ['A completed dry run is required before live activation.', 'A completed dry run is required before live activation.', 409],
     ['Invalid conflict page size.', 'Invalid conflict page size.'],
+    ['Invalid overview cursor.', 'Invalid overview cursor.'],
+    ['Invalid overview page size.', 'Invalid overview page size.'],
+    ['Overview page size must be between 1 and 100.', 'Overview page size must be between 1 and 100.'],
     ['Conflict page size must be between 1 and 100.', 'Conflict page size must be between 1 and 100.'],
     ['Invalid option mapping.', 'Invalid option mapping.'],
     ['Invalid conflict resolution payload.', 'Invalid conflict resolution payload.'],
@@ -102,6 +107,7 @@ test('client exposes actionable fixed endpoint errors and keeps unknown text gen
     ['Invalid sync mode.', 'Invalid sync mode.'],
     ['Unsupported settings action.', 'Unsupported settings action.'],
     ['Unsupported request fields.', 'Unsupported request fields.'],
+    ['Resolution was saved; its targeted resume remains pending for retry.', 'Resolution was saved; its targeted resume remains pending for retry.', 502],
     ['Invalid option mapping source.', 'Invalid option mapping source.'],
     ['Complete option mappings are required.', 'Complete option mappings are required.'],
     ['Confirm contact and organization defaults and every activity type.', 'Confirm contact and organization defaults and every activity type.'],

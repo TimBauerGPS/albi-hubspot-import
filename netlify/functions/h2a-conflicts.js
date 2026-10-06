@@ -1,6 +1,6 @@
 import { H2AAuthError, requireH2ARequest } from './_h2a/auth.js'
 import { createH2ARepository } from './_h2a/repository.js'
-import { H2AConflictError, listConflicts } from './_h2a/conflicts.js'
+import { getConflict, H2AConflictError, listConflicts } from './_h2a/conflicts.js'
 
 const response = (statusCode, body) => ({ statusCode, headers: {
   'Content-Type': 'application/json', 'Cache-Control': 'no-store',
@@ -34,7 +34,7 @@ export function createConflictListHandler(options = {}) {
     if (event.httpMethod !== 'GET') return response(405, { error: 'Method not allowed.' })
     try {
       const query = event.queryStringParameters ?? {}
-      if (Object.keys(query).some(key => !['companyId', 'company_id', 'limit', 'cursor'].includes(key))) {
+      if (Object.keys(query).some(key => !['companyId', 'company_id', 'limit', 'cursor', 'conflictId'].includes(key))) {
         throw new H2AConflictError(400, 'Unsupported query parameters.')
       }
       const selectors = [query.companyId, query.company_id].filter(value => value !== undefined)
@@ -51,6 +51,11 @@ export function createConflictListHandler(options = {}) {
         requireAdmin: false, requestedCompanyId: selectors[0],
       })
       const repository = options.repository ?? createH2ARepository(context.supabase)
+      if (query.conflictId !== undefined) {
+        if (query.limit !== undefined || query.cursor !== undefined) throw new H2AConflictError(400, 'Unsupported query parameters.')
+        const item = await getConflict({ repository, companyId: context.companyId, conflictId: query.conflictId })
+        return response(200, { item })
+      }
       const page = await listConflicts({ repository, companyId: context.companyId, limit, cursor: decodeCursor(query.cursor) })
       return response(200, { items: page.items, nextCursor: encodeCursor(page.nextCursor) })
     } catch (error) {

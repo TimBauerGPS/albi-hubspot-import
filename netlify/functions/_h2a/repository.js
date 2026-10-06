@@ -54,6 +54,9 @@ export function aggregateRunTotals(rows, mode) {
 export function createH2ARepository(supabase) {
   if (!supabase?.from || !supabase?.rpc) throw new TypeError('A server-side Supabase client is required')
   return {
+    async getConflict(companyId, conflictId) {
+      return checked(await scoped(supabase, 'h2a_conflicts', companyId).eq('id', conflictId).maybeSingle())
+    },
     async listConflicts(companyId, { limit, before = null }) {
       let query = scoped(supabase, 'h2a_conflicts', companyId)
         .order('created_at', { ascending: false }).order('id', { ascending: false }).limit(limit)

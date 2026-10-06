@@ -127,6 +127,16 @@ export async function listConflicts({ repository, companyId, cursor = null, limi
   return { items, nextCursor: hasMore && last ? { createdAt: last.created_at, id: last.id } : null }
 }
 
+export async function getConflict({ repository, companyId, conflictId }) {
+  validCompanyId(companyId)
+  if (typeof conflictId !== 'string' || !conflictId.trim() || conflictId.length > 200) fail(400, 'A conflict ID is required.')
+  if (!repository?.getConflict || !repository?.listConflictEvents) throw new TypeError('Conflict repository is required')
+  const row = await repository.getConflict(companyId, conflictId)
+  if (!row) fail(404, 'Conflict not found.')
+  const events = await repository.listConflictEvents(companyId, [row.id])
+  return sanitizeConflict(row, events ?? [])
+}
+
 function validateResolution(input) {
   object(input, 'A conflict resolution is required.')
   validCompanyId(input.companyId)

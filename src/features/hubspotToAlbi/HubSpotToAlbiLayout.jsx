@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { NavLink, Outlet, useOutletContext } from 'react-router-dom'
+import { NavLink, Outlet } from 'react-router-dom'
 import AppShell from '../../components/AppShell'
 import CompanySelector from './CompanySelector'
 
@@ -8,21 +8,6 @@ const TABS = [
   { to: '/hubspot-to-albi/conflicts', label: 'Conflicts' },
   { to: '/hubspot-to-albi/settings', label: 'Settings' },
 ]
-
-export function HubSpotToAlbiPlaceholder({ title, description }) {
-  const { tenantRevision, completeTenantTransition } = useOutletContext()
-
-  useEffect(() => {
-    completeTenantTransition(tenantRevision)
-  }, [completeTenantTransition, tenantRevision])
-
-  return (
-    <section className="rounded-xl border border-gray-200 bg-white px-5 py-8 sm:px-7" aria-labelledby={`h2a-${title.toLowerCase()}-title`}>
-      <h2 id={`h2a-${title.toLowerCase()}-title`} className="text-base font-semibold text-gray-900">{title}</h2>
-      <p className="mt-1 max-w-2xl text-sm leading-6 text-gray-500">{description}</p>
-    </section>
-  )
-}
 
 export default function HubSpotToAlbiLayout({
   session,

@@ -8,7 +8,9 @@ import Import from './pages/Import'
 import Dashboard from './pages/Dashboard'
 import HeldDeals from './pages/HeldDeals'
 import Admin from './pages/Admin'
-import HubSpotToAlbiLayout, { HubSpotToAlbiPlaceholder } from './features/hubspotToAlbi/HubSpotToAlbiLayout'
+import HubSpotToAlbiLayout from './features/hubspotToAlbi/HubSpotToAlbiLayout'
+import OverviewPage from './features/hubspotToAlbi/OverviewPage'
+import ConflictsPage from './features/hubspotToAlbi/ConflictsPage'
 import SettingsPage from './features/hubspotToAlbi/SettingsPage'
 
 function Spinner() {
@@ -291,11 +293,11 @@ export default function App() {
         >
           <Route
             index
-            element={<HubSpotToAlbiPlaceholder title="Overview" description="Sync status and recent activity will appear here." />}
+            element={<OverviewPage />}
           />
           <Route
             path="conflicts"
-            element={<HubSpotToAlbiPlaceholder title="Conflicts" description="Items that need review will appear here." />}
+            element={<ConflictsPage />}
           />
           <Route
             path="settings"
