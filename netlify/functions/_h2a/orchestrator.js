@@ -92,7 +92,8 @@ async function conflict(deps, ctx, data) {
   }
   await recordOnce(deps.repository, companyId, runId, { portal_id: portalId, object_type: data.objectType,
     source_id: data.sourceId, outcome: ctx.mode === 'dry_run' ? 'dry_run' : 'conflict',
-    sanitized_details: { reason: data.reason, conflictType: data.type } })
+    sanitized_details: { reason: data.reason, conflictType: data.type,
+      ...(ctx.mode === 'dry_run' ? { proposedAction: 'review_conflict' } : {}) } })
 }
 
 async function resolveOrganization(deps, ctx, source) {
@@ -120,7 +121,8 @@ async function resolveOrganization(deps, ctx, source) {
     }
     await recordOnce(deps.repository, companyId, runId, { portal_id: portalId, object_type: 'companies', source_id: sourceId,
       albi_target_type: 'organization', albi_target_id: decision.targetId,
-      outcome: ctx.mode === 'dry_run' ? 'dry_run' : 'linked', sanitized_details: { reason: decision.reason } })
+      outcome: ctx.mode === 'dry_run' ? 'dry_run' : 'linked', sanitized_details: { reason: decision.reason,
+        ...(ctx.mode === 'dry_run' ? { proposedAction: 'link_organization' } : {}) } })
     const candidate = indexes.organizations.find(item => idOf(item) === decision.targetId)
     const types = candidate?.organizationTypeIds ?? []
     return { id: sourceId, action: 'link', targetId: decision.targetId,
@@ -186,7 +188,8 @@ async function resolveContact(deps, ctx, source, organization) {
     }
     await recordOnce(deps.repository, companyId, runId, { portal_id: portalId, object_type: 'contacts', source_id: sourceId,
       albi_target_type: 'contact', albi_target_id: decision.targetId,
-      outcome: ctx.mode === 'dry_run' ? 'dry_run' : 'linked', sanitized_details: { reason: decision.reason } })
+      outcome: ctx.mode === 'dry_run' ? 'dry_run' : 'linked', sanitized_details: { reason: decision.reason,
+        ...(ctx.mode === 'dry_run' ? { proposedAction: 'link_contact' } : {}) } })
     return { id: sourceId, action: 'link', targetId: decision.targetId }
   }
   const fields = sourceFields(source)
@@ -378,7 +381,7 @@ export async function runCompanySync(deps, input = {}) {
         ctx.activity = activity
         await processActivity(deps, ctx, activity, deadline)
       }
-      totals = await repo.totals(companyId, run.id)
+      totals = await repo.totals(companyId, run.id, mode)
       status = totals.failed || totals.conflict ? 'partially_failed' : 'completed'
       await repo.finishRun(companyId, run.id, status, totals)
       if (status === 'partially_failed') await repo.requeueConflictResume?.(companyId, input.resumeId)
@@ -427,7 +430,8 @@ export async function runCompanySync(deps, input = {}) {
             } catch (error) {
               await recordOnce(repo, companyId, run.id, { portal_id: config.portal_id, object_type: objectType,
                 source_id: String(activity.id), outcome: mode === 'dry_run' ? 'dry_run' : 'failed',
-                sanitized_details: { reason: safeError(error) } })
+                sanitized_details: { reason: safeError(error),
+                  ...(mode === 'dry_run' ? { proposedAction: 'review_conflict' } : {}) } })
               outcomes.push({ ...itemBoundary, resolved: mode === 'dry_run' })
             }
           }
@@ -462,7 +466,7 @@ export async function runCompanySync(deps, input = {}) {
       }
       if (continuation) break
     }
-    totals = await repo.totals(companyId, run.id)
+    totals = await repo.totals(companyId, run.id, mode)
     if (totals.failed || totals.conflict) status = 'partially_failed'
     if (continuation) status = 'paused'
     await repo.finishRun(companyId, run.id, status, totals)
@@ -472,7 +476,7 @@ export async function runCompanySync(deps, input = {}) {
     primaryError = error instanceof Error ? error : new Error('H2A run failed')
     if (run) {
       try {
-        totals = await repo.totals(companyId, run.id)
+        totals = await repo.totals(companyId, run.id, mode)
         await repo.finishRun(companyId, run.id, 'failed', totals, safeError(primaryError))
         primaryError.h2aPersistedFailure = { runId: run.id, totals, newConflictCount: ctx?.newConflictCount ?? 0 }
       } catch (persistError) { logCleanupFailure(deps, 'failure_persist', persistError) }

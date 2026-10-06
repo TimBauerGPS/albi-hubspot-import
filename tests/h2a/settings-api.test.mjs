@@ -553,8 +553,13 @@ test('GET exposes only a tenant-scoped completed dry-run summary created after t
     { id: 'other-tenant', company_id: 'company-b', created_at: '2026-10-02T10:03:00.000Z', finished_at: '2026-10-02T10:04:00.000Z' },
     { id: 'ready', created_at: '2026-10-02T10:02:00.000Z', finished_at: '2026-10-02T10:05:00.000Z', totals: {
       dry_run: 12,
-      conflict: 2,
-      created: 1.5,
+      would_create_organizations: 2,
+      would_create_contacts: 3,
+      would_link: 4,
+      would_deliver_activities: 5,
+      requires_review: 1,
+      skipped: 0,
+      created: 99,
       updated: Number.MAX_SAFE_INTEGER + 1,
       provider_error: 'secret-provider-detail',
       raw_snapshot: { email: 'private@example.com' },
@@ -565,7 +570,13 @@ test('GET exposes only a tenant-scoped completed dry-run summary created after t
   assert.equal(result.json.dryRunReviewReady, true)
   assert.deepEqual(result.json.lastCompletedDryRun, {
     id: 'ready', createdAt: '2026-10-02T10:02:00.000Z', finishedAt: '2026-10-02T10:05:00.000Z',
-    totals: { dry_run: 12, conflict: 2 },
+    totals: {
+      would_create_organizations: 2,
+      would_create_contacts: 3,
+      would_link: 4,
+      would_deliver_activities: 5,
+      requires_review: 1,
+    },
   })
   assert.equal(result.body.includes('error_summary'), false)
   assert.equal(result.body.includes('provider_error'), false)

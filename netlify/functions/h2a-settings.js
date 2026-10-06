@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { H2AAuthError, requireH2ARequest } from './_h2a/auth.js'
-import { HUBSPOT_ACTIVITY_TYPES } from './_h2a/constants.js'
+import { DRY_RUN_REVIEW_TOTAL_FIELDS, HUBSPOT_ACTIVITY_TYPES } from './_h2a/constants.js'
 import { decryptSecret, encryptSecret, loadCredentialKeyring, maskSecret } from './_h2a/crypto.js'
 import { pacificBusinessDate, pacificStartOfDate } from './_h2a/time.js'
 import { mappingsMatchOptions, safePreflightDetails } from './_h2a/preflight.js'
@@ -18,7 +18,6 @@ const ACTION_FIELDS = {
   enter_dry_run: [], activate_live: [], disable: [], request_earlier_backfill: ['startDate'],
 }
 const MAPPING_KINDS = ['activity_type', 'default_contact_type', 'default_organization_type', 'organization_to_contact_type']
-const RUN_TOTAL_FIELDS = ['created', 'updated', 'linked', 'delivered', 'reconciled', 'skipped', 'conflict', 'failed', 'dry_run']
 
 function fail(statusCode, message) { throw new H2AAuthError(statusCode, message) }
 
@@ -68,8 +67,8 @@ function toMapping(row) {
 
 function toCompletedDryRun(row) {
   if (!row) return null
-  const totals = Object.fromEntries(RUN_TOTAL_FIELDS
-    .filter(field => Number.isSafeInteger(row.totals?.[field]) && row.totals[field] >= 0)
+  const totals = Object.fromEntries(DRY_RUN_REVIEW_TOTAL_FIELDS
+    .filter(field => Number.isSafeInteger(row.totals?.[field]) && row.totals[field] > 0)
     .map(field => [field, row.totals[field]]))
   return { id: row.id, createdAt: row.created_at, finishedAt: row.finished_at, totals }
 }

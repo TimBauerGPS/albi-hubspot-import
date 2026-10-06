@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
+import { DRY_RUN_REVIEW_TOTAL_FIELDS } from '../../netlify/functions/_h2a/constants.js'
+import { DRY_RUN_TOTAL_LABELS, presentDryRunTotals } from '../../src/features/hubspotToAlbi/dryRunTotals.js'
 
 const root = new URL('../../src/features/hubspotToAlbi/', import.meta.url)
 const source = name => readFile(new URL(name, root), 'utf8')
@@ -104,14 +106,34 @@ test('settings runway covers Pacific dates, estimates, notifications, backfill, 
 })
 
 test('completed dry-run review renders only fixed, validated outcome totals', async () => {
-  const page = await source('SettingsPage.jsx')
-  assert.match(page, /DRY_RUN_TOTAL_LABELS/)
-  for (const label of ['Items previewed', 'Would create', 'Would update', 'Would link', 'Would deliver', 'Would reconcile', 'Would skip', 'Needs review', 'Failed']) {
-    assert.match(page, new RegExp(label))
-  }
-  assert.match(page, /Number\.isSafeInteger/)
+  const [page, totals] = await Promise.all([source('SettingsPage.jsx'), source('dryRunTotals.js')])
+  assert.match(page, /presentDryRunTotals\(settings\?\.lastCompletedDryRun\?\.totals\)/)
+  assert.match(totals, /DRY_RUN_TOTAL_LABELS/)
+  assert.match(totals, /Number\.isSafeInteger/)
+  assert.match(totals, /value > 0/)
   assert.match(page, /completed dry-run totals shown/)
+  assert.doesNotMatch(page, /\['dry_run', 'Items previewed'\]/)
+  assert.doesNotMatch(page, /\['created', 'Would create'\]/)
   assert.doesNotMatch(page, /Object\.entries\(settings\?\.lastCompletedDryRun\?\.totals/)
+})
+
+test('review labels match the server projection and preserve nonzero proposed-action counts', () => {
+  assert.deepEqual(DRY_RUN_TOTAL_LABELS.map(([field]) => field), DRY_RUN_REVIEW_TOTAL_FIELDS)
+  assert.deepEqual(presentDryRunTotals({
+    would_create_organizations: 2,
+    would_create_contacts: 3,
+    would_link: 4,
+    would_deliver_activities: 5,
+    requires_review: 1,
+    skipped: 0,
+    provider_error: 'private detail',
+  }), [
+    { key: 'would_create_organizations', label: 'Would create organizations', value: 2 },
+    { key: 'would_create_contacts', label: 'Would create contacts', value: 3 },
+    { key: 'would_link', label: 'Would link existing records', value: 4 },
+    { key: 'would_deliver_activities', label: 'Would deliver activities', value: 5 },
+    { key: 'requires_review', label: 'Needs review', value: 1 },
+  ])
 })
 
 test('readiness summary states the next safe action and members remain read-only', async () => {

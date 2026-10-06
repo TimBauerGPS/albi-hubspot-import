@@ -1,4 +1,7 @@
 import { randomUUID } from 'node:crypto'
+import { DRY_RUN_PROPOSED_ACTION_TOTALS, DRY_RUN_REVIEW_TOTAL_FIELDS } from './constants.js'
+
+const BASE_RUN_TOTAL_FIELDS = ['created', 'updated', 'linked', 'delivered', 'reconciled', 'skipped', 'conflict', 'failed', 'dry_run']
 
 function checked(result) {
   if (result?.error) throw result.error
@@ -23,6 +26,29 @@ async function readAll(supabase, table, companyId, filter = query => query) {
     if (page.length < 1000) return rows
   }
   throw new Error(`${table} page limit exceeded`)
+}
+
+export function aggregateRunTotals(rows, mode) {
+  const totals = Object.fromEntries(BASE_RUN_TOTAL_FIELDS.map(field => [field, 0]))
+  if (mode === 'dry_run') {
+    for (const field of DRY_RUN_REVIEW_TOTAL_FIELDS) totals[field] = 0
+  }
+  const latest = new Map()
+  for (const row of [...(rows ?? [])].sort((a, b) =>
+    Date.parse(a.created_at) - Date.parse(b.created_at) || String(a.id).localeCompare(String(b.id)))) {
+    const key = JSON.stringify([row.object_type, row.source_id, row.albi_target_type, row.albi_target_id])
+    latest.set(key, row)
+  }
+  for (const row of latest.values()) {
+    if (Object.hasOwn(totals, row.outcome)) totals[row.outcome] += 1
+    if (mode !== 'dry_run' || row.outcome !== 'dry_run') continue
+    const action = row.sanitized_details?.proposedAction
+    const field = typeof action === 'string' && Object.hasOwn(DRY_RUN_PROPOSED_ACTION_TOTALS, action)
+      ? DRY_RUN_PROPOSED_ACTION_TOTALS[action]
+      : null
+    if (field) totals[field] = (totals[field] ?? 0) + 1
+  }
+  return totals
 }
 
 export function createH2ARepository(supabase) {
@@ -209,17 +235,9 @@ export function createH2ARepository(supabase) {
       const row = { ...item, company_id: companyId }
       return checked(await supabase.from('h2a_item_results').insert(row).select('*').single())
     },
-    async totals(companyId, runId) {
+    async totals(companyId, runId, mode) {
       const rows = await readAll(supabase, 'h2a_item_results', companyId, query => query.eq('run_id', runId))
-      const totals = { created: 0, updated: 0, linked: 0, delivered: 0, reconciled: 0, skipped: 0, conflict: 0, failed: 0, dry_run: 0 }
-      const latest = new Map()
-      for (const row of [...(rows ?? [])].sort((a, b) =>
-        Date.parse(a.created_at) - Date.parse(b.created_at) || String(a.id).localeCompare(String(b.id)))) {
-        const key = JSON.stringify([row.object_type, row.source_id, row.albi_target_type, row.albi_target_id])
-        latest.set(key, row)
-      }
-      for (const row of latest.values()) if (Object.hasOwn(totals, row.outcome)) totals[row.outcome] += 1
-      return totals
+      return aggregateRunTotals(rows, mode)
     },
     async saveMapping(companyId, kind, row) {
       const objectType = kind === 'contact' ? 'contacts' : kind === 'organization' ? 'companies' : null

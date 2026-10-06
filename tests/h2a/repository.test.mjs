@@ -19,6 +19,62 @@ test('run totals count the latest durable outcome for each source-target item', 
   assert.deepEqual(filters, [['company_id', 'company-1'], ['run_id', 'run-1']])
 })
 
+test('dry-run totals use explicit safe fields and ignore proposals outside the exact action allowlist', async () => {
+  const rows = [
+    { id: 'a', object_type: 'companies', source_id: '1', outcome: 'dry_run', sanitized_details: { proposedAction: 'create_organization' }, created_at: '2026-10-01T00:00:00Z' },
+    { id: 'b', object_type: 'contacts', source_id: '2', outcome: 'dry_run', sanitized_details: { proposedAction: 'create_contact' }, created_at: '2026-10-01T00:00:01Z' },
+    { id: 'c', object_type: 'contacts', source_id: '3', albi_target_type: 'contact', albi_target_id: '7', outcome: 'dry_run', sanitized_details: { proposedAction: 'link_contact' }, created_at: '2026-10-01T00:00:02Z' },
+    { id: 'd', object_type: 'companies', source_id: '4', albi_target_type: 'organization', albi_target_id: '8', outcome: 'dry_run', sanitized_details: { proposedAction: 'link_organization' }, created_at: '2026-10-01T00:00:03Z' },
+    { id: 'e', object_type: 'calls', source_id: '5', albi_target_type: 'contact', albi_target_id: '7', outcome: 'dry_run', sanitized_details: { proposedAction: 'deliver_activity' }, created_at: '2026-10-01T00:00:04Z' },
+    { id: 'f', object_type: 'calls', source_id: '6', outcome: 'dry_run', sanitized_details: { proposedAction: 'review_conflict' }, created_at: '2026-10-01T00:00:05Z' },
+    { id: 'g', object_type: 'calls', source_id: '7', outcome: 'dry_run', sanitized_details: { proposedAction: 'arbitrary_secret_action' }, created_at: '2026-10-01T00:00:06Z' },
+    { id: 'h', object_type: 'calls', source_id: '8', outcome: 'dry_run', sanitized_details: { proposedAction: 'constructor' }, created_at: '2026-10-01T00:00:07Z' },
+    { id: 'i', object_type: 'emails', source_id: '9', outcome: 'skipped', sanitized_details: { reason: 'not_verified_direct_crm_email' }, created_at: '2026-10-01T00:00:08Z' },
+  ]
+  const query = { select() { return this }, eq() { return this }, order() { return this }, range() { return this },
+    then(resolve) { resolve({ data: rows, error: null }) } }
+  const totals = await createH2ARepository({ from: () => query, rpc: async () => ({ data: true }) })
+    .totals('company-1', 'run-1', 'dry_run')
+  assert.deepEqual(totals, {
+    created: 0, updated: 0, linked: 0, delivered: 0, reconciled: 0, skipped: 1, conflict: 0, failed: 0, dry_run: 8,
+    would_create_organizations: 1,
+    would_create_contacts: 1,
+    would_link: 2,
+    would_deliver_activities: 1,
+    requires_review: 1,
+  })
+  assert.equal(Object.hasOwn(totals, 'arbitrary_secret_action'), false)
+  assert.equal(Object.hasOwn(totals, 'constructor'), false)
+})
+
+test('live totals retain their pre-review schema even when rows contain dry-run proposals', async () => {
+  const rows = [{ id: 'a', object_type: 'contacts', source_id: '1', outcome: 'dry_run',
+    sanitized_details: { proposedAction: 'create_contact' }, created_at: '2026-10-01T00:00:00Z' }]
+  const totals = await createH2ARepository({ from: () => ({ select() { return this }, eq() { return this },
+    order() { return this }, range() { return this }, then(resolve) { resolve({ data: rows, error: null }) } }),
+  rpc: async () => ({ data: true }) }).totals('company-1', 'run-1', 'live')
+  assert.deepEqual(totals, {
+    created: 0, updated: 0, linked: 0, delivered: 0, reconciled: 0, skipped: 0, conflict: 0, failed: 0, dry_run: 1,
+  })
+})
+
+test('completed dry runs persist every safe review total at zero when no proposed action was recorded', async () => {
+  const rows = [{ id: 'a', object_type: 'calls', source_id: '1', outcome: 'dry_run',
+    sanitized_details: { proposedAction: 'unrecognized' }, created_at: '2026-10-01T00:00:00Z' }]
+  const totals = await createH2ARepository({ from: () => ({ select() { return this }, eq() { return this },
+    order() { return this }, range() { return this }, then(resolve) { resolve({ data: rows, error: null }) } }),
+  rpc: async () => ({ data: true }) }).totals('company-1', 'run-1', 'dry_run')
+  assert.deepEqual(Object.fromEntries(Object.entries(totals).filter(([key]) => key.startsWith('would_') ||
+    key === 'requires_review' || key === 'skipped')), {
+    would_create_organizations: 0,
+    would_create_contacts: 0,
+    would_link: 0,
+    would_deliver_activities: 0,
+    requires_review: 0,
+    skipped: 0,
+  })
+})
+
 test('delivery repository passes tenant identity to atomic reserve and transition RPCs', async () => {
   const calls = []
   const repository = createH2ARepository({ from: () => { throw Error('table access is unexpected') },

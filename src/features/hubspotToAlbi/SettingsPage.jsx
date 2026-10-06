@@ -10,21 +10,11 @@ import {
 import CredentialFields from './CredentialFields'
 import OptionMappingForm from './OptionMappingForm'
 import PreflightChecklist from './PreflightChecklist'
+import { presentDryRunTotals } from './dryRunTotals.js'
 
 const ACTIVITY_TYPES = ['meetings', 'calls', 'emails', 'communications', 'notes']
 const EMPTY_OPTIONS = Object.freeze({})
 const ACTIVITY_LABELS = { meetings: 'Meetings', calls: 'Calls', emails: 'Emails', communications: 'Communications', notes: 'Notes' }
-const DRY_RUN_TOTAL_LABELS = [
-  ['dry_run', 'Items previewed'],
-  ['created', 'Would create'],
-  ['updated', 'Would update'],
-  ['linked', 'Would link'],
-  ['delivered', 'Would deliver'],
-  ['reconciled', 'Would reconcile'],
-  ['skipped', 'Would skip'],
-  ['conflict', 'Needs review'],
-  ['failed', 'Failed'],
-]
 const REQUIRED_IDENTITIES = [
   'default_contact_type:default',
   'default_organization_type:default',
@@ -206,10 +196,7 @@ export default function SettingsPage() {
   const canEnterDryRun = isAdmin && !busy && credentialsReady && connectionReady && dateReady && mappingsReady && !live
   const canActivate = isAdmin && !busy && connectionReady && mappingsReady && dryRunReady && settings?.config?.state === 'dry_run'
   const options = settings?.preflight?.details?.options ?? EMPTY_OPTIONS
-  const completedDryRunTotals = DRY_RUN_TOTAL_LABELS.flatMap(([key, label]) => {
-    const value = settings?.lastCompletedDryRun?.totals?.[key]
-    return Number.isSafeInteger(value) && value >= 0 ? [{ key, label, value }] : []
-  })
+  const completedDryRunTotals = presentDryRunTotals(settings?.lastCompletedDryRun?.totals)
 
   async function saveCredentials(update) {
     const result = await perform('credentials', signal => saveH2ASettings(session, companyId, { action: 'replace_credentials', ...update }, { signal }),

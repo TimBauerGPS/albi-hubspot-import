@@ -1,6 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { runCompanySync } from '../../netlify/functions/_h2a/orchestrator.js'
+import { createH2ARepository } from '../../netlify/functions/_h2a/repository.js'
+import { createSettingsHandler } from '../../netlify/functions/h2a-settings.js'
+import { presentDryRunTotals } from '../../src/features/hubspotToAlbi/dryRunTotals.js'
 
 test('lease collision returns stable already-running result without provider access', async () => {
   const result = await runCompanySync({ repository: { claimLease: async () => false }, hubspot: { listActivities: () => { throw Error('provider touched') } } },
@@ -93,7 +96,19 @@ test('dry run records previews and leaves every live mutation unused', async () 
 })
 
 function liveFixture({ contactIds = ['10'], companyIds = ['20'], activities = [{ id: '50', occurredAt: '2026-10-02T12:00:00Z', objectType: 'calls', properties: { hs_timestamp: '2026-10-02T12:00:00Z' } }], albiContacts = [], albiOrganizations = [] } = {}) {
-  const events = [], items = [], cursors = []
+  const events = [], items = [], durableItems = [], cursors = [], persistedRuns = []
+  const totalsRepository = createH2ARepository({
+    from(table) {
+      assert.equal(table, 'h2a_item_results')
+      const filters = []
+      return { select() { return this }, eq(key, value) { filters.push([key, value]); return this },
+        order() { return this }, range(start, end) {
+          return Promise.resolve({ data: durableItems.filter(row => filters.every(([key, value]) => row[key] === value))
+            .slice(start, end + 1), error: null })
+        } }
+    },
+    rpc: async () => ({ data: true }),
+  })
   const mappings = { contacts: [], organizations: [], options: [
     { mapping_kind: 'default_contact_type', source_key: 'default', albi_id: '1', confirmed_at: '2026-10-01T00:00:00Z' },
     { mapping_kind: 'default_organization_type', source_key: 'default', albi_id: '2', confirmed_at: '2026-10-01T00:00:00Z' },
@@ -106,11 +121,17 @@ function liveFixture({ contactIds = ['10'], companyIds = ['20'], activities = [{
     getMappings: async () => mappings, startRun: async () => ({ id: 'run1' }), getCursor: async () => null,
     saveCursor: async (_company, type, cursor) => { cursors.push({ type, cursor }) },
     getItemOutcomes: async (_company, _run, type, id) => items.filter(row => row.object_type === type && row.source_id === id),
-    recordItem: async (_company, row) => { items.push(row); events.push(`item:${row.outcome}`) },
+    recordItem: async (companyId, row) => {
+      items.push(row)
+      durableItems.push({ ...row, company_id: companyId, id: `item-${durableItems.length + 1}`,
+        created_at: `2026-10-02T10:00:${String(durableItems.length).padStart(2, '0')}Z` })
+      events.push(`item:${row.outcome}`)
+    },
     saveMapping: async (_company, kind, row) => { events.push(`mapping:${kind}`); return row },
     recordConflict: async (_company, row) => { events.push(`conflict:${row.reason}`); return row },
-    totals: async () => Object.fromEntries([...new Set(items.map(item => item.outcome))].map(outcome => [outcome, items.filter(item => item.outcome === outcome).length])),
-    finishRun: async () => { events.push('finish') },
+    totals: (_company, runId, mode) => totalsRepository.totals('c1', runId, mode),
+    finishRun: async (_company, runId, status, totals) => { persistedRuns.push({ id: runId, company_id: 'c1', runId, status, totals,
+      mode: 'dry_run', created_at: '2026-10-02T10:00:01.000Z', finished_at: '2026-10-02T10:05:00.000Z' }); events.push('finish') },
     deliveryStore: () => ({
       reserve: async ({ identity }) => {
         const key = `${identity.objectType}:${identity.activityId}:${identity.albiTargetId}`
@@ -139,7 +160,7 @@ function liveFixture({ contactIds = ['10'], companyIds = ['20'], activities = [{
     createContact: async () => { events.push('create:contact'); return { id: '200' } },
     createActivity: async () => { events.push('create:activity'); return { id: '300' } },
   }
-  return { repository, hubspot, albi, events, items, cursors, mappings }
+  return { repository, hubspot, albi, events, items, durableItems, cursors, mappings, persistedRuns }
 }
 
 test('live sync creates organization before contact and persists delivery before cursor', async () => {
@@ -187,6 +208,61 @@ test('dry run evaluates associations and proposed creations without provider wri
   assert.equal(result.status, 'completed')
   assert.ok(deps.items.some(item => item.object_type === 'companies' && item.sanitized_details.proposedAction === 'create_organization'))
   assert.ok(deps.items.some(item => item.object_type === 'contacts' && item.sanitized_details.proposedAction === 'create_contact'))
+  assert.deepEqual(deps.persistedRuns[0].totals, {
+    created: 0, updated: 0, linked: 0, delivered: 0, reconciled: 0, skipped: 0, conflict: 0, failed: 0, dry_run: 4,
+    would_create_organizations: 2,
+    would_create_contacts: 1,
+    would_link: 0,
+    would_deliver_activities: 0,
+    requires_review: 1,
+    skipped: 0,
+  })
+  const tables = {
+    companies: [{ id: 'c1', name: 'Alpha' }],
+    super_admins: [],
+    company_members: [{ user_id: 'user-1', company_id: 'c1', role: 'member' }],
+    h2a_company_config: [{ company_id: 'c1', state: 'dry_run', portal_id: '123', selected_start_date: '2026-10-02',
+      initial_start_locked_at: '2026-10-02T10:00:00.000Z', preflight_status: 'valid', preflight_details: {},
+      option_confirmation_status: 'confirmed', notification_recipients: [] }],
+    h2a_option_mappings: [],
+    h2a_sync_runs: deps.persistedRuns,
+  }
+  const supabase = {
+    auth: { getUser: async () => ({ data: { user: { id: 'user-1' } }, error: null }) },
+    from(table) {
+      const filters = []
+      let orderedBy, ascending = false, rowLimit
+      const query = {
+        select() { return this },
+        eq(key, value) { filters.push(row => row[key] === value); return this },
+        gt(key, value) { filters.push(row => row[key] > value); return this },
+        order(key, options = {}) { orderedBy = key; ascending = options.ascending !== false; return this },
+        limit(value) { rowLimit = value; return this },
+        async maybeSingle() { const result = await execute(); return { data: result.data[0] ?? null, error: null } },
+        then(resolve, reject) { return execute().then(resolve, reject) },
+      }
+      async function execute() {
+        let rows = tables[table].filter(row => filters.every(filter => filter(row)))
+        if (orderedBy) rows = [...rows].sort((left, right) => String(left[orderedBy]).localeCompare(String(right[orderedBy])) * (ascending ? 1 : -1))
+        if (rowLimit !== undefined) rows = rows.slice(0, rowLimit)
+        return { data: structuredClone(rows), error: null }
+      }
+      return query
+    },
+    rpc: async () => ({ data: null, error: null }),
+  }
+  const settingsHandler = createSettingsHandler({ supabase,
+    keyring: { activeVersion: 1, keys: { 1: Buffer.alloc(32, 7) } },
+    now: () => new Date('2026-10-02T10:06:00.000Z'),
+  })
+  const settingsResponse = await settingsHandler({ httpMethod: 'GET', headers: { authorization: 'Bearer test' } })
+  const settings = JSON.parse(settingsResponse.body)
+  assert.equal(settingsResponse.statusCode, 200)
+  assert.deepEqual(presentDryRunTotals(settings.lastCompletedDryRun.totals), [
+    { key: 'would_create_organizations', label: 'Would create organizations', value: 2 },
+    { key: 'would_create_contacts', label: 'Would create contacts', value: 1 },
+    { key: 'requires_review', label: 'Needs review', value: 1 },
+  ])
   assert.equal(deps.cursors.length, 0)
 })
 
