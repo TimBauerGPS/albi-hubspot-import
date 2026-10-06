@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useOutletContext } from 'react-router-dom'
 import { getH2AConflict, getH2AConflicts, getH2AOverview, resolveH2AConflict } from '../../lib/hubspotToAlbi'
 import ConflictDetail from './ConflictDetail'
+import { conflictEvidenceSummary } from './operations.js'
 
 const MANY_TO_ONE_MESSAGE = 'This target is already mapped. Explicit many-to-one approval is required.'
 const RESUME_PENDING_MESSAGE = 'Resolution was saved; its targeted resume remains pending for retry.'
@@ -39,6 +40,8 @@ export default function ConflictsPage() {
   const [loadError, setLoadError] = useState('')
   const [actionError, setActionError] = useState('')
   const [notice, setNotice] = useState('')
+  const [noticeKind, setNoticeKind] = useState('info')
+  const [staleRefreshRequired, setStaleRefreshRequired] = useState(null)
   const [busyConflict, setBusyConflict] = useState('')
   const [retryToken, setRetryToken] = useState(0)
   const requestRevision = useRef(0)
@@ -65,6 +68,8 @@ export default function ConflictsPage() {
     setLoadError('')
     setActionError('')
     setNotice('')
+    setNoticeKind('info')
+    setStaleRefreshRequired(null)
     if (!companyId) {
       setLoading(false)
       setLoadError('Select a company to load conflicts.')
@@ -119,23 +124,65 @@ export default function ConflictsPage() {
       await resolveH2AConflict(session, companyId, resolution, { signal: controller.signal })
       if (tenantKeyRef.current !== startedFor) return null
       await refreshFocused(resolution.conflictId, controller.signal)
-      if (tenantKeyRef.current === startedFor) setNotice('Resolution saved. The selected item and unresolved count are up to date.')
+      if (tenantKeyRef.current === startedFor) {
+        setStaleRefreshRequired(current => current === resolution.conflictId ? null : current)
+        setNoticeKind('success')
+        setNotice('Resolution saved. The selected item and unresolved count are up to date.')
+      }
       return { ok: true }
     } catch (cause) {
       if (cause?.name === 'AbortError' || tenantKeyRef.current !== startedFor) return null
       if (cause?.status === 409 && cause.message === MANY_TO_ONE_MESSAGE) return { manyToOneRequired: true }
       if (cause?.status === 409) {
-        try { await refreshFocused(resolution.conflictId, controller.signal) } catch { /* Keep the safe stale notice. */ }
-        setNotice('This conflict changed. Its detail and unresolved count were refreshed; review it before submitting again.')
+        try {
+          await refreshFocused(resolution.conflictId, controller.signal)
+          if (tenantKeyRef.current !== startedFor) return null
+          setStaleRefreshRequired(current => current === resolution.conflictId ? null : current)
+          setNoticeKind('warning')
+          setNotice('This conflict changed. Its detail and unresolved count were refreshed; review it before submitting again.')
+        } catch (refreshCause) {
+          if (refreshCause?.name === 'AbortError' || tenantKeyRef.current !== startedFor) return null
+          setStaleRefreshRequired(resolution.conflictId)
+          setActionError('This conflict changed, but its fresh detail and unresolved count could not be refreshed. Refresh selected item before resolving it again.')
+        }
         return { stale: true }
       }
       if (cause?.status === 502 && cause.message === RESUME_PENDING_MESSAGE) {
-        try { await refreshFocused(resolution.conflictId, controller.signal) } catch { /* The saved state remains durable. */ }
+        try { await refreshFocused(resolution.conflictId, controller.signal) } catch (refreshCause) {
+          if (refreshCause?.name === 'AbortError' || tenantKeyRef.current !== startedFor) return null
+          /* The saved state remains durable even if this focused read fails. */
+        }
+        if (tenantKeyRef.current !== startedFor) return null
+        setNoticeKind('warning')
         setNotice('Resolution saved; the targeted activity resume is pending a safe retry.')
         return { saved: true }
       }
       setActionError(cause.message)
       return null
+    } finally {
+      mutationControllers.current.delete(controller)
+      if (tenantKeyRef.current === startedFor) setBusyConflict('')
+    }
+  }
+
+  async function refreshSelectedItem() {
+    if (!selectedId) return
+    const controller = new AbortController()
+    mutationControllers.current.add(controller)
+    const startedFor = tenantKey
+    setBusyConflict(selectedId)
+    setActionError('')
+    try {
+      await refreshFocused(selectedId, controller.signal)
+      if (tenantKeyRef.current !== startedFor) return
+      setStaleRefreshRequired(current => current === selectedId ? null : current)
+      setNoticeKind('info')
+      setNotice('The selected item and unresolved count are now up to date. Review the new values before resolving.')
+    } catch (cause) {
+      if (cause?.name !== 'AbortError' && tenantKeyRef.current === startedFor) {
+        setStaleRefreshRequired(selectedId)
+        setActionError('The selected conflict could not be refreshed. Try Refresh selected item again.')
+      }
     } finally {
       mutationControllers.current.delete(controller)
       if (tenantKeyRef.current === startedFor) setBusyConflict('')
@@ -197,8 +244,13 @@ export default function ConflictsPage() {
       </header>
 
       <div className="min-h-5 text-sm" aria-live="polite">
-        {notice && <p className="text-green-800" role="status">{notice}</p>}
+        {notice && <p className={noticeKind === 'success' ? 'text-green-800' : noticeKind === 'warning' ? 'text-amber-800' : 'text-brand-800'} role="status">{notice}</p>}
         {actionError && <p className="text-red-700" role="alert">{actionError}</p>}
+        {staleRefreshRequired === selectedId && (
+          <button className={`${buttonSecondary} mt-3`} type="button" onClick={refreshSelectedItem} disabled={busyConflict === selectedId}>
+            Refresh selected item
+          </button>
+        )}
       </div>
 
       {items.length === 0 ? (
@@ -220,6 +272,7 @@ export default function ConflictsPage() {
                     setSelectedId(item.id)
                     setActionError('')
                     setNotice('')
+                    setNoticeKind('info')
                   }} aria-current={selectedId === item.id ? 'true' : undefined}
                     className={`w-full px-4 py-3 text-left transition focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-500 ${selectedId === item.id ? 'bg-brand-50' : 'hover:bg-gray-50'}`}>
                     <div className="flex items-start justify-between gap-2">
@@ -227,6 +280,7 @@ export default function ConflictsPage() {
                       <span className={`shrink-0 rounded-md px-1.5 py-0.5 text-[0.68rem] font-semibold capitalize ring-1 ring-inset ${statusTone[item.status] ?? statusTone.skipped}`}>{label(item.status)}</span>
                     </div>
                     <p className="mt-1 text-xs font-medium text-gray-600">{label(item.conflict_type)} · {label(item.reason)}</p>
+                    <p className="mt-1 truncate text-xs text-gray-600">{conflictEvidenceSummary(item)}</p>
                     <p className="mt-1 text-xs text-gray-500">{label(item.object_type)} · {dateTime(item.created_at)}</p>
                   </button>
                 </li>
@@ -240,7 +294,7 @@ export default function ConflictsPage() {
           </aside>
 
           {selected ? (
-            <ConflictDetail conflict={selected} isAdmin={isAdmin} busy={busyConflict === selected.id} onResolve={handleResolve} />
+            <ConflictDetail conflict={selected} isAdmin={isAdmin} busy={busyConflict === selected.id} resolutionBlocked={staleRefreshRequired === selected.id} onResolve={handleResolve} />
           ) : (
             <section className="rounded-xl border border-gray-200 bg-white px-5 py-10 text-sm text-gray-500">Select an item to inspect its evidence.</section>
           )}

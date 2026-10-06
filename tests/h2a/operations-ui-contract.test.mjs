@@ -3,7 +3,10 @@ import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import {
   buildConflictResolution,
+  conflictEvidenceSummary,
+  mergeOverviewRefresh,
   presentRunTotals,
+  proposedFieldComparisons,
   proposedConflictFields,
 } from '../../src/features/hubspotToAlbi/operations.js'
 
@@ -40,6 +43,41 @@ test('resolution builder emits exact contracts from displayed proposed fields on
   assert.throws(() => buildConflictResolution(conflict, 'approve_fields', { fields: ['apiKey'] }), /displayed field/i)
 })
 
+test('active overview refresh merges current rows without discarding appended keyset history', () => {
+  const current = {
+    summary: { unresolvedConflictCount: 2 },
+    runs: [{ id: 'new', status: 'running' }, { id: 'older', status: 'completed' }],
+    nextCursor: 'older-page',
+  }
+  const refreshed = {
+    summary: { unresolvedConflictCount: 3 },
+    runs: [{ id: 'new', status: 'completed' }, { id: 'fresh', status: 'running' }],
+    nextCursor: 'fresh-page',
+  }
+  assert.deepEqual(mergeOverviewRefresh(current, refreshed), {
+    summary: { unresolvedConflictCount: 3 },
+    runs: [{ id: 'new', status: 'completed' }, { id: 'fresh', status: 'running' }, { id: 'older', status: 'completed' }],
+    nextCursor: 'older-page',
+  })
+})
+
+test('proposed field rows keep HubSpot and Albi values adjacent to selectable fields', () => {
+  const conflict = {
+    source_snapshot: { city: 'Oakland', phone: '555-111-2222' },
+    candidate_snapshots: [{ id: 'a1', city: 'Berkeley', phone: '555-333-4444' }],
+    proposed_changes: {
+      updates: { city: 'Oakland' },
+      conflicts: { phone: { hubspot: '555-111-2222', albi: '555-333-4444' } },
+    },
+    match_evidence: { email: 'ada@example.com' },
+  }
+  assert.deepEqual(proposedFieldComparisons(conflict, conflict.candidate_snapshots[0]), [
+    { field: 'city', hubspot: 'Oakland', albi: 'Berkeley' },
+    { field: 'phone', hubspot: '555-111-2222', albi: '555-333-4444' },
+  ])
+  assert.equal(conflictEvidenceSummary(conflict), 'Email: ada@example.com')
+})
+
 test('real Overview and Conflicts pages replace placeholders through the protected layout', async () => {
   const [app, overview, conflicts] = await Promise.all([
     readFile(new URL('../../src/App.jsx', import.meta.url), 'utf8'),
@@ -69,6 +107,10 @@ test('overview covers loading, empty, metrics, active status, run-now, and keyse
   assert.match(page, /runH2ASync\([^)]*['"]live['"]/s)
   assert.match(page, /nextCursor/)
   assert.match(page, /MAX_ACTIVE_POLLS/)
+  assert.match(page, />Refresh</)
+  assert.match(page, /Last updated/)
+  assert.match(page, /Polling paused/)
+  assert.match(page, /mergeOverviewRefresh/)
   assert.match(page, /isAdmin/)
   assert.match(page, /admin-only/i)
   assert.match(page, /presentRunTotals/)
@@ -87,6 +129,10 @@ test('conflict queue exposes count, focused refresh, pagination, and member read
   assert.match(page, /replaceConflict/)
   assert.match(page, /cause\?\.status === 409/)
   assert.match(page, /many-to-one/i)
+  assert.match(page, /noticeKind/)
+  assert.match(page, /staleRefreshRequired/)
+  assert.match(page, /Refresh selected item/)
+  assert.match(page, /could not be refreshed/i)
   assert.doesNotMatch(page, /dangerouslySetInnerHTML/)
 })
 
@@ -109,5 +155,12 @@ test('conflict detail is evidence-first, responsive, semantic, and supports all 
   assert.match(detail, /Escape/)
   assert.match(detail, /previousFocus/)
   assert.match(detail, /event\.key === 'Tab'/)
+  assert.match(detail, /proposedFieldComparisons/)
+  assert.match(detail, /Reviewed target/)
+  assert.match(detail, /\[overflow-wrap:anywhere\]/)
+  assert.match(detail, /aria-busy=/)
+  assert.match(detail, /submitLock/)
+  assert.match(detail, /max-h-\[calc\(100vh-2rem\)\]/)
+  assert.doesNotMatch(detail, /candidateIndex/)
   assert.doesNotMatch(detail, /dangerouslySetInnerHTML|innerHTML/)
 })

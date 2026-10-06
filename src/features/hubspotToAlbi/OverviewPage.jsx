@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useOutletContext } from 'react-router-dom'
 import { getH2AOverview, runH2ASync } from '../../lib/hubspotToAlbi'
-import { presentRunTotals } from './operations.js'
+import { mergeOverviewRefresh, presentRunTotals } from './operations.js'
 
 const ACTIVE_STATUSES = new Set(['queued', 'running', 'paused'])
 const MAX_ACTIVE_POLLS = 12
@@ -58,7 +58,10 @@ export default function OverviewPage() {
   const [notice, setNotice] = useState('')
   const [actionError, setActionError] = useState('')
   const [runningNow, setRunningNow] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
+  const [lastUpdatedAt, setLastUpdatedAt] = useState('')
+  const [pollingPaused, setPollingPaused] = useState(false)
   const [retryToken, setRetryToken] = useState(0)
   const requestRevision = useRef(0)
   const pollCount = useRef(0)
@@ -67,11 +70,16 @@ export default function OverviewPage() {
   const tenantKeyRef = useRef(tenantKey)
   tenantKeyRef.current = tenantKey
 
-  const loadFirstPage = useCallback(async signal => {
-    const value = await getH2AOverview(session, companyId, { limit: 15, signal })
-    if (tenantKeyRef.current === tenantKey) setOverview(value)
+  const fetchFirstPage = useCallback(signal => getH2AOverview(session, companyId, { limit: 15, signal }), [companyId, session])
+
+  const refreshFirstPage = useCallback(async signal => {
+    const value = await fetchFirstPage(signal)
+    if (tenantKeyRef.current === tenantKey) {
+      setOverview(current => mergeOverviewRefresh(current, value))
+      setLastUpdatedAt(new Date().toISOString())
+    }
     return value
-  }, [companyId, session, tenantKey])
+  }, [fetchFirstPage, tenantKey])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -81,6 +89,8 @@ export default function OverviewPage() {
     setActionError('')
     setNotice('')
     setLoading(true)
+    setLastUpdatedAt('')
+    setPollingPaused(false)
     pollCount.current = 0
     if (!companyId) {
       setLoading(false)
@@ -88,7 +98,13 @@ export default function OverviewPage() {
       completeTenantTransition(tenantRevision)
       return () => controller.abort()
     }
-    loadFirstPage(controller.signal)
+    fetchFirstPage(controller.signal)
+      .then(value => {
+        if (requestRevision.current === request && tenantKeyRef.current === tenantKey) {
+          setOverview(value)
+          setLastUpdatedAt(new Date().toISOString())
+        }
+      })
       .catch(cause => {
         if (cause?.name !== 'AbortError' && requestRevision.current === request && tenantKeyRef.current === tenantKey) {
           setLoadError(cause.message)
@@ -101,7 +117,7 @@ export default function OverviewPage() {
         }
       })
     return () => controller.abort()
-  }, [companyId, completeTenantTransition, loadFirstPage, retryToken, tenantKey, tenantRevision])
+  }, [companyId, completeTenantTransition, fetchFirstPage, retryToken, tenantKey, tenantRevision])
 
   useEffect(() => () => {
     for (const controller of mutationControllers.current) controller.abort()
@@ -117,10 +133,14 @@ export default function OverviewPage() {
     const timer = window.setTimeout(async () => {
       pollCount.current += 1
       try {
-        await loadFirstPage(controller.signal)
+        const refreshed = await refreshFirstPage(controller.signal)
+        if (pollCount.current >= MAX_ACTIVE_POLLS && ACTIVE_STATUSES.has(refreshed?.summary?.activeRun?.status)) {
+          setPollingPaused(true)
+        }
       } catch (cause) {
         if (cause?.name !== 'AbortError' && tenantKeyRef.current === startedFor) {
           setActionError('Run status could not be refreshed. Use Refresh to try again.')
+          setPollingPaused(true)
         }
       }
     }, POLL_DELAY_MS)
@@ -128,7 +148,7 @@ export default function OverviewPage() {
       window.clearTimeout(timer)
       controller.abort()
     }
-  }, [activeId, activeStatus, loadFirstPage, tenantKey, overview])
+  }, [activeId, activeStatus, refreshFirstPage, tenantKey, overview])
 
   const recentTotal = useMemo(() => presentRunTotals(overview?.summary?.recentRun)
     .reduce((sum, item) => sum + item.value, 0), [overview?.summary?.recentRun])
@@ -145,12 +165,34 @@ export default function OverviewPage() {
       if (tenantKeyRef.current !== startedFor) return
       setNotice(result?.status === 'already_running' ? 'A sync is already active for this company.' : 'Live sync queued.')
       pollCount.current = 0
-      await loadFirstPage(controller.signal)
+      setPollingPaused(false)
+      await refreshFirstPage(controller.signal)
     } catch (cause) {
       if (cause?.name !== 'AbortError' && tenantKeyRef.current === startedFor) setActionError(cause.message)
     } finally {
       mutationControllers.current.delete(controller)
       if (tenantKeyRef.current === startedFor) setRunningNow(false)
+    }
+  }
+
+  async function refreshOverview() {
+    const controller = new AbortController()
+    mutationControllers.current.add(controller)
+    const startedFor = tenantKey
+    setRefreshing(true)
+    setActionError('')
+    try {
+      await refreshFirstPage(controller.signal)
+      if (tenantKeyRef.current !== startedFor) return
+      pollCount.current = 0
+      setPollingPaused(false)
+    } catch (cause) {
+      if (cause?.name !== 'AbortError' && tenantKeyRef.current === startedFor) {
+        setActionError('The overview could not be refreshed. Try Refresh again.')
+      }
+    } finally {
+      mutationControllers.current.delete(controller)
+      if (tenantKeyRef.current === startedFor) setRefreshing(false)
     }
   }
 
@@ -201,19 +243,32 @@ export default function OverviewPage() {
           <h2 className="mt-1 text-xl font-semibold tracking-tight text-gray-900">Operations overview</h2>
           <p className="mt-1 max-w-2xl text-sm leading-6 text-gray-500">A safe, tenant-scoped view of recent sync health and outcomes.</p>
         </div>
-        {isAdmin ? (
-          <button className={buttonPrimary} onClick={runNow} disabled={runDisabled}>
-            {runningNow ? 'Queueing…' : ACTIVE_STATUSES.has(activeRun?.status) ? 'Run active' : 'Run now'}
-          </button>
-        ) : (
-          <p className="max-w-xs rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs leading-5 text-gray-600">Run now is an admin-only action. Your operational view is read-only.</p>
-        )}
+        <div className="flex flex-col items-stretch gap-2 sm:items-end">
+          <div className="flex flex-wrap gap-2 sm:justify-end">
+            <button className={buttonSecondary} onClick={refreshOverview} disabled={refreshing} aria-busy={refreshing}>
+              <span>Refresh</span>
+            </button>
+            {isAdmin && (
+              <button className={buttonPrimary} onClick={runNow} disabled={runDisabled}>
+                {runningNow ? 'Queueing…' : ACTIVE_STATUSES.has(activeRun?.status) ? 'Run active' : 'Run now'}
+              </button>
+            )}
+          </div>
+          <p className="text-xs text-gray-500">Last updated {dateTime(lastUpdatedAt)}</p>
+          {!isAdmin && <p className="max-w-xs text-xs leading-5 text-gray-600">Run now is admin-only. Your operational view is read-only.</p>}
+        </div>
       </header>
 
       <div className="min-h-5 text-sm" aria-live="polite">
         {notice && <p className="text-green-800" role="status">{notice}</p>}
         {actionError && <p className="text-red-700" role="alert">{actionError}</p>}
       </div>
+
+      {pollingPaused && ACTIVE_STATUSES.has(activeRun?.status) && (
+        <p className="rounded-lg border border-brand-200 bg-brand-50 px-3 py-2 text-sm text-brand-900" role="status">
+          Polling paused after the bounded automatic refresh window. Use Refresh to check this run now.
+        </p>
+      )}
 
       {activeRun && (
         <section className="flex flex-col gap-3 border-l-4 border-brand-500 bg-brand-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between" aria-labelledby="h2a-active-run">

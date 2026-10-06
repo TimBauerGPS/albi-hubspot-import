@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { buildConflictResolution, proposedConflictFields } from './operations.js'
+import { buildConflictResolution, proposedFieldComparisons } from './operations.js'
 
 const buttonPrimary = 'rounded-lg bg-brand-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-brand-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50'
 const buttonSecondary = 'rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-700 transition hover:border-brand-300 hover:bg-brand-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 disabled:cursor-not-allowed disabled:opacity-50'
@@ -9,6 +9,12 @@ const FIELD_LABELS = {
   email: 'Email', phone: 'Phone', phoneNumber: 'Phone', mobilephone: 'Mobile phone', mobileNumber: 'Mobile phone',
   domain: 'Domain', address: 'Address', address1: 'Address', city: 'City', state: 'State', zip: 'Postal code',
   zipcode: 'Postal code', country: 'Country', id: 'Record ID',
+}
+const statusTone = {
+  open: 'bg-amber-50 text-amber-800 ring-amber-600/20',
+  resolving: 'bg-brand-50 text-brand-800 ring-brand-600/20',
+  resolved: 'bg-green-50 text-green-800 ring-green-600/20',
+  skipped: 'bg-gray-100 text-gray-700 ring-gray-500/20',
 }
 
 function label(value) {
@@ -34,9 +40,9 @@ function SafeDefinitionList({ value, empty = 'No values provided.' }) {
   return (
     <dl className="divide-y divide-gray-100">
       {entries.map(([key, item]) => (
-        <div key={key} className="grid gap-1 py-2 sm:grid-cols-[9rem_1fr] sm:gap-3">
+        <div key={key} className="min-w-0 py-2">
           <dt className="text-xs font-medium text-gray-500">{label(key)}</dt>
-          <dd className="break-words text-sm text-gray-900">{scalar(item)}</dd>
+          <dd className="mt-0.5 min-w-0 text-sm text-gray-900 [overflow-wrap:anywhere]">{scalar(item)}</dd>
         </div>
       ))}
     </dl>
@@ -54,40 +60,53 @@ function confirmationCopy(action, fields) {
   return 'Skip this conflict item. The current item will not be written by this resolution.'
 }
 
-export default function ConflictDetail({ conflict, isAdmin, busy, onResolve }) {
-  const fields = useMemo(() => proposedConflictFields(conflict), [conflict])
+export default function ConflictDetail({ conflict, isAdmin, busy, resolutionBlocked = false, onResolve }) {
   const candidates = Array.isArray(conflict?.candidate_snapshots) ? conflict.candidate_snapshots : []
-  const [candidateIndex, setCandidateIndex] = useState(0)
   const [selectedTarget, setSelectedTarget] = useState('')
   const [selectedFields, setSelectedFields] = useState([])
   const [pendingAction, setPendingAction] = useState('')
   const [formError, setFormError] = useState('')
   const [manyToOneRequired, setManyToOneRequired] = useState(false)
   const [approveManyToOne, setApproveManyToOne] = useState(false)
+  const [submitting, setSubmitting] = useState(false)
   const cancelRef = useRef(null)
   const dialogRef = useRef(null)
+  const articleRef = useRef(null)
   const previousFocus = useRef(null)
+  const submitLock = useRef(false)
   const expectedUpdatedAt = conflict?.updated_at
+  const candidate = candidates.find(item => item?.id != null && String(item.id) === selectedTarget) ?? null
+  const comparisons = useMemo(() => proposedFieldComparisons(conflict, candidate), [candidate, conflict])
+  const fields = comparisons.map(item => item.field)
+  const effectiveBusy = busy || submitting
 
   useEffect(() => {
-    setCandidateIndex(0)
     setSelectedTarget('')
     setSelectedFields([])
     setPendingAction('')
     setFormError('')
     setManyToOneRequired(false)
     setApproveManyToOne(false)
-  }, [conflict?.id])
+    setSubmitting(false)
+    submitLock.current = false
+  }, [conflict?.id, conflict?.updated_at])
 
   useEffect(() => {
     if (!pendingAction) return undefined
     previousFocus.current = document.activeElement
     cancelRef.current?.focus()
-    return () => previousFocus.current?.focus?.()
+    return () => {
+      const target = previousFocus.current
+      if (target?.isConnected) target.focus()
+      else articleRef.current?.focus()
+    }
   }, [pendingAction])
 
+  useEffect(() => {
+    if (pendingAction && effectiveBusy) dialogRef.current?.focus()
+  }, [effectiveBusy, pendingAction])
+
   if (!conflict) return null
-  const candidate = candidates[candidateIndex] ?? null
   const open = conflict.status === 'open'
 
   function toggleField(field) {
@@ -95,6 +114,7 @@ export default function ConflictDetail({ conflict, isAdmin, busy, onResolve }) {
   }
 
   async function submit(action, confirmed = false) {
+    if (effectiveBusy || resolutionBlocked || submitLock.current) return
     setFormError('')
     if (['create_new', 'approve_fields', 'skip_item'].includes(action) && !confirmed) {
       if (action === 'approve_fields' && selectedFields.length === 0) {
@@ -104,6 +124,8 @@ export default function ConflictDetail({ conflict, isAdmin, busy, onResolve }) {
       setPendingAction(action)
       return
     }
+    submitLock.current = true
+    setSubmitting(true)
     try {
       const options = action === 'link_existing'
         ? { targetId: selectedTarget, approveManyToOne }
@@ -124,20 +146,27 @@ export default function ConflictDetail({ conflict, isAdmin, busy, onResolve }) {
       }
     } catch (cause) {
       setFormError(cause.message)
+    } finally {
+      submitLock.current = false
+      setSubmitting(false)
     }
   }
 
   function closeConfirmation() {
+    if (effectiveBusy) return
     setPendingAction('')
   }
 
   function confirmationKeyDown(event) {
-    if (event.key === 'Escape') closeConfirmation()
+    if (event.key === 'Escape' && !effectiveBusy) closeConfirmation()
     if (event.key === 'Tab') {
       const controls = [...(dialogRef.current?.querySelectorAll('button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex="-1"])') ?? [])]
       const first = controls[0]
       const last = controls.at(-1)
-      if (event.shiftKey && document.activeElement === first) {
+      if (effectiveBusy || controls.length === 0) {
+        event.preventDefault()
+        dialogRef.current?.focus()
+      } else if (event.shiftKey && document.activeElement === first) {
         event.preventDefault()
         last?.focus()
       } else if (!event.shiftKey && document.activeElement === last) {
@@ -148,10 +177,10 @@ export default function ConflictDetail({ conflict, isAdmin, busy, onResolve }) {
   }
 
   return (
-    <article className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm" aria-labelledby="conflict-detail-title" data-updated-at={expectedUpdatedAt}>
+    <article ref={articleRef} tabIndex={-1} className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm outline-none" aria-labelledby="conflict-detail-title" data-updated-at={expectedUpdatedAt}>
       <header className="border-b border-gray-200 px-5 py-4 sm:px-6">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="rounded-md bg-amber-50 px-2 py-1 text-xs font-semibold capitalize text-amber-800 ring-1 ring-inset ring-amber-600/20">{String(conflict.status).replaceAll('_', ' ')}</span>
+          <span className={`rounded-md px-2 py-1 text-xs font-semibold capitalize ring-1 ring-inset ${statusTone[conflict.status] ?? statusTone.skipped}`}>{String(conflict.status).replaceAll('_', ' ')}</span>
           <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">{label(conflict.conflict_type)}</span>
         </div>
         <h2 id="conflict-detail-title" className="mt-2 text-lg font-semibold text-gray-900">Review {label(conflict.object_type)} conflict</h2>
@@ -173,12 +202,17 @@ export default function ConflictDetail({ conflict, isAdmin, busy, onResolve }) {
             <h3 id="comparison-title" className="font-semibold text-gray-900">Source and candidate comparison</h3>
             <p className="mt-1 text-xs text-gray-500">HubSpot is the recommended source, but different nonblank Albi values require your decision.</p>
           </div>
-          {candidates.length > 1 && (
+          {candidates.length > 0 && (
             <div className="sm:w-64">
-              <label className="text-xs font-medium text-gray-700" htmlFor="conflict-candidate-view">Compare Albi candidate</label>
-              <select id="conflict-candidate-view" value={candidateIndex} onChange={event => setCandidateIndex(Number(event.target.value))}
+              <label className="text-xs font-medium text-gray-700" htmlFor="conflict-target">Compare and link Albi candidate</label>
+              <select id="conflict-target" value={selectedTarget} onChange={event => {
+                setSelectedTarget(event.target.value)
+                setManyToOneRequired(false)
+                setApproveManyToOne(false)
+              }}
                 className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/20">
-                {candidates.map((item, index) => <option key={`${item.id ?? 'candidate'}:${index}`} value={index}>{candidateName(item, index)}</option>)}
+                <option value="">Select a candidate to compare and link</option>
+                {candidates.filter(item => item?.id != null).map((item, index) => <option key={String(item.id)} value={String(item.id)}>{candidateName(item, index)} · ID {item.id}</option>)}
               </select>
             </div>
           )}
@@ -192,14 +226,37 @@ export default function ConflictDetail({ conflict, isAdmin, busy, onResolve }) {
           <section className="border-t-4 border-gray-400 bg-gray-50 px-4 py-3" aria-labelledby="albi-candidate-title">
             <p className="text-xs font-bold uppercase tracking-wide text-gray-600">Existing value</p>
             <h4 id="albi-candidate-title" className="mt-1 font-semibold text-gray-900">Albi candidate</h4>
-            <div className="mt-2"><SafeDefinitionList value={candidate} empty="No existing Albi candidate is available." /></div>
+            <div className="mt-2"><SafeDefinitionList value={candidate} empty={candidates.length ? 'Select a candidate above to compare its exact values.' : 'No existing Albi candidate is available.'} /></div>
           </section>
         </div>
       </section>
 
       <section className="border-t border-gray-100 px-5 py-5 sm:px-6" aria-labelledby="proposed-title">
         <h3 id="proposed-title" className="font-semibold text-gray-900">Proposed changes</h3>
-        <div className="mt-2"><SafeDefinitionList value={conflict.proposed_changes} empty="No field-level proposal was recorded." /></div>
+        <p className="mt-1 text-xs leading-5 text-gray-500">Select each field you want to decide, with HubSpot and the reviewed Albi value kept side by side.</p>
+        {comparisons.length === 0 ? <p className="mt-3 text-sm text-gray-500">No field-level proposal was recorded.</p> : (
+          <div className="mt-3 space-y-3">
+            {comparisons.map(item => (
+              <label key={item.field} className="block rounded-lg border border-gray-200 bg-white p-3 text-sm text-gray-900">
+                <span className="flex items-center gap-2 font-semibold">
+                  <input type="checkbox" checked={selectedFields.includes(item.field)} onChange={() => toggleField(item.field)} disabled={!isAdmin || !open || effectiveBusy || resolutionBlocked}
+                    className="h-4 w-4 shrink-0 rounded border-gray-300 text-brand-600 focus:ring-brand-500 disabled:opacity-50" />
+                  {label(item.field)}
+                </span>
+                <span className="mt-3 grid min-w-0 gap-3 sm:grid-cols-2">
+                  <span className="min-w-0 rounded-md bg-brand-50 px-3 py-2">
+                    <span className="block text-[0.68rem] font-bold uppercase tracking-wide text-brand-700">HubSpot</span>
+                    <span className="mt-1 block min-w-0 text-gray-900 [overflow-wrap:anywhere]">{scalar(item.hubspot)}</span>
+                  </span>
+                  <span className="min-w-0 rounded-md bg-gray-50 px-3 py-2">
+                    <span className="block text-[0.68rem] font-bold uppercase tracking-wide text-gray-600">Albi</span>
+                    <span className="mt-1 block min-w-0 text-gray-900 [overflow-wrap:anywhere]">{scalar(item.albi)}</span>
+                  </span>
+                </span>
+              </label>
+            ))}
+          </div>
+        )}
       </section>
 
       {isAdmin && open ? (
@@ -207,20 +264,20 @@ export default function ConflictDetail({ conflict, isAdmin, busy, onResolve }) {
           <h3 id="resolution-title" className="font-semibold text-gray-900">Resolve this item</h3>
           <p className="mt-1 text-xs leading-5 text-gray-500">Choose one intent. Server authorization and the current conflict version are checked again when submitted.</p>
 
+          {resolutionBlocked && (
+            <p className="mt-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-950" role="alert">
+              Resolution is paused until this selected item is successfully refreshed. Use Refresh selected item above, then review the updated values.
+            </p>
+          )}
           {formError && <p className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800" role="alert">{formError}</p>}
 
           <div className="mt-4 grid gap-5 lg:grid-cols-2">
             <fieldset className="space-y-3">
               <legend className="text-sm font-semibold text-gray-900">Identity decision</legend>
-              <label className="block text-xs font-medium text-gray-700" htmlFor="conflict-target">Existing Albi target</label>
-              <select id="conflict-target" value={selectedTarget} onChange={event => {
-                setSelectedTarget(event.target.value)
-                setManyToOneRequired(false)
-                setApproveManyToOne(false)
-              }} className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/20">
-                <option value="">Select an exact candidate</option>
-                {candidates.filter(item => item?.id != null).map((item, index) => <option key={String(item.id)} value={String(item.id)}>{candidateName(item, index)} · ID {item.id}</option>)}
-              </select>
+              <p className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700">
+                <span className="block text-xs font-medium text-gray-500">Reviewed target</span>
+                {candidate ? <span className="mt-0.5 block font-semibold [overflow-wrap:anywhere]">{candidateName(candidate, candidates.indexOf(candidate))} · ID {candidate.id}</span> : <span className="mt-0.5 block">Select the candidate in the comparison above before linking.</span>}
+              </p>
               {manyToOneRequired && (
                 <label className="flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
                   <input type="checkbox" className="mt-0.5 h-4 w-4 rounded border-gray-300 text-brand-600 focus:ring-brand-500" checked={approveManyToOne} onChange={event => setApproveManyToOne(event.target.checked)} />
@@ -228,27 +285,18 @@ export default function ConflictDetail({ conflict, isAdmin, busy, onResolve }) {
                 </label>
               )}
               <div className="flex flex-wrap gap-2">
-                <button className={buttonPrimary} type="button" disabled={busy || !selectedTarget || manyToOneRequired && !approveManyToOne} onClick={() => submit('link_existing')}>Link selected candidate</button>
-                <button className={buttonSecondary} type="button" disabled={busy} onClick={() => submit('create_new')}>Create new target</button>
+                <button className={buttonPrimary} type="button" disabled={effectiveBusy || resolutionBlocked || !selectedTarget || manyToOneRequired && !approveManyToOne} onClick={() => submit('link_existing')}>Link selected candidate</button>
+                <button className={buttonSecondary} type="button" disabled={effectiveBusy || resolutionBlocked} onClick={() => submit('create_new')}>Create new target</button>
               </div>
             </fieldset>
 
             <fieldset className="space-y-3">
               <legend className="text-sm font-semibold text-gray-900">Field decision</legend>
-              {fields.length === 0 ? <p className="text-sm text-gray-500">No selectable field differences were included.</p> : (
-                <div className="grid gap-2 sm:grid-cols-2">
-                  {fields.map(field => (
-                    <label key={field} className="flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800">
-                      <input type="checkbox" checked={selectedFields.includes(field)} onChange={() => toggleField(field)} className="h-4 w-4 rounded border-gray-300 text-brand-600 focus:ring-brand-500" />
-                      {label(field)}
-                    </label>
-                  ))}
-                </div>
-              )}
+              <p className="text-sm text-gray-600">{fields.length === 0 ? 'No selectable field differences were included.' : `${selectedFields.length} of ${fields.length} proposed fields selected above.`}</p>
               <div className="flex flex-wrap gap-2">
-                <button className={buttonPrimary} type="button" disabled={busy || selectedFields.length === 0} onClick={() => submit('approve_fields')}>Approve HubSpot fields</button>
-                <button className={buttonSecondary} type="button" disabled={busy || selectedFields.length === 0} onClick={() => submit('retain_albi')}>Retain Albi fields</button>
-                <button className={buttonDanger} type="button" disabled={busy} onClick={() => submit('skip_item')}>Skip item</button>
+                <button className={buttonPrimary} type="button" disabled={effectiveBusy || resolutionBlocked || selectedFields.length === 0} onClick={() => submit('approve_fields')}>Approve HubSpot fields</button>
+                <button className={buttonSecondary} type="button" disabled={effectiveBusy || resolutionBlocked || selectedFields.length === 0} onClick={() => submit('retain_albi')}>Retain Albi fields</button>
+                <button className={buttonDanger} type="button" disabled={effectiveBusy || resolutionBlocked} onClick={() => submit('skip_item')}>Skip item</button>
               </div>
             </fieldset>
           </div>
@@ -275,14 +323,14 @@ export default function ConflictDetail({ conflict, isAdmin, busy, onResolve }) {
       </section>
 
       {pendingAction && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-950/45 px-4" role="dialog" aria-modal="true" aria-labelledby="confirm-resolution-title" onKeyDown={confirmationKeyDown}>
-          <div ref={dialogRef} className="w-full max-w-md rounded-xl bg-white p-5 shadow-xl">
+        <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-gray-950/45 px-4 py-4 sm:items-center" role="dialog" aria-modal="true" aria-labelledby="confirm-resolution-title" onKeyDown={confirmationKeyDown}>
+          <div ref={dialogRef} tabIndex={-1} aria-busy={effectiveBusy} className="max-h-[calc(100vh-2rem)] w-full max-w-md overflow-y-auto rounded-xl bg-white p-5 shadow-xl outline-none">
             <h3 id="confirm-resolution-title" className="text-lg font-semibold text-gray-900">Confirm resolution</h3>
             <p className="mt-2 text-sm leading-6 text-gray-600">{confirmationCopy(pendingAction, selectedFields)}</p>
             <p className="mt-2 text-xs text-gray-500">Conflict {conflict.id}. This uses the current reviewed version and will not silently replay if it changed.</p>
             <div className="mt-5 flex flex-row-reverse flex-wrap gap-2">
-              <button className={pendingAction === 'skip_item' ? buttonDanger : buttonPrimary} type="button" disabled={busy} onClick={() => submit(pendingAction, true)}>{busy ? 'Saving…' : 'Confirm resolution'}</button>
-              <button ref={cancelRef} className={buttonSecondary} type="button" disabled={busy} onClick={closeConfirmation}>Cancel</button>
+              <button className={pendingAction === 'skip_item' ? buttonDanger : buttonPrimary} type="button" disabled={effectiveBusy} onClick={() => submit(pendingAction, true)}>{effectiveBusy ? 'Saving…' : 'Confirm resolution'}</button>
+              <button ref={cancelRef} className={buttonSecondary} type="button" disabled={effectiveBusy} onClick={closeConfirmation}>Cancel</button>
             </div>
           </div>
         </div>

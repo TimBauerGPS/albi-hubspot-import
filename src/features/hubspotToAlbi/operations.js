@@ -24,6 +24,18 @@ export function presentRunTotals(run) {
   })
 }
 
+export function mergeOverviewRefresh(current, refreshed) {
+  if (!current) return refreshed
+  if (!refreshed) return current
+  const seen = new Set()
+  const runs = [...(refreshed.runs ?? []), ...(current.runs ?? [])].filter(run => {
+    if (!run?.id || seen.has(run.id)) return false
+    seen.add(run.id)
+    return true
+  })
+  return { ...refreshed, runs, nextCursor: current.nextCursor ?? null }
+}
+
 export function proposedConflictFields(conflict) {
   const proposed = conflict?.proposed_changes
   if (!proposed || typeof proposed !== 'object' || Array.isArray(proposed)) return []
@@ -33,6 +45,39 @@ export function proposedConflictFields(conflict) {
     for (const key of Object.keys(group)) if (WRITABLE_FIELDS.has(key)) names.add(key)
   }
   return [...names].sort((left, right) => left.localeCompare(right))
+}
+
+function own(object, key) {
+  return object && typeof object === 'object' && !Array.isArray(object) && Object.hasOwn(object, key)
+}
+
+export function proposedFieldComparisons(conflict, candidate = null) {
+  const proposed = conflict?.proposed_changes ?? {}
+  const updates = proposed?.updates
+  const conflicts = proposed?.conflicts
+  const source = conflict?.source_snapshot ?? {}
+  return proposedConflictFields(conflict).map(field => {
+    const detail = own(conflicts, field) && conflicts[field] && typeof conflicts[field] === 'object' && !Array.isArray(conflicts[field])
+      ? conflicts[field]
+      : null
+    const hubspot = detail?.hubspot ?? detail?.source ?? (own(updates, field) ? updates[field] : source[field])
+    const albi = detail?.albi ?? detail?.target ?? candidate?.[field]
+    return { field, hubspot, albi }
+  })
+}
+
+export function conflictEvidenceSummary(conflict) {
+  const evidence = conflict?.match_evidence
+  if (evidence && typeof evidence === 'object' && !Array.isArray(evidence)) {
+    for (const key of ['email', 'domain', 'phone', 'name']) {
+      const value = evidence[key]
+      if (typeof value === 'string' || Number.isFinite(value)) {
+        return `${key[0].toUpperCase()}${key.slice(1)}: ${value}`
+      }
+    }
+  }
+  const count = Array.isArray(conflict?.candidate_snapshots) ? conflict.candidate_snapshots.length : 0
+  return count > 0 ? `${count} Albi candidate${count === 1 ? '' : 's'}` : 'No safe automatic match'
 }
 
 export function buildConflictResolution(conflict, action, options = {}) {
