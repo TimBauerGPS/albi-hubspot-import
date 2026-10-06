@@ -92,6 +92,7 @@ test('client exposes actionable fixed endpoint errors and keeps unknown text gen
   const originalFetch = globalThis.fetch
   const safeEndpointErrors = [
     ['Invalid conflict cursor.', 'Invalid conflict cursor.', 400],
+    ['A completed dry run is required before live activation.', 'A completed dry run is required before live activation.', 409],
     ['Invalid conflict page size.', 'Invalid conflict page size.'],
     ['Conflict page size must be between 1 and 100.', 'Conflict page size must be between 1 and 100.'],
     ['Invalid option mapping.', 'Invalid option mapping.'],

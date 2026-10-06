@@ -25,7 +25,7 @@ const dbMapping = mapping => ({
 const toRpc = ({ keyVersion, ...rest }) => ({ ...rest, key_version: keyVersion })
 const fromRpc = ({ key_version, ...rest }) => ({ ...rest, keyVersion: key_version })
 
-function fixture({ role = 'admin', superAdmin = false, config = {}, credentials = true, mappings = [], failure = null, concurrentConfig = false } = {}) {
+function fixture({ role = 'admin', superAdmin = false, config = {}, credentials = true, mappings = [], runs = [], failure = null, concurrentConfig = false } = {}) {
   const tables = {
     companies: [{ id: 'company-a', name: 'Alpha' }, { id: 'company-b', name: 'Beta' }],
     company_members: [{ user_id: 'user-1', company_id: 'company-a', role }],
@@ -37,6 +37,11 @@ function fixture({ role = 'admin', superAdmin = false, config = {}, credentials 
       updated_at: '2026-10-01T10:00:00.000Z', ...config,
     }],
     h2a_option_mappings: mappings.map(dbMapping), h2a_backfill_windows: [], h2a_cursors: [],
+    h2a_sync_runs: runs.map((run, index) => ({
+      id: `run-${index + 1}`, company_id: 'company-a', mode: 'dry_run', status: 'completed',
+      totals: { dry_run: 7 }, created_at: '2026-10-02T10:00:01.000Z',
+      finished_at: '2026-10-02T10:05:00.000Z', ...run,
+    })),
   }
   const privateCredentials = new Map(credentials ? [['company-a', {
     hubspot_envelope: toRpc(encryptSecret(hubspotToken, keyring)),
@@ -50,17 +55,19 @@ function fixture({ role = 'admin', superAdmin = false, config = {}, credentials 
     auth: { async getUser(jwt) { return jwt === 'valid-jwt' ? { data: { user: { id: 'user-1' } }, error: null } : { data: { user: null }, error: { message: 'bad token' } } } },
     from(table) {
       assert.ok(tables[table], `Unexpected public table ${table}`)
-      let operation = 'read', values, filters = [], selected = false
-      const matches = row => filters.every(([column, value]) => row[column] === value)
+      let operation = 'read', values, filters = [], selected = false, orderedBy, ascending = true, rowLimit
+      const matches = row => filters.every(([operator, column, value]) => operator === 'eq' ? row[column] === value : row[column] > value)
       const builder = {
         select() { selected = true; return builder },
-        eq(column, value) { filters.push([column, value]); return builder },
-        is(column, value) { filters.push([column, value]); return builder },
+        eq(column, value) { filters.push(['eq', column, value]); return builder },
+        gt(column, value) { filters.push(['gt', column, value]); return builder },
+        is(column, value) { filters.push(['eq', column, value]); return builder },
         insert(payload) { operation = 'insert'; values = payload; return builder },
         upsert(payload) { operation = 'upsert'; values = payload; return builder },
         update(payload) { operation = 'update'; values = payload; return builder },
         delete() { operation = 'delete'; return builder },
-        order() { return builder },
+        order(column, options = {}) { orderedBy = column; ascending = options.ascending !== false; return builder },
+        limit(value) { rowLimit = value; return builder },
         async maybeSingle() { const result = await execute(); return { ...result, data: result.data?.[0] ?? null } },
         async single() { return builder.maybeSingle() },
         then(resolve, reject) { return execute().then(resolve, reject) },
@@ -68,7 +75,12 @@ function fixture({ role = 'admin', superAdmin = false, config = {}, credentials 
       async function execute() {
         if (failure === table && operation !== 'read') return { data: null, error: { message: `${hubspotToken} ${albiApiKey}` } }
         if (concurrentConfig && table === 'h2a_company_config' && operation === 'update') tables[table][0].initial_start_locked_at = now
-        if (operation === 'read') return { data: structuredClone(tables[table].filter(matches)), error: null }
+        if (operation === 'read') {
+          let rows = tables[table].filter(matches)
+          if (orderedBy) rows = [...rows].sort((left, right) => String(left[orderedBy]).localeCompare(String(right[orderedBy])) * (ascending ? 1 : -1))
+          if (rowLimit !== undefined) rows = rows.slice(0, rowLimit)
+          return { data: structuredClone(rows), error: null }
+        }
         writes.push({ table, values: structuredClone(values) })
         let affected
         if (operation === 'delete') {
@@ -128,6 +140,8 @@ test('member GET returns masks, configuration, mappings and preflight without cr
   assert.equal(result.json.config.state, 'disabled')
   assert.equal(result.json.preflight.status, 'unchecked')
   assert.equal(result.json.optionMappings.length, 7)
+  assert.equal(result.json.dryRunReviewReady, false)
+  assert.equal(result.json.lastCompletedDryRun, null)
   assert.deepEqual(result.json.optionMappings[0], optionMappings[0])
   for (const forbidden of [hubspotToken, albiApiKey, 'ciphertext', 'key_version', 'hubspot_envelope', 'albi_envelope']) assert.equal(result.body.includes(forbidden), false)
   assert.equal(result.headers['Cache-Control'], 'no-store')
@@ -514,17 +528,52 @@ test('enter_dry_run requires valid preflight, credentials and complete confirmed
   }
 })
 
-test('first dry run locks the selected date, activation enters live, and disable preserves the lock', async () => {
+test('first dry run locks the selected date and activation waits for a later completed dry-run run', async () => {
   const f = fixture({ config: { state: 'ready', preflight_status: 'valid', option_confirmation_status: 'confirmed' }, mappings: optionMappings })
   assert.equal((await f.request('PUT', { action: 'enter_dry_run' })).statusCode, 200)
   assert.equal(f.tables.h2a_company_config[0].state, 'dry_run')
   assert.equal(f.tables.h2a_company_config[0].initial_start_locked_at, now)
+  assert.equal((await f.request('PUT', { action: 'activate_live' })).statusCode, 409)
+  f.tables.h2a_sync_runs.push({
+    id: 'run-ready', company_id: 'company-a', mode: 'dry_run', status: 'completed', totals: { dry_run: 12 },
+    created_at: '2026-10-02T10:00:01.000Z', finished_at: '2026-10-02T10:05:00.000Z',
+  })
   assert.equal((await f.request('PUT', { action: 'activate_live' })).statusCode, 200)
   assert.equal(f.tables.h2a_company_config[0].state, 'live')
   assert.equal((await f.request('PUT', { action: 'disable' })).statusCode, 200)
   assert.equal(f.tables.h2a_company_config[0].state, 'disabled')
   assert.equal(f.tables.h2a_company_config[0].initial_start_locked_at, now)
   assert.equal(f.tables.h2a_cursors.length, 0)
+})
+
+test('GET exposes only a tenant-scoped completed dry-run summary created after the date lock', async () => {
+  const f = fixture({ config: { state: 'dry_run', initial_start_locked_at: now }, runs: [
+    { id: 'old', created_at: '2026-10-02T09:59:59.000Z', finished_at: '2026-10-02T10:01:00.000Z', totals: { dry_run: 99 } },
+    { id: 'failed', status: 'failed', created_at: '2026-10-02T10:01:00.000Z', finished_at: '2026-10-02T10:02:00.000Z' },
+    { id: 'other-tenant', company_id: 'company-b', created_at: '2026-10-02T10:03:00.000Z', finished_at: '2026-10-02T10:04:00.000Z' },
+    { id: 'ready', created_at: '2026-10-02T10:02:00.000Z', finished_at: '2026-10-02T10:05:00.000Z', totals: { dry_run: 12, conflict: 2 } },
+  ] })
+  const result = await f.request()
+  assert.equal(result.statusCode, 200)
+  assert.equal(result.json.dryRunReviewReady, true)
+  assert.deepEqual(result.json.lastCompletedDryRun, {
+    id: 'ready', createdAt: '2026-10-02T10:02:00.000Z', finishedAt: '2026-10-02T10:05:00.000Z',
+    totals: { dry_run: 12, conflict: 2 },
+  })
+  assert.equal(result.body.includes('error_summary'), false)
+})
+
+test('activation rejects completed dry runs that predate the initial lock or belong to another tenant', async () => {
+  for (const runs of [
+    [{ id: 'old', created_at: '2026-10-02T09:59:59.000Z' }],
+    [{ id: 'other', company_id: 'company-b', created_at: '2026-10-02T10:00:01.000Z' }],
+    [{ id: 'partial', status: 'partially_failed', created_at: '2026-10-02T10:00:01.000Z' }],
+  ]) {
+    const f = fixture({ config: { state: 'dry_run', initial_start_locked_at: now, preflight_status: 'valid', option_confirmation_status: 'confirmed' }, mappings: optionMappings, runs })
+    const result = await f.request('PUT', { action: 'activate_live' })
+    assert.equal(result.statusCode, 409)
+    assert.equal(f.tables.h2a_company_config[0].state, 'dry_run')
+  }
 })
 
 test('activate_live cannot bypass the first dry run or a failed preflight', async () => {

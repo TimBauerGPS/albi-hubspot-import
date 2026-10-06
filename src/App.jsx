@@ -9,6 +9,7 @@ import Dashboard from './pages/Dashboard'
 import HeldDeals from './pages/HeldDeals'
 import Admin from './pages/Admin'
 import HubSpotToAlbiLayout, { HubSpotToAlbiPlaceholder } from './features/hubspotToAlbi/HubSpotToAlbiLayout'
+import SettingsPage from './features/hubspotToAlbi/SettingsPage'
 
 function Spinner() {
   return (
@@ -298,7 +299,7 @@ export default function App() {
           />
           <Route
             path="settings"
-            element={<HubSpotToAlbiPlaceholder title="Settings" description="Guided connection and sync controls will appear here." />}
+            element={<SettingsPage />}
           />
         </Route>
 

@@ -8,6 +8,7 @@ const SAFE_ERROR_CODES = Object.freeze({
 })
 const SAFE_SERVER_MESSAGES = Object.freeze({
   'A dry run is required before live activation.': 'A dry run is required before live activation.',
+  'A completed dry run is required before live activation.': 'A completed dry run is required before live activation.',
   'A conflict ID is required.': 'A conflict ID is required.',
   'A conflict resolution is required.': 'A conflict resolution is required.',
   'A settings action is required.': 'A settings action is required.',

@@ -18,6 +18,7 @@ const ACTION_FIELDS = {
   enter_dry_run: [], activate_live: [], disable: [], request_earlier_backfill: ['startDate'],
 }
 const MAPPING_KINDS = ['activity_type', 'default_contact_type', 'default_organization_type', 'organization_to_contact_type']
+const RUN_TOTAL_FIELDS = ['created', 'updated', 'linked', 'delivered', 'reconciled', 'skipped', 'conflict', 'failed', 'dry_run']
 
 function fail(statusCode, message) { throw new H2AAuthError(statusCode, message) }
 
@@ -63,6 +64,14 @@ function fromRpc({ key_version, ...rest }) { return { ...rest, keyVersion: key_v
 function toRpc({ keyVersion, ...rest }) { return { ...rest, key_version: keyVersion } }
 function toMapping(row) {
   return { mappingKind: row.mapping_kind, sourceKey: row.source_key, albiId: row.albi_id, label: row.label }
+}
+
+function toCompletedDryRun(row) {
+  if (!row) return null
+  const totals = Object.fromEntries(RUN_TOTAL_FIELDS
+    .filter(field => Number.isFinite(row.totals?.[field]) && row.totals[field] >= 0)
+    .map(field => [field, row.totals[field]]))
+  return { id: row.id, createdAt: row.created_at, finishedAt: row.finished_at, totals }
 }
 
 function validateDate(value, today) {
@@ -142,6 +151,19 @@ export function createSettingsHandler(options = {}) {
         hubspotToken: decryptSecret(fromRpc(credentials.hubspot_envelope), getKeyring()),
         albiApiKey: decryptSecret(fromRpc(credentials.albi_envelope), getKeyring()),
       } : { hubspotToken: null, albiApiKey: null }
+
+      async function getCompletedDryRun() {
+        if (!config.initial_start_locked_at) return null
+        return checked(supabase.from('h2a_sync_runs')
+          .select('id, created_at, finished_at, totals')
+          .eq('company_id', companyId)
+          .eq('mode', 'dry_run')
+          .eq('status', 'completed')
+          .gt('created_at', config.initial_start_locked_at)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle())
+      }
 
       async function saveConfig(patch) {
         let request
@@ -249,6 +271,7 @@ export function createSettingsHandler(options = {}) {
           case 'activate_live':
             requireReady()
             if (config.state !== 'dry_run' || !config.initial_start_locked_at) fail(409, 'A dry run is required before live activation.')
+            if (!await getCompletedDryRun()) fail(409, 'A completed dry run is required before live activation.')
             await saveConfig({ state: 'live' })
             break
           case 'disable':
@@ -274,11 +297,13 @@ export function createSettingsHandler(options = {}) {
         ...Object.values(credentials?.hubspot_envelope ?? {}), ...Object.values(credentials?.albi_envelope ?? {})]
         .filter(value => typeof value === 'string' && value.length > 0)
       const safeConfig = Object.fromEntries(CONFIG_FIELDS.filter(field => config[field] !== undefined).map(field => [field, config[field]]))
+      const completedDryRun = await getCompletedDryRun()
       return response(200, {
         companyId, companyName: context.companyName,
         config: safeConfig, optionMappings: mappings.map(toMapping),
         preflight: { status: config.preflight_status, details: safePreflightDetails(config.preflight_details, protectedValues), checkedAt: config.preflight_checked_at },
         hubspotTokenMask: maskSecret(secrets.hubspotToken), albiApiKeyMask: maskSecret(secrets.albiApiKey),
+        dryRunReviewReady: Boolean(completedDryRun), lastCompletedDryRun: toCompletedDryRun(completedDryRun),
         ...(backfillRequestId ? { backfillRequestId } : {}),
       })
     } catch (error) {
