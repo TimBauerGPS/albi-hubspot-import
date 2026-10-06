@@ -87,46 +87,65 @@ test('activity estimate is an authenticated read-only operation with no credenti
   assert.equal(call.options.body.includes('token'), false)
 })
 
-test('client errors are bounded and redact credential-shaped values', async () => {
+test('client errors never echo response text and use only fixed status or code messages', async () => {
   const { getH2ASettings } = await import('../../src/lib/hubspotToAlbi.js')
   const originalFetch = globalThis.fetch
-  const leaked = `hubspotToken=pat-secret-value Authorization: Bearer ${'x'.repeat(80)} ${'y'.repeat(400)}`
-  globalThis.fetch = async () => response({ error: leaked }, { status: 400 })
+  const responses = [
+    response({ error: 'secret-fragment=abc123' }, { status: 400 }),
+    response({ error: 'Invalid conflict cursor.' }, { status: 400 }),
+    response({ error: 'db error details', code: 'INVALID_CONFLICT_CURSOR' }, { status: 400 }),
+    response({ error: 'leaked error text', code: 'secret-fragment=abc123' }, { status: 400 }),
+    response({ error: 'secret-fragment=abc123' }, { status: 403 }),
+  ]
+  globalThis.fetch = async () => responses.shift()
   try {
     await assert.rejects(
       () => getH2ASettings(session, 'company-1'),
       error => {
         assert.equal(error.status, 400)
         assert.ok(error.message.length <= 240)
-        assert.equal(error.message.includes('pat-secret-value'), false)
-        assert.equal(error.message.includes('x'.repeat(20)), false)
+        assert.equal(error.message, 'HubSpot to Albi request could not be completed.')
+        assert.equal(error.message.includes('abc123'), false)
         return true
       },
+    )
+    await assert.rejects(
+      () => getH2ASettings(session, 'company-1'),
+      error => error.message === 'HubSpot to Albi request could not be completed.',
+    )
+    await assert.rejects(
+      () => getH2ASettings(session, 'company-1'),
+      error => error.message === 'Invalid conflict cursor.',
+    )
+    await assert.rejects(
+      () => getH2ASettings(session, 'company-1'),
+      error => error.message === 'HubSpot to Albi request could not be completed.',
+    )
+    await assert.rejects(
+      () => getH2ASettings(session, 'company-1'),
+      error => error.message === 'You do not have permission to perform this action.',
     )
   } finally {
     globalThis.fetch = originalFetch
   }
 })
 
-test('super-admin company options are authenticated, deduplicated, and expose no user data', async () => {
+test('super-admin company options use the narrow authenticated H2A endpoint', async () => {
   const { getH2ACompanyOptions } = await import('../../src/lib/hubspotToAlbi.js')
-  const originalFetch = globalThis.fetch
-  globalThis.fetch = async () => response({ users: [
-    { id: 'user-1', email: 'one@example.com', company_id: 'company-b', company_name: 'Beta' },
-    { id: 'user-2', email: 'two@example.com', company_id: 'company-a', company_name: 'Alpha' },
-    { id: 'user-3', email: 'three@example.com', company_id: 'company-a', company_name: 'Alpha duplicate' },
-    { id: 'user-4', email: 'four@example.com', company_id: null, company_name: null },
-  ] })
-  try {
+  const calls = await captureRequests(async () => {
     const companies = await getH2ACompanyOptions(session)
     assert.deepEqual(companies, [
       { id: 'company-a', name: 'Alpha' },
       { id: 'company-b', name: 'Beta' },
     ])
-    assert.equal(JSON.stringify(companies).includes('@example.com'), false)
-  } finally {
-    globalThis.fetch = originalFetch
-  }
+  }, { companies: [
+    { id: 'company-a', name: 'Alpha', email: 'must-not-escape@example.com' },
+    { id: 'company-b', name: 'Beta' },
+  ] })
+
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].url, '/.netlify/functions/h2a-companies')
+  assert.equal(calls[0].options.headers.Authorization, 'Bearer supabase-session-token')
 })
 
 test('all module routes stay under ProtectedRoute and pass role context through the outlet', async () => {
@@ -149,6 +168,9 @@ test('all module routes stay under ProtectedRoute and pass role context through 
   assert.match(selector, /if \(!isSuperAdmin\) return null/)
   assert.match(shell, /<NavLink/)
   assert.match(shell, /HubSpot to Albi/)
+  assert.match(layout, /focus-visible:ring-inset/)
+  assert.doesNotMatch(layout, /focus-visible:ring-offset/)
+  assert.match(shell, /className="[^"]*text-gray-500[^"]*" title=\{companyName\}/)
 })
 
 test('ProtectedRoute redirects a signed-out session before waiting for app access', async () => {
@@ -162,6 +184,16 @@ test('ProtectedRoute redirects a signed-out session before waiting for app acces
 })
 
 test('H2A endpoint paths are centralized in the authenticated client', async () => {
+  const client = await readFile(new URL('../../src/lib/hubspotToAlbi.js', import.meta.url), 'utf8')
+  assert.equal(client.includes('admin-list-users'), false)
+  assert.match(client, /h2a-companies/)
+
+  const companiesEndpoint = await readFile(new URL('../../netlify/functions/h2a-companies.js', import.meta.url), 'utf8')
+  assert.match(companiesEndpoint, /from\('super_admins'\)/)
+  assert.match(companiesEndpoint, /if \(!superAdmin\) return response\(403/)
+  assert.match(companiesEndpoint, /from\('companies'\)[\s\S]*?select\('id, name'\)/)
+  assert.doesNotMatch(companiesEndpoint, /auth\.admin\.listUsers|from\('company_members'\)/)
+
   const sources = await Promise.all([
     '../../src/App.jsx',
     '../../src/components/AppShell.jsx',

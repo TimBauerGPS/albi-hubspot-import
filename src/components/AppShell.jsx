@@ -62,7 +62,7 @@ export default function AppShell({ session, isAdmin, companyName, children }) {
             <div className="min-w-0 text-right">
               <p className="max-w-32 truncate text-xs text-gray-600 sm:max-w-48" title={session?.user?.email}>{session?.user?.email}</p>
               {companyName && (
-                <p className="max-w-32 truncate text-xs text-gray-400 sm:max-w-48" title={companyName}>{companyName}</p>
+                <p className="max-w-32 truncate text-xs text-gray-500 sm:max-w-48" title={companyName}>{companyName}</p>
               )}
             </div>
             <button

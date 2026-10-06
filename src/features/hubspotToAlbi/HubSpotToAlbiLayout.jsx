@@ -108,7 +108,7 @@ export default function HubSpotToAlbiLayout({
                   key={tab.to}
                   to={tab.to}
                   end={tab.end}
-                  className={({ isActive }) => `border-b-2 px-0.5 pb-3 text-sm font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 ${
+                  className={({ isActive }) => `border-b-2 px-1 py-3 text-sm font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-500 ${
                     isActive
                       ? 'border-brand-600 text-brand-700'
                       : 'border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-800'

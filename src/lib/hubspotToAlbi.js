@@ -1,5 +1,24 @@
 const FUNCTION_BASE = '/.netlify/functions'
-const MAX_ERROR_LENGTH = 240
+const SAFE_ERROR_CODES = Object.freeze({
+  DUPLICATE_OPTION_MAPPING: 'Duplicate option mapping.',
+  INVALID_CONFLICT_CURSOR: 'Invalid conflict cursor.',
+  INVALID_CONFLICT_PAGE_SIZE: 'Invalid conflict page size.',
+  INVALID_OPTION_MAPPING: 'Invalid option mapping.',
+  INVALID_OPTION_MAPPING_SOURCE: 'Invalid option mapping source.',
+})
+const SAFE_STATUS_MESSAGES = Object.freeze({
+  400: 'HubSpot to Albi request could not be completed.',
+  401: 'Your session has expired. Sign in and try again.',
+  403: 'You do not have permission to perform this action.',
+  404: 'The requested HubSpot to Albi resource was not found.',
+  409: 'HubSpot to Albi changed while you were working. Reload and try again.',
+  429: 'HubSpot to Albi is busy. Try again shortly.',
+  500: 'HubSpot to Albi is temporarily unavailable. Try again.',
+  502: 'HubSpot to Albi is temporarily unavailable. Try again.',
+  503: 'HubSpot to Albi is temporarily unavailable. Try again.',
+  504: 'HubSpot to Albi is temporarily unavailable. Try again.',
+})
+const FALLBACK_ERROR_MESSAGE = 'HubSpot to Albi request could not be completed.'
 
 export class H2ARequestError extends Error {
   constructor(message, status = 0) {
@@ -21,18 +40,11 @@ function withoutNullish(values = {}) {
   return Object.fromEntries(Object.entries(values).filter(([, value]) => value !== null && value !== undefined && value !== ''))
 }
 
-function safeErrorMessage(value, status) {
-  const fallback = `HubSpot to Albi request failed (${status || 'network'}).`
-  if (typeof value !== 'string') return fallback
-
-  const normalized = value
-    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
-    .replace(/\b(?:authorization|bearer|hubspotToken|albiApiKey|api[_ -]?key|secret|password)\s*[:=]?\s*[^\s,;]+/gi, '[redacted]')
-    .replace(/\b[A-Za-z0-9_-]{32,}\b/g, '[redacted]')
-    .replace(/\s+/g, ' ')
-    .trim()
-
-  return (normalized || fallback).slice(0, MAX_ERROR_LENGTH)
+function safeErrorMessage(code, status) {
+  if (typeof code === 'string' && Object.hasOwn(SAFE_ERROR_CODES, code)) {
+    return SAFE_ERROR_CODES[code]
+  }
+  return SAFE_STATUS_MESSAGES[status] ?? FALLBACK_ERROR_MESSAGE
 }
 
 async function parseJson(response) {
@@ -73,7 +85,7 @@ async function request(session, path, {
   }
 
   const data = await parseJson(response)
-  if (!response.ok) throw new H2ARequestError(safeErrorMessage(data?.error, response.status), response.status)
+  if (!response.ok) throw new H2ARequestError(safeErrorMessage(data?.code, response.status), response.status)
   return data
 }
 
@@ -111,19 +123,19 @@ export function resolveH2AConflict(session, companyId, resolution, { signal } = 
 }
 
 /**
- * The existing authenticated admin endpoint is the only current company list.
- * Collapse its user-shaped response here so the module sees tenant IDs/names only.
+ * The dedicated endpoint returns only super-admin-authorized company IDs/names.
+ * Validate and reduce again at the browser boundary before exposing options.
  */
 export async function getH2ACompanyOptions(session, { signal } = {}) {
-  const data = await request(session, 'admin-list-users', { signal })
-  if (!Array.isArray(data?.users)) throw new H2ARequestError('Unable to load company options.')
+  const data = await request(session, 'h2a-companies', { signal })
+  if (!Array.isArray(data?.companies)) throw new H2ARequestError('Unable to load company options.')
 
   const companies = new Map()
-  for (const user of data.users) {
-    if (typeof user?.company_id !== 'string' || !user.company_id ||
-      typeof user?.company_name !== 'string' || !user.company_name.trim()) continue
-    if (!companies.has(user.company_id)) {
-      companies.set(user.company_id, { id: user.company_id, name: user.company_name.trim() })
+  for (const company of data.companies) {
+    if (typeof company?.id !== 'string' || !company.id ||
+      typeof company?.name !== 'string' || !company.name.trim()) continue
+    if (!companies.has(company.id)) {
+      companies.set(company.id, { id: company.id, name: company.name.trim() })
     }
   }
 
