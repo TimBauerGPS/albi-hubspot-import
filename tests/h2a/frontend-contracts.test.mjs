@@ -87,15 +87,48 @@ test('activity estimate is an authenticated read-only operation with no credenti
   assert.equal(call.options.body.includes('token'), false)
 })
 
-test('client errors never echo response text and use only fixed status or code messages', async () => {
+test('client exposes actionable fixed endpoint errors and keeps unknown text generic', async () => {
   const { getH2ASettings } = await import('../../src/lib/hubspotToAlbi.js')
   const originalFetch = globalThis.fetch
+  const safeEndpointErrors = [
+    ['Invalid conflict cursor.', 'Invalid conflict cursor.', 400],
+    ['Invalid conflict page size.', 'Invalid conflict page size.'],
+    ['Conflict page size must be between 1 and 100.', 'Conflict page size must be between 1 and 100.'],
+    ['Invalid option mapping.', 'Invalid option mapping.'],
+    ['Invalid conflict resolution payload.', 'Invalid conflict resolution payload.'],
+    ['Unsupported conflict action.', 'Unsupported conflict action.'],
+    ['Linking requires an explicit target ID.', 'Linking requires an explicit target ID.'],
+    ['Invalid sync mode.', 'Invalid sync mode.'],
+    ['Unsupported settings action.', 'Unsupported settings action.'],
+    ['Unsupported request fields.', 'Unsupported request fields.'],
+    ['Invalid option mapping source.', 'Invalid option mapping source.'],
+    ['Complete option mappings are required.', 'Complete option mappings are required.'],
+    ['Confirm contact and organization defaults and every activity type.', 'Confirm contact and organization defaults and every activity type.'],
+    ['Option mappings must use IDs from the latest tenant preflight options.', 'Option mappings must use IDs from the latest tenant preflight options.'],
+    ['The initial start date is fixed and cannot move forward.', 'The initial start date is fixed and cannot move forward.', 409],
+    ['Use request_earlier_backfill for an earlier date.', 'Use request_earlier_backfill for an earlier date.', 409],
+    ['This conflict changed or is no longer open. Refresh it before resolving.', 'This conflict changed or is no longer open. Refresh it before resolving.', 409],
+    ['This conflict is no longer open.', 'This conflict is no longer open.', 409],
+    ['Conflict not found.', 'Conflict not found.', 404],
+    ['This target is already mapped. Explicit many-to-one approval is required.', 'This target is already mapped. Explicit many-to-one approval is required.', 409],
+    ['This source is already mapped to a different target.', 'This source is already mapped to a different target.', 409],
+    ['This conflict cannot use that resolution action.', 'This conflict cannot use that resolution action.', 409],
+    ['Unsupported conflict resolution fields.', 'Unsupported conflict resolution fields.'],
+    ['Select valid fields for this conflict action.', 'Select valid fields for this conflict action.'],
+    ['A conflict resolution is required.', 'A conflict resolution is required.'],
+    ['A conflict ID is required.', 'A conflict ID is required.'],
+    ['Invalid request body.', 'Invalid request body.'],
+    ['Unsupported query parameters.', 'Unsupported query parameters.'],
+    ['A settings action is required.', 'A settings action is required.'],
+    ['A valid company is required.', 'A valid company is required.'],
+    ['Unsupported settings fields.', 'Unsupported settings fields.'],
+    ['Start date must be a valid YYYY-MM-DD date no later than today.', 'Start date must be a valid YYYY-MM-DD date no later than today.'],
+    ['H2A settings are changing. Run preflight again shortly.', 'H2A settings are changing. Run preflight again shortly.', 409],
+    ['Save H2A credentials in Settings before running preflight.', 'Save H2A credentials in Settings before running preflight.', 409],
+  ]
   const responses = [
     response({ error: 'secret-fragment=abc123' }, { status: 400 }),
-    response({ error: 'Invalid conflict cursor.' }, { status: 400 }),
-    response({ error: 'Invalid conflict page size.' }, { status: 400 }),
-    response({ error: 'Invalid option mapping source.' }, { status: 400 }),
-    response({ error: 'Invalid option mapping.' }, { status: 400 }),
+    ...safeEndpointErrors.map(([error, , status = 400]) => response({ error }, { status })),
     response({ error: 'Invalid conflict cursor. secret-fragment=abc123' }, { status: 400 }),
     response({ error: 'db error details', code: 'INVALID_CONFLICT_CURSOR' }, { status: 400 }),
     response({ error: 'leaked error text', code: 'secret-fragment=abc123' }, { status: 400 }),
@@ -113,22 +146,13 @@ test('client errors never echo response text and use only fixed status or code m
         return true
       },
     )
-    await assert.rejects(
-      () => getH2ASettings(session, 'company-1'),
-      error => error.message === 'Invalid conflict cursor.',
-    )
-    await assert.rejects(
-      () => getH2ASettings(session, 'company-1'),
-      error => error.message === 'Invalid conflict page size.',
-    )
-    await assert.rejects(
-      () => getH2ASettings(session, 'company-1'),
-      error => error.message === 'Invalid option mapping source.',
-    )
-    await assert.rejects(
-      () => getH2ASettings(session, 'company-1'),
-      error => error.message === 'Invalid option mapping.',
-    )
+    for (const [serverMessage, expectedMessage] of safeEndpointErrors) {
+      await assert.rejects(
+        () => getH2ASettings(session, 'company-1'),
+        error => error.message === expectedMessage,
+        `expected exact allowlist match for ${serverMessage}`,
+      )
+    }
     await assert.rejects(
       () => getH2ASettings(session, 'company-1'),
       error => error.message === 'HubSpot to Albi request could not be completed.',
