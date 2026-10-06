@@ -114,7 +114,11 @@ export default function OptionMappingForm({ options = {}, mappings = [], confirm
       <p className="min-h-5 pt-2 text-xs text-gray-600" role="status" aria-live="polite">{confirmationAnnouncement}</p>
 
       {hasUnsavedChanges && (
-        <p className="border-l-2 border-amber-400 bg-amber-50 px-3 py-2 text-sm text-amber-900">Unsaved mapping changes are shown below. The confirmed server configuration remains active until you save.</p>
+        <p className="border-l-2 border-amber-400 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          {confirmationStatus === 'confirmed'
+            ? 'Unsaved mapping changes are shown below. The confirmed server configuration remains active until you save.'
+            : 'Unsaved mapping selections are shown below. Complete every required mapping and save to confirm this setup.'}
+        </p>
       )}
 
       <div className="mt-4 grid gap-x-6 gap-y-4 md:grid-cols-2">

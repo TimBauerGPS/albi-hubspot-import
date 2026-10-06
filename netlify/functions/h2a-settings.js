@@ -69,7 +69,7 @@ function toMapping(row) {
 function toCompletedDryRun(row) {
   if (!row) return null
   const totals = Object.fromEntries(RUN_TOTAL_FIELDS
-    .filter(field => Number.isFinite(row.totals?.[field]) && row.totals[field] >= 0)
+    .filter(field => Number.isSafeInteger(row.totals?.[field]) && row.totals[field] >= 0)
     .map(field => [field, row.totals[field]]))
   return { id: row.id, createdAt: row.created_at, finishedAt: row.finished_at, totals }
 }

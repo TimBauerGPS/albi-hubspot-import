@@ -65,6 +65,8 @@ test('confirmed fallback and unsaved mapping drafts remain semantically distinct
   assert.match(mappings, /Confirmed fallback/)
   assert.match(mappings, /Proposed fallback \(not saved\)/)
   assert.match(mappings, /Unsaved mapping changes/)
+  assert.match(mappings, /confirmationStatus === 'confirmed'[^?]*\? 'Unsaved mapping changes/)
+  assert.match(mappings, /Complete every required mapping and save to confirm this setup/)
   assert.match(mappings, /resetKey/)
   assert.match(mappings, /\}, \[resetKey\]\)/)
   assert.doesNotMatch(mappings, /Fallback contact type:[\s\S]{0,180}border-green-500/)
@@ -95,10 +97,21 @@ test('settings runway covers Pacific dates, estimates, notifications, backfill, 
   assert.match(page, /request_earlier_backfill/)
   assert.match(page, /does not move the live cursor/)
   assert.match(page, /dryRunReviewReady/)
-  assert.match(page, /Open current Overview summary/)
+  assert.match(page, /Open Overview/)
   assert.match(page, /to="\/hubspot-to-albi"/)
   assert.match(page, /aria-live="polite"/)
   assert.match(page, /role="alert"/)
+})
+
+test('completed dry-run review renders only fixed, validated outcome totals', async () => {
+  const page = await source('SettingsPage.jsx')
+  assert.match(page, /DRY_RUN_TOTAL_LABELS/)
+  for (const label of ['Items previewed', 'Would create', 'Would update', 'Would link', 'Would deliver', 'Would reconcile', 'Would skip', 'Needs review', 'Failed']) {
+    assert.match(page, new RegExp(label))
+  }
+  assert.match(page, /Number\.isSafeInteger/)
+  assert.match(page, /completed dry-run totals shown/)
+  assert.doesNotMatch(page, /Object\.entries\(settings\?\.lastCompletedDryRun\?\.totals/)
 })
 
 test('readiness summary states the next safe action and members remain read-only', async () => {
@@ -118,7 +131,7 @@ test('readiness refresh preserves the mounted form and activation explicitly con
   assert.match(page, /busyAction === 'readiness-refresh'/)
   assert.match(page, /aria-busy=/)
   assert.doesNotMatch(page, /setReloadToken/)
-  assert.match(page, /I reviewed the dry run/)
+  assert.match(page, /I reviewed this completed dry run/)
   assert.match(page, /activating confirms/i)
   assert.match(page, /detailed per-record review is not available yet/i)
 })

@@ -551,7 +551,14 @@ test('GET exposes only a tenant-scoped completed dry-run summary created after t
     { id: 'old', created_at: '2026-10-02T09:59:59.000Z', finished_at: '2026-10-02T10:01:00.000Z', totals: { dry_run: 99 } },
     { id: 'failed', status: 'failed', created_at: '2026-10-02T10:01:00.000Z', finished_at: '2026-10-02T10:02:00.000Z' },
     { id: 'other-tenant', company_id: 'company-b', created_at: '2026-10-02T10:03:00.000Z', finished_at: '2026-10-02T10:04:00.000Z' },
-    { id: 'ready', created_at: '2026-10-02T10:02:00.000Z', finished_at: '2026-10-02T10:05:00.000Z', totals: { dry_run: 12, conflict: 2 } },
+    { id: 'ready', created_at: '2026-10-02T10:02:00.000Z', finished_at: '2026-10-02T10:05:00.000Z', totals: {
+      dry_run: 12,
+      conflict: 2,
+      created: 1.5,
+      updated: Number.MAX_SAFE_INTEGER + 1,
+      provider_error: 'secret-provider-detail',
+      raw_snapshot: { email: 'private@example.com' },
+    } },
   ] })
   const result = await f.request()
   assert.equal(result.statusCode, 200)
@@ -561,6 +568,10 @@ test('GET exposes only a tenant-scoped completed dry-run summary created after t
     totals: { dry_run: 12, conflict: 2 },
   })
   assert.equal(result.body.includes('error_summary'), false)
+  assert.equal(result.body.includes('provider_error'), false)
+  assert.equal(result.body.includes('secret-provider-detail'), false)
+  assert.equal(result.body.includes('raw_snapshot'), false)
+  assert.equal(result.body.includes('private@example.com'), false)
 })
 
 test('activation rejects completed dry runs that predate the initial lock or belong to another tenant', async () => {

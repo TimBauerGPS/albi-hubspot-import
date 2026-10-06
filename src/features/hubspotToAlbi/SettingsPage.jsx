@@ -14,6 +14,17 @@ import PreflightChecklist from './PreflightChecklist'
 const ACTIVITY_TYPES = ['meetings', 'calls', 'emails', 'communications', 'notes']
 const EMPTY_OPTIONS = Object.freeze({})
 const ACTIVITY_LABELS = { meetings: 'Meetings', calls: 'Calls', emails: 'Emails', communications: 'Communications', notes: 'Notes' }
+const DRY_RUN_TOTAL_LABELS = [
+  ['dry_run', 'Items previewed'],
+  ['created', 'Would create'],
+  ['updated', 'Would update'],
+  ['linked', 'Would link'],
+  ['delivered', 'Would deliver'],
+  ['reconciled', 'Would reconcile'],
+  ['skipped', 'Would skip'],
+  ['conflict', 'Needs review'],
+  ['failed', 'Failed'],
+]
 const REQUIRED_IDENTITIES = [
   'default_contact_type:default',
   'default_organization_type:default',
@@ -195,6 +206,10 @@ export default function SettingsPage() {
   const canEnterDryRun = isAdmin && !busy && credentialsReady && connectionReady && dateReady && mappingsReady && !live
   const canActivate = isAdmin && !busy && connectionReady && mappingsReady && dryRunReady && settings?.config?.state === 'dry_run'
   const options = settings?.preflight?.details?.options ?? EMPTY_OPTIONS
+  const completedDryRunTotals = DRY_RUN_TOTAL_LABELS.flatMap(([key, label]) => {
+    const value = settings?.lastCompletedDryRun?.totals?.[key]
+    return Number.isSafeInteger(value) && value >= 0 ? [{ key, label, value }] : []
+  })
 
   async function saveCredentials(update) {
     const result = await perform('credentials', signal => saveH2ASettings(session, companyId, { action: 'replace_credentials', ...update }, { signal }),
@@ -492,15 +507,32 @@ export default function SettingsPage() {
                 <div className="mt-2">
                   <p className="text-sm text-green-800">Completed dry run ready for review.</p>
                   <p className="mt-1 text-xs text-gray-500">Finished {settings.lastCompletedDryRun?.finishedAt ? new Date(settings.lastCompletedDryRun.finishedAt).toLocaleString() : 'recently'}.</p>
-                  <p className="mt-2 text-xs leading-5 text-gray-600">Activating confirms that you reviewed the completed dry-run summary shown here. Detailed per-record review is not available yet; it will live on Overview in a later release.</p>
-                  <Link to="/hubspot-to-albi" className="mt-3 inline-flex text-sm font-semibold text-brand-700 underline decoration-brand-200 underline-offset-4 hover:decoration-brand-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500">Open current Overview summary</Link>
+                  {completedDryRunTotals.length > 0 ? (
+                    <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 border-y border-gray-200 py-3 sm:grid-cols-3">
+                      {completedDryRunTotals.map(total => (
+                        <div key={total.key}>
+                          <dt className="text-xs text-gray-500">{total.label}</dt>
+                          <dd className="mt-0.5 text-sm font-semibold tabular-nums text-gray-900">{total.value.toLocaleString()}</dd>
+                        </div>
+                      ))}
+                    </dl>
+                  ) : (
+                    <p className="mt-3 border-y border-gray-200 py-3 text-xs text-gray-600">No outcome totals were reported for this completed dry run.</p>
+                  )}
+                  <p className="mt-2 text-xs leading-5 text-gray-600">
+                    {completedDryRunTotals.length > 0
+                      ? 'Activating confirms the admin reviewed the completed dry-run totals shown above.'
+                      : 'Activating confirms the admin reviewed this completed dry run, which reported no outcome totals.'}
+                    {' '}Detailed per-record review is not available yet; it will live on Overview in a later release.
+                  </p>
+                  <Link to="/hubspot-to-albi" className="mt-3 inline-flex text-sm font-semibold text-brand-700 underline decoration-brand-200 underline-offset-4 hover:decoration-brand-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500">Open Overview</Link>
                 </div>
               ) : <p className="mt-2 text-sm leading-6 text-gray-500">Live activation remains blocked until a dry-run run created after the date lock finishes successfully.</p>}
 
               <div className="mt-4 flex flex-wrap gap-2">
                 {!live ? (
                   <button type="button" onClick={activateLive} disabled={!canActivate} title={!canActivate ? 'Complete and review a dry run before live activation.' : undefined} className={buttonPrimary}>
-                    {busyAction === 'activate' ? 'Activating…' : 'I reviewed the dry run — activate live'}
+                    {busyAction === 'activate' ? 'Activating…' : 'I reviewed this completed dry run — activate live'}
                   </button>
                 ) : (
                   <button type="button" onClick={disableLive} disabled={!isAdmin || busy} className={buttonSecondary}>
