@@ -93,6 +93,10 @@ test('client errors never echo response text and use only fixed status or code m
   const responses = [
     response({ error: 'secret-fragment=abc123' }, { status: 400 }),
     response({ error: 'Invalid conflict cursor.' }, { status: 400 }),
+    response({ error: 'Invalid conflict page size.' }, { status: 400 }),
+    response({ error: 'Invalid option mapping source.' }, { status: 400 }),
+    response({ error: 'Invalid option mapping.' }, { status: 400 }),
+    response({ error: 'Invalid conflict cursor. secret-fragment=abc123' }, { status: 400 }),
     response({ error: 'db error details', code: 'INVALID_CONFLICT_CURSOR' }, { status: 400 }),
     response({ error: 'leaked error text', code: 'secret-fragment=abc123' }, { status: 400 }),
     response({ error: 'secret-fragment=abc123' }, { status: 403 }),
@@ -108,6 +112,22 @@ test('client errors never echo response text and use only fixed status or code m
         assert.equal(error.message.includes('abc123'), false)
         return true
       },
+    )
+    await assert.rejects(
+      () => getH2ASettings(session, 'company-1'),
+      error => error.message === 'Invalid conflict cursor.',
+    )
+    await assert.rejects(
+      () => getH2ASettings(session, 'company-1'),
+      error => error.message === 'Invalid conflict page size.',
+    )
+    await assert.rejects(
+      () => getH2ASettings(session, 'company-1'),
+      error => error.message === 'Invalid option mapping source.',
+    )
+    await assert.rejects(
+      () => getH2ASettings(session, 'company-1'),
+      error => error.message === 'Invalid option mapping.',
     )
     await assert.rejects(
       () => getH2ASettings(session, 'company-1'),

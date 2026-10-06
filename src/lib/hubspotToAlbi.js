@@ -6,6 +6,32 @@ const SAFE_ERROR_CODES = Object.freeze({
   INVALID_OPTION_MAPPING: 'Invalid option mapping.',
   INVALID_OPTION_MAPPING_SOURCE: 'Invalid option mapping source.',
 })
+const SAFE_SERVER_MESSAGES = Object.freeze({
+  'A dry run is required before live activation.': 'A dry run is required before live activation.',
+  'Backfill requires a date earlier than the fixed initial start date.': 'Backfill requires a date earlier than the fixed initial start date.',
+  'Complete option mappings are required.': 'Complete option mappings are required.',
+  'Confirm contact and organization defaults and every activity type.': 'Confirm contact and organization defaults and every activity type.',
+  'Disable live sync before starting a dry run.': 'Disable live sync before starting a dry run.',
+  'Duplicate option mapping.': 'Duplicate option mapping.',
+  'H2A configuration is not ready for this run.': 'H2A configuration is not ready for this run.',
+  'Invalid conflict cursor.': 'Invalid conflict cursor.',
+  'Invalid conflict page size.': 'Invalid conflict page size.',
+  'Invalid option mapping source.': 'Invalid option mapping source.',
+  'Invalid option mapping.': 'Invalid option mapping.',
+  'Notification recipients must be valid email addresses (up to 20).': 'Notification recipients must be valid email addresses (up to 20).',
+  'Option mappings must use IDs from the latest tenant preflight options.': 'Option mappings must use IDs from the latest tenant preflight options.',
+  'Save H2A credentials in Settings before running preflight.': 'Save H2A credentials in Settings before running preflight.',
+  'Save H2A credentials in Settings first.': 'Save H2A credentials in Settings first.',
+  'Settings changed concurrently. Reload and try again.': 'Settings changed concurrently. Reload and try again.',
+  'Settings changed during preflight. Run preflight again.': 'Settings changed during preflight. Run preflight again.',
+  'Settings changed while credentials were being replaced. Reload and try again.': 'Settings changed while credentials were being replaced. Reload and try again.',
+  'Start date must be a valid Pacific date no later than today.': 'Start date must be a valid Pacific date no later than today.',
+  'Start date must be a valid YYYY-MM-DD calendar date.': 'Start date must be a valid YYYY-MM-DD calendar date.',
+  'Start date must be a valid YYYY-MM-DD date no later than today.': 'Start date must be a valid YYYY-MM-DD date no later than today.',
+  'Supply both initial credentials or a nonempty replacement.': 'Supply both initial credentials or a nonempty replacement.',
+  'Use request_earlier_backfill for an earlier date.': 'Use request_earlier_backfill for an earlier date.',
+  'Valid credentials, successful preflight, and confirmed option mappings are required.': 'Valid credentials, successful preflight, and confirmed option mappings are required.',
+})
 const SAFE_STATUS_MESSAGES = Object.freeze({
   400: 'HubSpot to Albi request could not be completed.',
   401: 'Your session has expired. Sign in and try again.',
@@ -40,9 +66,12 @@ function withoutNullish(values = {}) {
   return Object.fromEntries(Object.entries(values).filter(([, value]) => value !== null && value !== undefined && value !== ''))
 }
 
-function safeErrorMessage(code, status) {
+function safeErrorMessage(code, message, status) {
   if (typeof code === 'string' && Object.hasOwn(SAFE_ERROR_CODES, code)) {
     return SAFE_ERROR_CODES[code]
+  }
+  if (typeof message === 'string' && Object.hasOwn(SAFE_SERVER_MESSAGES, message)) {
+    return SAFE_SERVER_MESSAGES[message]
   }
   return SAFE_STATUS_MESSAGES[status] ?? FALLBACK_ERROR_MESSAGE
 }
@@ -85,7 +114,7 @@ async function request(session, path, {
   }
 
   const data = await parseJson(response)
-  if (!response.ok) throw new H2ARequestError(safeErrorMessage(data?.code, response.status), response.status)
+  if (!response.ok) throw new H2ARequestError(safeErrorMessage(data?.code, data?.error, response.status), response.status)
   return data
 }
 
