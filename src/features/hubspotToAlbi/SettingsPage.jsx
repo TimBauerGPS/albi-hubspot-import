@@ -88,7 +88,8 @@ export default function SettingsPage() {
   const [actionError, setActionError] = useState('')
   const [notice, setNotice] = useState('')
   const [busyAction, setBusyAction] = useState('')
-  const [reloadToken, setReloadToken] = useState(0)
+  const [initialRetryToken, setInitialRetryToken] = useState(0)
+  const [mappingResetRevision, setMappingResetRevision] = useState(0)
   const requestRevision = useRef(0)
   const mutationControllers = useRef(new Set())
   const tenantKey = `${companyId ?? 'none'}:${tenantRevision}`
@@ -138,7 +139,7 @@ export default function SettingsPage() {
       })
 
     return () => controller.abort()
-  }, [applySettings, companyId, completeTenantTransition, reloadToken, session, tenantKey, tenantRevision])
+  }, [applySettings, companyId, completeTenantTransition, initialRetryToken, session, tenantKey, tenantRevision])
 
   useEffect(() => () => {
     for (const controller of mutationControllers.current) controller.abort()
@@ -196,15 +197,18 @@ export default function SettingsPage() {
   const options = settings?.preflight?.details?.options ?? EMPTY_OPTIONS
 
   async function saveCredentials(update) {
-    return Boolean(await perform('credentials', signal => saveH2ASettings(session, companyId, { action: 'replace_credentials', ...update }, { signal }),
-      'Credentials saved. Run the connection check again.'))
+    const result = await perform('credentials', signal => saveH2ASettings(session, companyId, { action: 'replace_credentials', ...update }, { signal }),
+      'Credentials saved. Run the connection check again.')
+    if (result) setMappingResetRevision(value => value + 1)
+    return Boolean(result)
   }
 
   async function runPreflight() {
-    await perform('preflight', async signal => {
+    const result = await perform('preflight', async signal => {
       await runH2APreflight(session, companyId, { signal })
       return refreshSettings(signal)
     }, 'Connection check complete. Review the capability list below.')
+    if (result) setMappingResetRevision(value => value + 1)
   }
 
   async function saveDate() {
@@ -221,8 +225,9 @@ export default function SettingsPage() {
   }
 
   async function confirmMappings(optionMappings) {
-    await perform('mappings', signal => saveH2ASettings(session, companyId, { action: 'confirm_option_mappings', optionMappings }, { signal }),
+    const result = await perform('mappings', signal => saveH2ASettings(session, companyId, { action: 'confirm_option_mappings', optionMappings }, { signal }),
       'Mappings confirmed with the current tenant option IDs.')
+    if (result) setMappingResetRevision(value => value + 1)
   }
 
   async function saveRecipients() {
@@ -259,6 +264,12 @@ export default function SettingsPage() {
       'Earlier backfill requested. This does not move the live cursor or the fixed initial date.')
   }
 
+  async function refreshReadiness() {
+    if (busyAction) return
+    await perform('readiness-refresh', signal => getH2ASettings(session, companyId, { signal }),
+      'Readiness refreshed. Mapping drafts and keyboard position were preserved.')
+  }
+
   if (loading) {
     return (
       <div className="rounded-xl border border-gray-200 bg-white px-5 py-10 text-center" role="status" aria-live="polite">
@@ -273,13 +284,13 @@ export default function SettingsPage() {
       <div className="rounded-xl border border-red-200 bg-white px-5 py-8" role="alert">
         <h2 className="text-base font-semibold text-gray-900">Settings could not be loaded</h2>
         <p className="mt-1 text-sm text-red-700">{loadError || 'HubSpot to Albi settings are unavailable.'}</p>
-        <button type="button" onClick={() => setReloadToken(value => value + 1)} className={`${buttonSecondary} mt-4`}>Try again</button>
+        <button type="button" onClick={() => setInitialRetryToken(value => value + 1)} className={`${buttonSecondary} mt-4`}>Try again</button>
       </div>
     )
   }
 
   return (
-    <section aria-labelledby="h2a-settings-title">
+    <section aria-labelledby="h2a-settings-title" aria-busy={busyAction === 'readiness-refresh'}>
       <div className="mb-5 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <p className="text-xs font-bold uppercase tracking-[0.14em] text-brand-600">Setup runway</p>
@@ -416,6 +427,7 @@ export default function SettingsPage() {
             options={options}
             mappings={settings.optionMappings}
             confirmationStatus={settings.config.option_confirmation_status}
+            resetKey={`${tenantKey}:${mappingResetRevision}`}
             isAdmin={isAdmin}
             busy={busyAction === 'mappings'}
             onConfirm={confirmMappings}
@@ -461,7 +473,14 @@ export default function SettingsPage() {
                   </button>
                 )}
                 {settings.config.state === 'dry_run' && (
-                  <button type="button" onClick={() => setReloadToken(value => value + 1)} disabled={busy} className={buttonSecondary}>Refresh readiness</button>
+                  <button
+                    type="button"
+                    onClick={refreshReadiness}
+                    disabled={busy && busyAction !== 'readiness-refresh'}
+                    aria-disabled={busyAction === 'readiness-refresh'}
+                    aria-busy={busyAction === 'readiness-refresh'}
+                    className={`${buttonSecondary} ${busyAction === 'readiness-refresh' ? 'cursor-wait opacity-70' : ''}`}
+                  >{busyAction === 'readiness-refresh' ? 'Refreshing readiness…' : 'Refresh readiness'}</button>
                 )}
               </div>
               {!canEnterDryRun && !locked && <p className="mt-2 text-xs text-gray-500">Complete credentials, connection, saved start date, and seven confirmed mappings first.</p>}
@@ -473,14 +492,15 @@ export default function SettingsPage() {
                 <div className="mt-2">
                   <p className="text-sm text-green-800">Completed dry run ready for review.</p>
                   <p className="mt-1 text-xs text-gray-500">Finished {settings.lastCompletedDryRun?.finishedAt ? new Date(settings.lastCompletedDryRun.finishedAt).toLocaleString() : 'recently'}.</p>
-                  <Link to="/hubspot-to-albi" className="mt-3 inline-flex text-sm font-semibold text-brand-700 underline decoration-brand-200 underline-offset-4 hover:decoration-brand-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500">Review on Overview</Link>
+                  <p className="mt-2 text-xs leading-5 text-gray-600">Activating confirms that you reviewed the completed dry-run summary shown here. Detailed per-record review is not available yet; it will live on Overview in a later release.</p>
+                  <Link to="/hubspot-to-albi" className="mt-3 inline-flex text-sm font-semibold text-brand-700 underline decoration-brand-200 underline-offset-4 hover:decoration-brand-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500">Open current Overview summary</Link>
                 </div>
               ) : <p className="mt-2 text-sm leading-6 text-gray-500">Live activation remains blocked until a dry-run run created after the date lock finishes successfully.</p>}
 
               <div className="mt-4 flex flex-wrap gap-2">
                 {!live ? (
                   <button type="button" onClick={activateLive} disabled={!canActivate} title={!canActivate ? 'Complete and review a dry run before live activation.' : undefined} className={buttonPrimary}>
-                    {busyAction === 'activate' ? 'Activating…' : 'Activate live sync'}
+                    {busyAction === 'activate' ? 'Activating…' : 'I reviewed the dry run — activate live'}
                   </button>
                 ) : (
                   <button type="button" onClick={disableLive} disabled={!isAdmin || busy} className={buttonSecondary}>

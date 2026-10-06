@@ -59,6 +59,28 @@ test('mapping flow preserves the seven required and optional inheritance ID name
   assert.match(mappings, /7 required mappings/)
 })
 
+test('confirmed fallback and unsaved mapping drafts remain semantically distinct', async () => {
+  const mappings = await source('OptionMappingForm.jsx')
+  assert.match(mappings, /confirmationStatus === 'confirmed'/)
+  assert.match(mappings, /Confirmed fallback/)
+  assert.match(mappings, /Proposed fallback \(not saved\)/)
+  assert.match(mappings, /Unsaved mapping changes/)
+  assert.match(mappings, /resetKey/)
+  assert.match(mappings, /\}, \[resetKey\]\)/)
+  assert.doesNotMatch(mappings, /Fallback contact type:[\s\S]{0,180}border-green-500/)
+})
+
+test('mapping confirmation status is associated and announced for keyboard and screen-reader users', async () => {
+  const mappings = await source('OptionMappingForm.jsx')
+  assert.match(mappings, /id=\{`h2a-map-\$\{row\.key\}-status`\}/)
+  assert.match(mappings, /aria-describedby=\{`h2a-map-\$\{row\.key\}-help h2a-map-\$\{row\.key\}-status`\}/)
+  assert.match(mappings, /aria-live="polite"/)
+  assert.match(mappings, /suggestions confirmed/)
+  assert.match(mappings, /Contact type for \{organization\.label\}/)
+  assert.match(mappings, /Organization type/)
+  assert.match(mappings, /Contact type/)
+})
+
 test('settings runway covers Pacific dates, estimates, notifications, backfill, and completed dry-run activation', async () => {
   const page = await source('SettingsPage.jsx')
   assert.match(page, /midnight America\/Los_Angeles/)
@@ -73,7 +95,7 @@ test('settings runway covers Pacific dates, estimates, notifications, backfill, 
   assert.match(page, /request_earlier_backfill/)
   assert.match(page, /does not move the live cursor/)
   assert.match(page, /dryRunReviewReady/)
-  assert.match(page, /Review on Overview/)
+  assert.match(page, /Open current Overview summary/)
   assert.match(page, /to="\/hubspot-to-albi"/)
   assert.match(page, /aria-live="polite"/)
   assert.match(page, /role="alert"/)
@@ -88,4 +110,15 @@ test('readiness summary states the next safe action and members remain read-only
   assert.match(page, /read-only/i)
   assert.match(page, /isAdmin/)
   assert.match(page, /disabledReason/)
+})
+
+test('readiness refresh preserves the mounted form and activation explicitly confirms review', async () => {
+  const page = await source('SettingsPage.jsx')
+  assert.match(page, /refreshReadiness/)
+  assert.match(page, /busyAction === 'readiness-refresh'/)
+  assert.match(page, /aria-busy=/)
+  assert.doesNotMatch(page, /setReloadToken/)
+  assert.match(page, /I reviewed the dry run/)
+  assert.match(page, /activating confirms/i)
+  assert.match(page, /detailed per-record review is not available yet/i)
 })
