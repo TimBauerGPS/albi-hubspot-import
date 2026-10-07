@@ -34,7 +34,7 @@ test('all tenant tables have UUID keys, ownership, RLS, and authenticated read-o
     assert.match(body, /company_id uuid (?:primary key|not null)/)
     assert.match(sql, new RegExp(`alter table public\\.${table} enable row level security;`))
     assert.match(sql, new RegExp(`revoke all on table public\\.${table} from public, anon, authenticated;`))
-    if (['h2a_conflict_resumes', 'h2a_daily_claims'].includes(table)) {
+    if (['h2a_conflict_resumes', 'h2a_execution_leases', 'h2a_daily_claims'].includes(table)) {
       assert.doesNotMatch(sql, /grant [^;]*on (?:table )?public\.h2a_conflict_resumes to authenticated;/)
       assert.doesNotMatch(sql, new RegExp(`grant [^;]*on (?:table )?public\\.${table} to authenticated;`))
       assert.doesNotMatch(sql, new RegExp(`create policy[^;]+on public\\.${table}`))
@@ -162,6 +162,17 @@ test('claims are atomic and heartbeat/release cannot alter a successor lease', (
   assert.match(tableBody(sql, 'public.h2a_sync_runs'), /resume_id uuid/)
   assert.match(sql, /create unique index h2a_runs_company_scheduler_claim_uidx/)
   assert.match(sql, /create unique index h2a_runs_company_resume_uidx/)
+})
+
+test('execution lease fencing tokens are not directly readable by authenticated users', () => {
+  const sql = readSchema()
+  assert.match(sql, /revoke all on table public\.h2a_execution_leases from public, anon, authenticated;/)
+  assert.doesNotMatch(sql, /grant [^;]*on table public\.h2a_execution_leases to authenticated;/)
+  assert.doesNotMatch(sql, /create policy h2a_execution_leases_select/)
+  assert.match(sql, /grant select on table public\.h2a_execution_leases to service_role;/)
+  for (const name of ['h2a_claim_lease', 'h2a_heartbeat_lease', 'h2a_release_lease']) {
+    assert.match(sql, new RegExp(`grant execute on function public\\.${name}\\([^;]+\\) to service_role;`))
+  }
 })
 
 test('conflict resolution is an atomic tenant-scoped CAS that appends audit, mapping, and unique resume intent', () => {

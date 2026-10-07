@@ -431,13 +431,7 @@ grant select on table public.h2a_conflict_resumes to service_role;
 alter table public.h2a_execution_leases enable row level security;
 revoke all on table public.h2a_execution_leases from public, anon, authenticated;
 revoke all on table public.h2a_execution_leases from service_role;
-grant select on table public.h2a_execution_leases to authenticated;
 grant select on table public.h2a_execution_leases to service_role;
-create policy h2a_execution_leases_select on public.h2a_execution_leases
-  for select to authenticated using (
-    exists (select 1 from public.company_members m where m.user_id = (select auth.uid()) and m.company_id = h2a_execution_leases.company_id)
-    or exists (select 1 from public.super_admins s where s.user_id = (select auth.uid()))
-  );
 
 alter table public.h2a_daily_claims enable row level security;
 revoke all on table public.h2a_daily_claims from public, anon, authenticated;

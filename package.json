@@ -9,6 +9,7 @@
     "build": "vite build",
     "test:h2a": "node --test tests/h2a/*.test.mjs",
     "test:h2a:schema": "node --test scripts/test-h2a-schema-contract.mjs",
+    "test:h2a:e2e": "node scripts/test-h2a-end-to-end.mjs --self-test",
     "preview": "vite preview",
     "functions": "dotenv -- netlify functions:serve --port 9999"
   },
