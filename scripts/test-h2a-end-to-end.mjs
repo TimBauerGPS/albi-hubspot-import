@@ -14,7 +14,6 @@ const REQUIRED_PROVIDER_CREDENTIALS = ['H2A_TEST_HUBSPOT_TOKEN', 'H2A_TEST_ALBI_
 const OVERRIDE_VARS = ['H2A_TEST_HUBSPOT_BASE_URL', 'H2A_TEST_ALBI_BASE_URL']
 const REQUIRED_WRITE_CAPABILITIES = [
   'contacts_create', 'organizations_create', 'activities_create',
-  'contacts_update', 'organizations_update', 'contacts_associate_organization',
 ]
 const cleanId = value => String(value ?? '').replace(/[^a-zA-Z0-9_-]/g, '').slice(-4).padStart(4, '*')
 const output = message => process.stdout.write(`${message}\n`)
@@ -87,56 +86,112 @@ function makeEphemeralDeliveryStore(existing = null) {
   }
 }
 
-async function runSelfTest() {
-  assert.deepEqual(missingSmokeEnvironment({}), REQUIRED_PROVIDER_CREDENTIALS)
-  assert.ok(smokeWriteBlockers({}).some(value => value.startsWith('H2A_ALLOW_SANDBOX_WRITES=')))
-  const authorized = {
-    H2A_ALLOW_SANDBOX_WRITES: 'true',
-    H2A_SANDBOX_ISOLATION_ACK: ISOLATION_ACK,
-    H2A_ALBI_ACTIVITY_CONTRACT_ACK: ACTIVITY_CONTRACT_ACK,
-    H2A_SMOKE_RUN_ID: 'self-test-01',
+function makeSelfTestAdapters() {
+  const calls = []
+  const organizations = []
+  const contacts = []
+  const activities = []
+  const hubspot = {
+    async getAccountInfo() { calls.push('hubspot:account'); return { portalId: '123456' } },
+    async listActivities({ objectType }) { calls.push(`hubspot:search:${objectType}`); return { records: [], after: null, total: 0 } },
+    async getAssociations() { calls.push('hubspot:associations'); return [] },
   }
-  assert.deepEqual(smokeWriteBlockers(authorized, Object.fromEntries(REQUIRED_WRITE_CAPABILITIES.map(name => [name, true]))), [])
-  assert.ok(smokeWriteBlockers({ ...authorized, H2A_TEST_ALBI_BASE_URL: 'https://api.albiware.com' }).length)
+  const albi = {
+    async listOptions() {
+      calls.push('albi:options')
+      return { contactTypes: [{ id: '1', label: 'Person' }], organizationTypes: [{ id: '1', label: 'Organization' }], activityTypes: [{ id: '1', label: 'Note' }] }
+    },
+    async listContacts({ cursor = '1', pageSize = 25 } = {}) {
+      calls.push('albi:contacts:read')
+      const start = (Number(cursor) - 1) * pageSize
+      const records = contacts.slice(start, start + pageSize)
+      return { records, cursor: records.length === pageSize ? String(Number(cursor) + 1) : null }
+    },
+    async listOrganizations({ cursor = '1', pageSize = 25 } = {}) {
+      calls.push('albi:organizations:read')
+      const start = (Number(cursor) - 1) * pageSize
+      const records = organizations.slice(start, start + pageSize)
+      return { records, cursor: records.length === pageSize ? String(Number(cursor) + 1) : null }
+    },
+    async listActivities({ contactId, page = 1 } = {}) {
+      calls.push('albi:activities:read')
+      const matching = activities.filter(item => contactId == null || String(item.contactId) === String(contactId))
+      const records = matching.slice((page - 1) * 25, page * 25)
+      return { records, cursor: records.length === 25 ? String(page + 1) : null }
+    },
+    async verifyCredentials() {
+      calls.push('albi:capabilities:read')
+      return { authenticated: true, capabilities: Object.fromEntries(REQUIRED_WRITE_CAPABILITIES.map(name => [name, true])) }
+    },
+    async createOrganization(payload) {
+      calls.push('albi:organizations:create')
+      const record = { id: '1001', name: payload.name }
+      organizations.push(record)
+      return { id: record.id }
+    },
+    async createContact(payload) {
+      calls.push('albi:contacts:create')
+      const record = { id: '2001', firstName: payload.firstName, lastName: payload.lastName, organizationId: payload.organizationId }
+      contacts.push(record)
+      return { id: record.id }
+    },
+    async createActivity(payload) {
+      calls.push('albi:activities:create')
+      const record = { id: '3001', ...payload }
+      activities.push(record)
+      return { id: record.id }
+    },
+  }
+  return { calls, hubspot, albi, activities, counts: () => ({ organizations: organizations.length, contacts: contacts.length, activities: activities.length }) }
+}
+
+export async function runSelfTest({ log = output } = {}) {
+  assert.deepEqual(missingSmokeEnvironment({}), REQUIRED_PROVIDER_CREDENTIALS)
   assert.equal(cleanId('123456789'), '6789')
   const marker = makeSourceMarker({ objectType: 'meeting', activityId: 'self-test-01' })
   assert.equal(exactMarkerMatches([{ notes: `Subject: Smoke\n${marker}` }, { notes: `prefix ${marker}` }], marker).length, 1)
 
-  let creates = 0
-  const activities = []
-  const identity = { companyId: 'sandbox-smoke', portalId: 'portal-test', objectType: 'meetings', activityId: 'self-test-01', albiTargetType: 'contact', albiTargetId: '9001' }
-  const store = makeEphemeralDeliveryStore()
-  const albi = { async listActivities() { return { records: activities, cursor: null } } }
-  const first = await reserveDelivery({ identity, store, albi })
-  assert.equal(first.safeToCreate, true)
-  activities.push({ id: 'activity-1', notes: marker })
-  creates += 1
-  await completeDelivery({ reservation: first, store, result: { id: 'activity-1' } })
-  const repeat = await reserveDelivery({ identity, store, albi })
-  assert.equal(repeat.disposition, 'delivered')
-  assert.equal(creates, 1)
-  assert.equal(exactMarkerMatches(activities, marker).length, 1)
-  const nextInvocationStore = makeEphemeralDeliveryStore({ key: makeDeliveryKey(identity) })
-  const crossInvocationRetry = await reserveDelivery({ identity, store: nextInvocationStore, albi })
-  assert.equal(crossInvocationRetry.disposition, 'reconciled')
-  assert.equal(creates, 1)
-  assert.equal(exactMarkerMatches(activities, marker).length, 1)
-  output('H2A end-to-end self-test passed: write guards, safe identifier output, exact marker matching, and one-delivery retry behavior.')
+  const fixture = makeSelfTestAdapters()
+  const env = { H2A_TEST_HUBSPOT_TOKEN: 'fixture-token', H2A_TEST_ALBI_KEY: 'fixture-key', H2A_SMOKE_RUN_ID: 'self-test-01' }
+  const makeClients = () => ({ hubspot: fixture.hubspot, albi: fixture.albi })
+  await runSmoke(env, { makeClients, log })
+  assert.equal(fixture.calls.filter(call => call.startsWith('hubspot:search:')).length, HUBSPOT_ACTIVITY_TYPES.length, 'read-only plan uses all five HubSpot activity searches')
+  assert.deepEqual(fixture.counts(), { organizations: 0, contacts: 0, activities: 0 }, 'read-only plan does not create provider records')
+
+  const writeEnv = { ...env, H2A_ALLOW_SANDBOX_WRITES: 'true', H2A_SANDBOX_ISOLATION_ACK: ISOLATION_ACK,
+    H2A_ALBI_ACTIVITY_CONTRACT_ACK: ACTIVITY_CONTRACT_ACK }
+  await runSmoke(writeEnv, { makeClients, log })
+  await runSmoke(writeEnv, { makeClients, log })
+  assert.deepEqual(fixture.counts(), { organizations: 1, contacts: 1, activities: 1 }, 'real smoke orchestration creates exactly one of each record across rerun')
+  assert.equal(exactMarkerMatches(fixture.activities, makeSourceMarker({ objectType: 'meeting', activityId: 'smoke-self-test-01' })).length, 1)
+
+  for (const missing of ['H2A_SANDBOX_ISOLATION_ACK', 'H2A_ALBI_ACTIVITY_CONTRACT_ACK', 'H2A_SMOKE_RUN_ID']) {
+    const invalid = { ...writeEnv }
+    delete invalid[missing]
+    let transportCalls = 0
+    await assert.rejects(runSmoke(invalid, {
+      makeClients: ({ fetch }) => ({ hubspot: new HubSpotClient({ token: invalid.H2A_TEST_HUBSPOT_TOKEN, fetch }), albi: new AlbiClient({ apiKey: invalid.H2A_TEST_ALBI_KEY, fetch }) }),
+      fetch: async () => { transportCalls += 1; throw new Error('unexpected provider transport') },
+      log,
+    }), new RegExp(missing))
+    assert.equal(transportCalls, 0)
+  }
+  log('H2A smoke orchestration self-test passed: read-only plan, guarded create and rerun exactly-once, and zero-transport write-guard ordering.')
 }
 
 function makeRunId(env) {
   return env.H2A_SMOKE_RUN_ID || `read-${new Date().toISOString().slice(0, 10).replaceAll('-', '')}`
 }
 
-async function readAndReport(hubspot, albi, runId) {
+async function readAndReport(hubspot, albi, runId, log) {
   const account = await hubspot.getAccountInfo()
   const options = await albi.listOptions()
   const [contacts, organizations, albiActivities] = await Promise.all([
     albi.listContacts({ pageSize: 1 }), albi.listOrganizations({ pageSize: 1 }), albi.listActivities({ page: 1 }),
   ])
-  output(`HubSpot account authenticated (portal ending ${cleanId(account.portalId)}).`)
-  output(`Albi options loaded: contacts=${options.contactTypes.length}, organizations=${options.organizationTypes.length}, activities=${options.activityTypes.length}.`)
-  output(`Albi read shapes passed: contacts=${contacts.records.length ? 'sample available' : 'empty'}, organizations=${organizations.records.length ? 'sample available' : 'empty'}, activities=${albiActivities.records.length ? 'sample available' : 'empty'}.`)
+  log(`HubSpot account authenticated (portal ending ${cleanId(account.portalId)}).`)
+  log(`Albi options loaded: contacts=${options.contactTypes.length}, organizations=${options.organizationTypes.length}, activities=${options.activityTypes.length}.`)
+  log(`Albi read shapes passed: contacts=${contacts.records.length ? 'sample available' : 'empty'}, organizations=${organizations.records.length ? 'sample available' : 'empty'}, activities=${albiActivities.records.length ? 'sample available' : 'empty'}.`)
 
   const lower = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
   const activityCounts = {}
@@ -152,12 +207,12 @@ async function readAndReport(hubspot, albi, runId) {
     if (objectType === 'emails') {
       const allowed = page.records.filter(record => record.properties.hs_email_direction === 'EMAIL').length
       const excluded = page.records.length - allowed
-      output(`HubSpot direct CRM email contract: records=${page.records.length}, direction EMAIL=${allowed}, other/unknown direction excluded=${excluded}.`)
+      log(`HubSpot direct CRM email contract: records=${page.records.length}, direction EMAIL=${allowed}, other/unknown direction excluded=${excluded}.`)
     }
   }
-  output(`HubSpot date-versioned activity reads passed: ${Object.entries(activityCounts).map(([type, count]) => `${type}=${count}`).join(', ')}.`)
-  output(`HubSpot association traversal samples: ${Object.entries(associationChecks).map(([type, count]) => `${type}=${count}`).join(', ')}.`)
-  output(`Planned isolated record prefix: H2A-SMOKE-${runId}. No provider response bodies or full record identifiers were printed.`)
+  log(`HubSpot date-versioned activity reads passed: ${Object.entries(activityCounts).map(([type, count]) => `${type}=${count}`).join(', ')}.`)
+  log(`HubSpot association traversal samples: ${Object.entries(associationChecks).map(([type, count]) => `${type}=${count}`).join(', ')}.`)
+  log(`Planned isolated record prefix: H2A-SMOKE-${runId}. No provider response bodies or full record identifiers were printed.`)
   return { options, account, activityCounts, associationChecks }
 }
 
@@ -167,7 +222,7 @@ async function findUnique(records, predicate, label) {
   return matches[0] ?? null
 }
 
-async function runGuardedWrite(albi, hubspotAccount, options, env, runId) {
+async function runGuardedWrite(albi, hubspotAccount, options, env, runId, log) {
   const verification = await albi.verifyCredentials()
   const blockers = smokeWriteBlockers(env, verification.capabilities)
   if (blockers.length) {
@@ -214,30 +269,38 @@ async function runGuardedWrite(albi, hubspotAccount, options, env, runId) {
   const after = await collectPages(cursor => albi.listActivities({ contactId: contact.id, page: Number(cursor) }), 'activity readback')
   const markerMatches = exactMarkerMatches(after, activityMarker)
   if (markerMatches.length !== 1) throw new Error(`Expected exactly one marker-matched activity after retry; found ${markerMatches.length}.`)
-  output(`Guarded Albi smoke write passed: organization …${cleanId(organization.id)}, contact …${cleanId(contact.id)}, activity …${cleanId(activityResult?.id ?? markerMatches[0].id)} (${disposition}; retry=${retry.disposition}; marker matches=${markerMatches.length}).`)
-  output('No records were deleted. Manually remove the H2A-SMOKE record set from the isolated Albi tenant after review.')
+  log(`Guarded Albi smoke write passed: organization …${cleanId(organization.id)}, contact …${cleanId(contact.id)}, activity …${cleanId(activityResult?.id ?? markerMatches[0].id)} (${disposition}; retry=${retry.disposition}; marker matches=${markerMatches.length}).`)
+  log('No records were deleted. Manually remove the H2A-SMOKE record set from the isolated Albi tenant after review.')
+}
+
+export async function runSmoke(env = process.env, { makeClients = ({ env: values, fetch }) => ({
+  hubspot: new HubSpotClient({ token: values.H2A_TEST_HUBSPOT_TOKEN, fetch }),
+  albi: new AlbiClient({ apiKey: values.H2A_TEST_ALBI_KEY, fetch }),
+}), fetch = globalThis.fetch, log = output } = {}) {
+  const missing = missingSmokeEnvironment(env)
+  if (missing.length) {
+    log(`H2A sandbox smoke skipped safely; missing environment variables: ${missing.join(', ')}.`)
+    return
+  }
+  if (env.H2A_ALLOW_SANDBOX_WRITES === 'true') {
+    const blockers = smokeWriteBlockers(env)
+    if (blockers.length) throw new Error(`Sandbox write stopped before any provider request. ${blockers.join('; ')}.`)
+  }
+  const overrides = OVERRIDE_VARS.filter(name => env[name])
+  if (overrides.length) throw new Error(`Refusing unsupported provider URL overrides before provider requests: ${overrides.join(', ')}.`)
+  const runId = makeRunId(env)
+  const { hubspot, albi } = makeClients({ env, fetch })
+  const result = await readAndReport(hubspot, albi, runId, log)
+  if (env.H2A_ALLOW_SANDBOX_WRITES !== 'true') {
+    log('Read-only mode complete. No provider writes were attempted. Set both documented sandbox acknowledgements and rerun with an isolated Albi sandbox to enable the guarded write path.')
+    return
+  }
+  await runGuardedWrite(albi, result.account, result.options, env, runId, log)
 }
 
 async function main(env = process.env) {
   if (process.argv.includes('--self-test')) return runSelfTest()
-  const missing = missingSmokeEnvironment(env)
-  if (missing.length) {
-    output(`H2A sandbox smoke skipped safely; missing environment variables: ${missing.join(', ')}.`)
-    return
-  }
-  const overrides = OVERRIDE_VARS.filter(name => env[name])
-  if (overrides.length) throw new Error(`Refusing unsupported provider URL overrides: ${overrides.join(', ')}.`)
-  const runId = makeRunId(env)
-  const hubspot = new HubSpotClient({ token: env.H2A_TEST_HUBSPOT_TOKEN })
-  const albi = new AlbiClient({ apiKey: env.H2A_TEST_ALBI_KEY })
-  const result = await readAndReport(hubspot, albi, runId)
-  if (env.H2A_ALLOW_SANDBOX_WRITES !== 'true') {
-    output('Read-only mode complete. No provider writes were attempted. Set both documented sandbox acknowledgements and rerun with an isolated Albi sandbox to enable the guarded write path.')
-    return
-  }
-  const blockers = smokeWriteBlockers(env)
-  if (blockers.length) throw new Error(`Sandbox write stopped before the first POST. ${blockers.join('; ')}.`)
-  await runGuardedWrite(albi, result.account, result.options, env, runId)
+  await runSmoke(env)
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
