@@ -44,7 +44,7 @@ test('scheduler isolates tenants, preserves stable run identity, and retries fai
 
 test('invalid or disabled companies never dispatch; pending conflict resumes drain off schedule', async () => {
   const dispatched = []
-  const { handler } = fixture({ now: '2026-10-05T09:00:00.000Z', companies: [ready('c1', { preflight_checked_at: '2020-01-01T00:00:00Z' }),
+  const { handler } = fixture({ now: '2026-10-05T08:00:00.000Z', companies: [ready('c1', { preflight_checked_at: '2026-10-05T07:00:00.000Z' }),
     ready('disabled', { state: 'disabled' })],
     resumes: [{ id: 'resume-1', company_id: 'c1', status: 'pending', source_object_type: 'contacts', source_id: '10' }],
     dispatch: async payload => { dispatched.push(payload); return true },
@@ -54,6 +54,21 @@ test('invalid or disabled companies never dispatch; pending conflict resumes dra
   assert.equal(dispatched.length, 1)
   assert.equal(dispatched[0].resumeId, 'resume-1')
   assert.equal(dispatched[0].companyId, 'c1')
+})
+
+test('disabled or activation-ineligible companies do not dispatch pending conflict resumes', async () => {
+  for (const [company, activationReady] of [
+    [ready('disabled', { state: 'disabled' }), true],
+    [ready('not-ready'), false],
+  ]) {
+    const dispatched = []
+    const { handler } = fixture({ companies: [company],
+      resumes: [{ id: `resume-${company.company_id}`, company_id: company.company_id, status: 'pending', source_object_type: 'contacts', source_id: '10' }],
+      dispatch: async payload => { dispatched.push(payload); return true },
+      isActivationReady: async () => activationReady })
+    await handler({})
+    assert.deepEqual(dispatched, [])
+  }
 })
 
 test('same stable daily run identity is retried after dispatch failure and claimed once after acceptance', async () => {

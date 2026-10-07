@@ -98,7 +98,7 @@ test('targeted activity read requests exactly the conflict activity identity', a
 })
 
 test('HTTP honors Retry-After then bounded transient retry, without exposing provider text', async () => {
-  const f = transport([{ statusCode: 429, headers: { 'Retry-After': '2' } }, { statusCode: 503 }, hs.account])
+  const f = transport([{ statusCode: 429, headers: { 'Retry-After': '2' } }, { statusCode: 500 }, hs.account])
   const delays = []
   const c = new HubSpotClient({ token: 'token', fetch: f.fetch, sleep: async ms => delays.push(ms), random: () => 0 })
   assert.equal((await c.getAccountInfo()).portalId, '123456')

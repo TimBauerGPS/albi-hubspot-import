@@ -54,10 +54,27 @@ export function createNightlyScheduler(options = {}) {
     const due = isDailyRunDue({ now: instant })
     const companies = await (options.loadCompanies ?? loadCompanies)(supabase)
     const results = []
+    const readiness = new Map()
+    const activationReady = company => {
+      if (company.state !== 'live') return Promise.resolve(false)
+      if (!readiness.has(company.company_id)) {
+        readiness.set(company.company_id, Promise.resolve(
+          (options.isActivationReady ?? ((repo, id, config, time) => defaultActivationReady(repo, id, config, time)))
+            (repository, company.company_id, company, instant),
+        ))
+      }
+      return readiness.get(company.company_id)
+    }
 
     // Conflict resumes are urgent item-scoped work and do not wait for the daily tick.
     for (const company of companies) {
       const companyId = company.company_id
+      try {
+        if (!await activationReady(company)) continue
+      } catch {
+        results.push({ companyId, kind: 'resume', status: 'ineligible' })
+        continue
+      }
       let intents = []
       try { intents = await (options.listPendingResumes ?? ((id, limit) => repository.listPendingConflictResumes(id, limit)))(companyId, RESUME_BATCH_SIZE) }
       catch { results.push({ companyId, kind: 'resume', status: 'list_failed' }); continue }
@@ -84,8 +101,7 @@ export function createNightlyScheduler(options = {}) {
     if (due.due) for (const company of companies.filter(row => row.state === 'live')) {
       const companyId = company.company_id
       try {
-        const ready = await (options.isActivationReady ?? ((repo, id, config, time) => defaultActivationReady(repo, id, config, time)))
-          (repository, companyId, company, instant)
+        const ready = await activationReady(company)
         if (!ready) { results.push({ companyId, kind: 'daily', status: 'ineligible' }); continue }
         const ownerToken = randomUUID()
         const claim = await (options.claimDailyRun ?? ((id, date, owner) => repository.claimDailyRun(id, date, owner, 180)))
