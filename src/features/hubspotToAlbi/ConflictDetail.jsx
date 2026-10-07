@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { buildConflictResolution, proposedFieldComparisons } from './operations.js'
+import { buildConflictResolution, candidateComparisonCopy, proposedFieldComparisons } from './operations.js'
 
 const buttonPrimary = 'rounded-lg bg-brand-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-brand-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50'
 const buttonSecondary = 'rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-700 transition hover:border-brand-300 hover:bg-brand-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 disabled:cursor-not-allowed disabled:opacity-50'
@@ -79,6 +79,7 @@ export default function ConflictDetail({ conflict, isAdmin, busy, resolutionBloc
   const comparisons = useMemo(() => proposedFieldComparisons(conflict, candidate), [candidate, conflict])
   const fields = comparisons.map(item => item.field)
   const effectiveBusy = busy || submitting
+  const comparisonCopy = candidateComparisonCopy(isAdmin)
 
   useEffect(() => {
     setSelectedTarget('')
@@ -204,14 +205,14 @@ export default function ConflictDetail({ conflict, isAdmin, busy, resolutionBloc
           </div>
           {candidates.length > 0 && (
             <div className="sm:w-64">
-              <label className="text-xs font-medium text-gray-700" htmlFor="conflict-target">Compare and link Albi candidate</label>
+              <label className="text-xs font-medium text-gray-700" htmlFor="conflict-target">{comparisonCopy.label}</label>
               <select id="conflict-target" value={selectedTarget} onChange={event => {
                 setSelectedTarget(event.target.value)
                 setManyToOneRequired(false)
                 setApproveManyToOne(false)
               }}
                 className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/20">
-                <option value="">Select a candidate to compare and link</option>
+                <option value="">{comparisonCopy.prompt}</option>
                 {candidates.filter(item => item?.id != null).map((item, index) => <option key={String(item.id)} value={String(item.id)}>{candidateName(item, index)} · ID {item.id}</option>)}
               </select>
             </div>
@@ -233,7 +234,9 @@ export default function ConflictDetail({ conflict, isAdmin, busy, resolutionBloc
 
       <section className="border-t border-gray-100 px-5 py-5 sm:px-6" aria-labelledby="proposed-title">
         <h3 id="proposed-title" className="font-semibold text-gray-900">Proposed changes</h3>
-        <p className="mt-1 text-xs leading-5 text-gray-500">Select each field you want to decide, with HubSpot and the reviewed Albi value kept side by side.</p>
+        <p className="mt-1 text-xs leading-5 text-gray-500">{isAdmin
+          ? 'Select each field you want to decide, with HubSpot and the reviewed Albi value kept side by side.'
+          : 'Review each proposed field with its HubSpot and Albi values kept side by side.'}</p>
         {comparisons.length === 0 ? <p className="mt-3 text-sm text-gray-500">No field-level proposal was recorded.</p> : (
           <div className="mt-3 space-y-3">
             {comparisons.map(item => (

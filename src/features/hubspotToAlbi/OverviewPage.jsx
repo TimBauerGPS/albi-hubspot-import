@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useOutletContext } from 'react-router-dom'
 import { getH2AOverview, runH2ASync } from '../../lib/hubspotToAlbi'
-import { mergeOverviewRefresh, presentRunTotals } from './operations.js'
+import { mergeOverviewRefresh, overviewPollingPauseNotice, presentRunTotals } from './operations.js'
 
 const ACTIVE_STATUSES = new Set(['queued', 'running', 'paused'])
 const MAX_ACTIVE_POLLS = 12
@@ -61,7 +61,7 @@ export default function OverviewPage() {
   const [refreshing, setRefreshing] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
   const [lastUpdatedAt, setLastUpdatedAt] = useState('')
-  const [pollingPaused, setPollingPaused] = useState(false)
+  const [pollingPauseReason, setPollingPauseReason] = useState(null)
   const [retryToken, setRetryToken] = useState(0)
   const requestRevision = useRef(0)
   const pollCount = useRef(0)
@@ -90,7 +90,7 @@ export default function OverviewPage() {
     setNotice('')
     setLoading(true)
     setLastUpdatedAt('')
-    setPollingPaused(false)
+    setPollingPauseReason(null)
     pollCount.current = 0
     if (!companyId) {
       setLoading(false)
@@ -135,12 +135,11 @@ export default function OverviewPage() {
       try {
         const refreshed = await refreshFirstPage(controller.signal)
         if (pollCount.current >= MAX_ACTIVE_POLLS && ACTIVE_STATUSES.has(refreshed?.summary?.activeRun?.status)) {
-          setPollingPaused(true)
+          setPollingPauseReason('limit')
         }
       } catch (cause) {
         if (cause?.name !== 'AbortError' && tenantKeyRef.current === startedFor) {
-          setActionError('Run status could not be refreshed. Use Refresh to try again.')
-          setPollingPaused(true)
+          setPollingPauseReason('request_failed')
         }
       }
     }, POLL_DELAY_MS)
@@ -165,7 +164,7 @@ export default function OverviewPage() {
       if (tenantKeyRef.current !== startedFor) return
       setNotice(result?.status === 'already_running' ? 'A sync is already active for this company.' : 'Live sync queued.')
       pollCount.current = 0
-      setPollingPaused(false)
+      setPollingPauseReason(null)
       await refreshFirstPage(controller.signal)
     } catch (cause) {
       if (cause?.name !== 'AbortError' && tenantKeyRef.current === startedFor) setActionError(cause.message)
@@ -185,7 +184,7 @@ export default function OverviewPage() {
       await refreshFirstPage(controller.signal)
       if (tenantKeyRef.current !== startedFor) return
       pollCount.current = 0
-      setPollingPaused(false)
+      setPollingPauseReason(null)
     } catch (cause) {
       if (cause?.name !== 'AbortError' && tenantKeyRef.current === startedFor) {
         setActionError('The overview could not be refreshed. Try Refresh again.')
@@ -234,6 +233,7 @@ export default function OverviewPage() {
   const recentRun = summary.recentRun
   const lastSuccess = summary.lastSuccessfulRun
   const runDisabled = runningNow || ACTIVE_STATUSES.has(activeRun?.status)
+  const pollingPauseNotice = overviewPollingPauseNotice(pollingPauseReason)
 
   return (
     <div className="space-y-5">
@@ -264,9 +264,10 @@ export default function OverviewPage() {
         {actionError && <p className="text-red-700" role="alert">{actionError}</p>}
       </div>
 
-      {pollingPaused && ACTIVE_STATUSES.has(activeRun?.status) && (
-        <p className="rounded-lg border border-brand-200 bg-brand-50 px-3 py-2 text-sm text-brand-900" role="status">
-          Polling paused after the bounded automatic refresh window. Use Refresh to check this run now.
+      {pollingPauseNotice && ACTIVE_STATUSES.has(activeRun?.status) && (
+        <p className={`rounded-lg border px-3 py-2 text-sm ${pollingPauseNotice.kind === 'error' ? 'border-red-200 bg-red-50 text-red-900' : 'border-brand-200 bg-brand-50 text-brand-900'}`}
+          role={pollingPauseNotice.kind === 'error' ? 'alert' : 'status'}>
+          <strong>Polling paused.</strong> {pollingPauseNotice.message}
         </p>
       )}
 

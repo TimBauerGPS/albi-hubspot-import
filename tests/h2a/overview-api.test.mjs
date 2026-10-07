@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  createOverviewRepository,
   createOverviewHandler,
   getOverview,
   sanitizeOverviewRun,
@@ -52,6 +53,39 @@ function repository(overrides = {}) {
     },
     ...overrides,
   }
+}
+
+function recordingSupabase() {
+  const queries = []
+  class Query {
+    constructor(table) {
+      this.table = table
+      this.operations = []
+      queries.push(this)
+    }
+
+    operation(method, ...args) {
+      this.operations.push({ method, args })
+      return this
+    }
+
+    select(...args) { return this.operation('select', ...args) }
+    eq(...args) { return this.operation('eq', ...args) }
+    not(...args) { return this.operation('not', ...args) }
+    is(...args) { return this.operation('is', ...args) }
+    in(...args) { return this.operation('in', ...args) }
+    order(...args) { return this.operation('order', ...args) }
+    limit(...args) { return this.operation('limit', ...args) }
+    or(...args) { return this.operation('or', ...args) }
+    maybeSingle() { return this.operation('maybeSingle') }
+    then(resolve, reject) {
+      const result = this.table === 'h2a_conflicts'
+        ? { data: null, count: 0, error: null }
+        : { data: this.operations.some(item => item.method === 'maybeSingle') ? null : [], error: null }
+      return Promise.resolve(result).then(resolve, reject)
+    }
+  }
+  return { queries, from: table => new Query(table) }
 }
 
 test('overview is tenant scoped and returns active, recent, last-success, and open-conflict summary', async () => {
@@ -113,6 +147,54 @@ test('overview uses an opaque deterministic effective-time and id cursor', async
     () => getOverview({ repository: repository(), companyId: 'company-1', cursor: { effectiveAt: 'not-a-date', id: second.id } }),
     error => error.statusCode === 400,
   )
+})
+
+test('overview repository scopes both cursor branches and constructs stable descending keyset queries', async () => {
+  const supabase = recordingSupabase()
+  const repo = createOverviewRepository(supabase)
+  const before = { effectiveAt: '2026-10-04T09:00:00.000Z', id: '00000000-0000-4000-8000-000000000002' }
+
+  await repo.listRuns('company-1', { limit: 2, before })
+  const runQueries = supabase.queries.filter(query => query.table === 'h2a_sync_runs')
+  assert.equal(runQueries.length, 2)
+
+  for (const query of runQueries) {
+    assert.deepEqual(query.operations.find(item => item.method === 'eq')?.args, ['company_id', 'company-1'])
+    assert.deepEqual(query.operations.find(item => item.method === 'limit')?.args, [3])
+  }
+  assert.deepEqual(runQueries[0].operations.filter(item => item.method === 'order').map(item => item.args), [
+    ['started_at', { ascending: false }],
+    ['id', { ascending: false }],
+  ])
+  assert.deepEqual(runQueries[0].operations.find(item => item.method === 'not')?.args, ['started_at', 'is', null])
+  assert.deepEqual(runQueries[1].operations.filter(item => item.method === 'order').map(item => item.args), [
+    ['created_at', { ascending: false }],
+    ['id', { ascending: false }],
+  ])
+  assert.deepEqual(runQueries[1].operations.find(item => item.method === 'is')?.args, ['started_at', null])
+  assert.deepEqual(runQueries[0].operations.find(item => item.method === 'or')?.args, [
+    `started_at.lt.${before.effectiveAt},and(started_at.eq.${before.effectiveAt},id.lt.${before.id})`,
+  ])
+  assert.deepEqual(runQueries[1].operations.find(item => item.method === 'or')?.args, [
+    `created_at.lt.${before.effectiveAt},and(created_at.eq.${before.effectiveAt},id.lt.${before.id})`,
+  ])
+})
+
+test('overview summary repository queries retain the authorized company predicate', async () => {
+  const supabase = recordingSupabase()
+  const repo = createOverviewRepository(supabase)
+  await Promise.all([
+    repo.getActiveRun('company-1'),
+    repo.getRecentRun('company-1'),
+    repo.getLastCompletedRun('company-1'),
+    repo.countOpenConflicts('company-1'),
+  ])
+
+  assert.equal(supabase.queries.length, 5)
+  for (const query of supabase.queries) {
+    assert.ok(query.operations.some(item => item.method === 'eq' &&
+      item.args[0] === 'company_id' && item.args[1] === 'company-1'))
+  }
 })
 
 test('member reads and super-admin tenant selection use the authorization choke point', async () => {

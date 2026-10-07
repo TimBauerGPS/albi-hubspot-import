@@ -3,8 +3,10 @@ import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import {
   buildConflictResolution,
+  candidateComparisonCopy,
   conflictEvidenceSummary,
   mergeOverviewRefresh,
+  overviewPollingPauseNotice,
   presentRunTotals,
   proposedFieldComparisons,
   proposedConflictFields,
@@ -61,6 +63,29 @@ test('active overview refresh merges current rows without discarding appended ke
   })
 })
 
+test('overview polling pause notices distinguish bounded completion from request failure', () => {
+  assert.deepEqual(overviewPollingPauseNotice('limit'), {
+    kind: 'info',
+    message: 'The one-minute automatic refresh window ended. Use Refresh to check this run now.',
+  })
+  assert.deepEqual(overviewPollingPauseNotice('request_failed'), {
+    kind: 'error',
+    message: 'The latest automatic status request failed. Use Refresh to retry now.',
+  })
+  assert.equal(overviewPollingPauseNotice(null), null)
+})
+
+test('candidate comparison copy is action-aware for admins and compare-only for members', () => {
+  assert.deepEqual(candidateComparisonCopy(true), {
+    label: 'Compare and link Albi candidate',
+    prompt: 'Select a candidate to compare and link',
+  })
+  assert.deepEqual(candidateComparisonCopy(false), {
+    label: 'Compare Albi candidate',
+    prompt: 'Select a candidate to compare',
+  })
+})
+
 test('proposed field rows keep HubSpot and Albi values adjacent to selectable fields', () => {
   const conflict = {
     source_snapshot: { city: 'Oakland', phone: '555-111-2222' },
@@ -110,6 +135,8 @@ test('overview covers loading, empty, metrics, active status, run-now, and keyse
   assert.match(page, />Refresh</)
   assert.match(page, /Last updated/)
   assert.match(page, /Polling paused/)
+  assert.match(page, /pollingPauseReason/)
+  assert.match(page, /overviewPollingPauseNotice/)
   assert.match(page, /mergeOverviewRefresh/)
   assert.match(page, /isAdmin/)
   assert.match(page, /admin-only/i)
@@ -156,6 +183,7 @@ test('conflict detail is evidence-first, responsive, semantic, and supports all 
   assert.match(detail, /previousFocus/)
   assert.match(detail, /event\.key === 'Tab'/)
   assert.match(detail, /proposedFieldComparisons/)
+  assert.match(detail, /candidateComparisonCopy/)
   assert.match(detail, /Reviewed target/)
   assert.match(detail, /\[overflow-wrap:anywhere\]/)
   assert.match(detail, /aria-busy=/)

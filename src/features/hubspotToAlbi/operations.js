@@ -36,6 +36,28 @@ export function mergeOverviewRefresh(current, refreshed) {
   return { ...refreshed, runs, nextCursor: current.nextCursor ?? null }
 }
 
+export function overviewPollingPauseNotice(reason) {
+  if (reason === 'limit') {
+    return {
+      kind: 'info',
+      message: 'The one-minute automatic refresh window ended. Use Refresh to check this run now.',
+    }
+  }
+  if (reason === 'request_failed') {
+    return {
+      kind: 'error',
+      message: 'The latest automatic status request failed. Use Refresh to retry now.',
+    }
+  }
+  return null
+}
+
+export function candidateComparisonCopy(isAdmin) {
+  return isAdmin
+    ? { label: 'Compare and link Albi candidate', prompt: 'Select a candidate to compare and link' }
+    : { label: 'Compare Albi candidate', prompt: 'Select a candidate to compare' }
+}
+
 export function proposedConflictFields(conflict) {
   const proposed = conflict?.proposed_changes
   if (!proposed || typeof proposed !== 'object' || Array.isArray(proposed)) return []
