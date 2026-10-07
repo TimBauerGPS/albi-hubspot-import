@@ -201,7 +201,7 @@ export default function ConflictDetail({ conflict, isAdmin, busy, resolutionBloc
         <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <h3 id="comparison-title" className="font-semibold text-gray-900">Source and candidate comparison</h3>
-            <p className="mt-1 text-xs text-gray-500">HubSpot is the recommended source, but different nonblank Albi values require your decision.</p>
+            <p className="mt-1 text-xs text-gray-500">{comparisonCopy.description}</p>
           </div>
           {candidates.length > 0 && (
             <div className="sm:w-64">

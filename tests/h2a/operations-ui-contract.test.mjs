@@ -79,10 +79,12 @@ test('candidate comparison copy is action-aware for admins and compare-only for 
   assert.deepEqual(candidateComparisonCopy(true), {
     label: 'Compare and link Albi candidate',
     prompt: 'Select a candidate to compare and link',
+    description: 'HubSpot is the recommended source, but different nonblank Albi values require your decision.',
   })
   assert.deepEqual(candidateComparisonCopy(false), {
     label: 'Compare Albi candidate',
     prompt: 'Select a candidate to compare',
+    description: 'HubSpot is the recommended source. Different nonblank Albi values are shown for admin review.',
   })
 })
 
