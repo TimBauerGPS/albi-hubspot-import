@@ -25,7 +25,8 @@ const dbMapping = mapping => ({
 const toRpc = ({ keyVersion, ...rest }) => ({ ...rest, key_version: keyVersion })
 const fromRpc = ({ key_version, ...rest }) => ({ ...rest, keyVersion: key_version })
 
-function fixture({ role = 'admin', superAdmin = false, config = {}, credentials = true, mappings = [], runs = [], failure = null, concurrentConfig = false } = {}) {
+function fixture({ role = 'admin', superAdmin = false, config = {}, credentials = true, mappings = [], runs = [], failure = null,
+  concurrentConfig = false, rejectArrayEquality = false } = {}) {
   const tables = {
     companies: [{ id: 'company-a', name: 'Alpha' }, { id: 'company-b', name: 'Beta' }],
     company_members: [{ user_id: 'user-1', company_id: 'company-a', role }],
@@ -74,6 +75,9 @@ function fixture({ role = 'admin', superAdmin = false, config = {}, credentials 
       }
       async function execute() {
         if (failure === table && operation !== 'read') return { data: null, error: { message: `${hubspotToken} ${albiApiKey}` } }
+        if (rejectArrayEquality && operation === 'update' && filters.some(([, , value]) => Array.isArray(value))) {
+          return { data: null, error: { message: 'PostgREST cannot compare a PostgreSQL array with this equality filter.' } }
+        }
         if (concurrentConfig && table === 'h2a_company_config' && operation === 'update') tables[table][0].initial_start_locked_at = now
         if (operation === 'read') {
           let rows = tables[table].filter(matches)
@@ -220,6 +224,22 @@ test('super admin GET and PUT use the server-authorized selected company', async
   assert.equal(put.statusCode, 200)
   assert.equal(f.privateCredentials.has('company-b'), true)
   assert.equal(f.tables.h2a_company_config.find(row => row.company_id === 'company-a').preflight_status, 'unchecked')
+})
+
+test('replacing existing credentials does not use PostgREST array equality in the concurrency guard', async () => {
+  const f = fixture({
+    rejectArrayEquality: true,
+    config: { notification_recipients: ['ops@example.com'] },
+  })
+  const result = await f.request('PUT', {
+    action: 'replace_credentials',
+    hubspotToken: 'replacement-hubspot-token',
+    albiApiKey: 'replacement-albi-key',
+  })
+
+  assert.equal(result.statusCode, 200)
+  assert.equal(decryptSecret(fromRpc(f.privateCredentials.get('company-a').hubspot_envelope), keyring), 'replacement-hubspot-token')
+  assert.equal(decryptSecret(fromRpc(f.privateCredentials.get('company-a').albi_envelope), keyring), 'replacement-albi-key')
 })
 
 for (const field of ['hubspotToken', 'albiApiKey']) {

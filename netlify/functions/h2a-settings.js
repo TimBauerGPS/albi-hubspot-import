@@ -169,7 +169,7 @@ export function createSettingsHandler(options = {}) {
         if (storedConfig) {
           request = supabase.from('h2a_company_config').update({ ...patch, updated_at: timestamp }).eq('company_id', companyId)
           // Reject stale transitions; in particular, never overwrite a concurrent start-date lock.
-          for (const field of ['updated_at', 'state', 'preflight_status', 'option_confirmation_status', 'initial_start_locked_at', 'selected_start_date', 'notification_recipients']) {
+          for (const field of ['updated_at', 'state', 'preflight_status', 'option_confirmation_status', 'initial_start_locked_at', 'selected_start_date']) {
             const value = storedConfig[field]
             if (value === null) request = request.is(field, null)
             else if (value !== undefined) request = request.eq(field, value)
