@@ -232,7 +232,7 @@ test('Albi wrapper validates empty and malformed list pagination envelopes', asy
   })
 
   for (const response of [
-    { data: [] },
+    { data: [], pagination: null },
     { data: [], pagination: { page: 2, pageSize: 25, totalPages: 2, total: 26 } },
     { data: [], pagination: { page: 1, pageSize: 100, totalPages: 1, total: 0 } },
     { data: [], pagination: { page: 1, pageSize: 25, totalPages: 2, total: 0 } },
@@ -244,9 +244,28 @@ test('Albi wrapper validates empty and malformed list pagination envelopes', asy
   }
 })
 
+test('Albi wrapper uses bounded short-page pagination when the documented list omits pagination metadata', async () => {
+  const full = transport([accessibleCompany, { data: [al.contacts.data[0]] }])
+  assert.deepEqual(await new AlbiClient({ apiKey: 'key', fetch: full.fetch }).listContacts({ cursor: '2', pageSize: 1 }), {
+    records: [{ id: '101', firstName: 'Test', lastName: 'Contact', email: 'contact@example.invalid', phoneNumber: '555-555-0100',
+      mobileNumber: null, organizationId: '201', contactTypeIds: ['11616'], referralSourceID: '8287', relationshipStatusID: '522' }],
+    cursor: '3',
+  })
+
+  const last = transport([accessibleCompany, { data: [] }])
+  assert.deepEqual(await new AlbiClient({ apiKey: 'key', fetch: last.fetch }).listContacts({ pageSize: 1 }), {
+    records: [], cursor: null,
+  })
+
+  const oversized = transport([accessibleCompany, { data: [al.contacts.data[0], al.contacts.data[0]] }])
+  await assert.rejects(new AlbiClient({ apiKey: 'key', fetch: oversized.fetch }).listContacts({ pageSize: 1 }), {
+    code: 'malformed_response', protocolIssue: 'record_count_mismatch',
+  })
+})
+
 test('Albi wrapper identifies the failed response invariant without retaining provider data', async () => {
   const cases = [
-    [{ data: [] }, 'pagination_missing'],
+    [{ data: [], pagination: null }, 'pagination_missing'],
     [{ data: [], pagination: { page: 2, pageSize: 25, totalPages: 2, total: 26 } }, 'page_mismatch'],
     [{ data: [], pagination: { page: 1, pageSize: 100, totalPages: 1, total: 0 } }, 'page_size_mismatch'],
     [{ data: [{}], pagination: { page: 1, pageSize: 25, totalPages: 1, total: 1 } }, 'record_id_invalid'],

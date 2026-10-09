@@ -87,6 +87,10 @@ function listEnvelope(value, expectedPage, expectedPageSize, operation) {
   if (!isRecord(value)) malformed(operation, 'envelope_invalid')
   if (!Array.isArray(value.data)) malformed(operation, 'data_invalid')
   const pagination = value.pagination
+  if (pagination === undefined) {
+    if (value.data.length > expectedPageSize) malformed(operation, 'record_count_mismatch')
+    return { records: value.data, cursor: value.data.length === expectedPageSize ? String(expectedPage + 1) : null }
+  }
   if (!isRecord(pagination)) malformed(operation, 'pagination_missing')
   if (![pagination.page, pagination.pageSize, pagination.totalPages, pagination.total].every(Number.isSafeInteger)) malformed(operation, 'pagination_invalid')
   if (pagination.page !== expectedPage) malformed(operation, 'page_mismatch')
