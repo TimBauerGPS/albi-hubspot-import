@@ -8,7 +8,7 @@ export const PREFLIGHT_CAPABILITIES = {
     emails_read: 'HubSpot direct CRM email reads', communications_read: 'HubSpot communication reads', notes_read: 'HubSpot note reads',
   },
   albi: {
-    contacts_read: 'Albi contact reads', organizations_read: 'Albi organization reads',
+    company_access: 'Authorized Albi company', contacts_read: 'Albi contact reads', organizations_read: 'Albi organization reads',
     contacts_create: 'Albi contact creation', organizations_create: 'Albi organization creation',
     contacts_update: 'Albi contact updates', organizations_update: 'Albi organization updates',
     contacts_associate_organization: 'Albi contact organization associations', activities_create: 'Albi activity creation',
@@ -20,11 +20,23 @@ export const REQUIRED_OPTION_LABELS = {
   relationshipTypes: 'Albi relationship type options', referralSources: 'Albi referral source options',
   relationshipStatuses: 'Albi relationship status options', activityTypes: 'Albi activity type options',
 }
-const STATUSES = new Set(['unchecked', 'running', 'valid', 'invalid'])
+const STATUSES = new Set(['unchecked', 'running', 'valid', 'invalid', 'informational'])
 const DIAGNOSTIC_REASONS = new Set([
-  'authentication_rejected', 'permission_denied', 'probe_inconclusive',
-  'unexpected_response', 'provider_unavailable', 'not_implemented',
+  'authentication_rejected', 'permission_denied', 'unexpected_response', 'provider_unavailable',
+  'verified_on_first_use', 'handled_through_conflicts',
 ])
+const WRAPPER_SCOPES = new Set([
+  'contacts:list', 'contacts:create', 'organizations:list', 'organizations:create', 'activities:list', 'activities:create',
+  'options.relationship-types:list', 'options.referral-sources:list', 'options.relationship-statuses:list', 'options.activity-types:list',
+])
+const INFORMATIONAL_CAPABILITIES = Object.freeze({
+  contacts_create: { reason: 'verified_on_first_use', requiredScope: 'contacts:create' },
+  organizations_create: { reason: 'verified_on_first_use', requiredScope: 'organizations:create' },
+  activities_create: { reason: 'verified_on_first_use', requiredScope: 'activities:create' },
+  contacts_update: { reason: 'handled_through_conflicts' },
+  organizations_update: { reason: 'handled_through_conflicts' },
+  contacts_associate_organization: { reason: 'handled_through_conflicts' },
+})
 function diagnosticReason(error, authenticated = false) {
   if (error?.category === 'auth') return authenticated ? 'permission_denied' : 'authentication_rejected'
   if (error?.category === 'permission') return 'permission_denied'
@@ -49,11 +61,16 @@ export function safePreflightDetails(value, protectedValues = []) {
     const safe = {}
     if (STATUSES.has(source.status)) safe.status = source.status
     if (typeof source.authenticated === 'boolean') safe.authenticated = source.authenticated
+    if (provider === 'albi' && isRecord(source.company) && /^[A-Za-z0-9_-]{1,64}$/.test(source.company.id ?? '') &&
+      safeOptionText(source.company.name, protectedValues)) {
+      safe.company = { id: source.company.id, name: source.company.name.trim() }
+    }
     if (Array.isArray(source.checks)) {
       safe.checks = source.checks.filter(check => isRecord(check) &&
         Object.hasOwn(PREFLIGHT_CAPABILITIES[provider], check.capability) && STATUSES.has(check.status))
         .map(check => ({ capability: check.capability, status: check.status, label: PREFLIGHT_CAPABILITIES[provider][check.capability],
-          ...(check.status === 'invalid' && DIAGNOSTIC_REASONS.has(check.reason) ? { reason: check.reason } : {}) }))
+          ...(['invalid', 'informational'].includes(check.status) && DIAGNOSTIC_REASONS.has(check.reason) ? { reason: check.reason } : {}),
+          ...(WRAPPER_SCOPES.has(check.requiredScope) ? { requiredScope: check.requiredScope } : {}) }))
     }
     result[provider] = safe
   }
@@ -100,38 +117,45 @@ export async function runPreflight({ hubspot, albi, protectedValues = [] }) {
   async function check(provider, capability, operation, configuredReason) {
     let status = 'invalid'
     let reason = configuredReason
+    let requiredScope
     try {
       if (await operation() !== false) status = 'valid'
       else reason ??= 'unexpected_response'
-    } catch (error) { reason = diagnosticReason(error, provider === 'albi' && details.albi.authenticated) }
+    } catch (error) {
+      reason = diagnosticReason(error, provider === 'albi' && details.albi.authenticated)
+      if (WRAPPER_SCOPES.has(error?.requiredScope)) requiredScope = error.requiredScope
+    }
     const label = PREFLIGHT_CAPABILITIES[provider][capability]
-    details[provider].checks.push({ capability, status, label, ...(status === 'invalid' ? { reason } : {}) })
+    details[provider].checks.push({ capability, status, label, ...(status === 'invalid' ? { reason } : {}), ...(requiredScope ? { requiredScope } : {}) })
     if (status !== 'valid') details.missing.push(label)
   }
   for (const type of ['contacts', 'companies']) await check('hubspot', `${type}_read`, () => hubspot.checkRead(type))
   for (const objectType of HUBSPOT_ACTIVITY_TYPES) await check('hubspot', `${objectType}_read`, () =>
     hubspot.listActivities({ objectType, occurredAtGte: '1970-01-01T00:00:00.000Z', limit: 1 }))
   let capabilities = {}
-  let capabilityDiagnostics = {}
+  let capabilityReportReceived = false
+  let credentialFailureReason
   try {
     const credentials = await albi.verifyCredentials()
     details.albi.authenticated = credentials?.authenticated === true
     capabilities = credentials?.capabilities ?? {}
-    capabilityDiagnostics = credentials?.diagnostics ?? {}
+    capabilityReportReceived = true
+    if (isRecord(credentials?.company)) details.albi.company = credentials.company
   } catch (error) {
-    const reason = diagnosticReason(error)
-    capabilityDiagnostics = Object.fromEntries([
-      'contacts_create', 'organizations_create', 'activities_create',
-    ].map(capability => [capability, reason]))
-    Object.assign(capabilityDiagnostics, {
-      contacts_update: 'not_implemented', organizations_update: 'not_implemented', contacts_associate_organization: 'not_implemented',
-    })
+    capabilities = {}
+    credentialFailureReason = diagnosticReason(error)
   }
+  await check('albi', 'company_access', async () => isRecord(details.albi.company) &&
+    /^[A-Za-z0-9_-]{1,64}$/.test(details.albi.company.id ?? '') && safeOptionText(details.albi.company.name, protectedValues), credentialFailureReason)
   await check('albi', 'contacts_read', () => albi.listContacts({ pageSize: 1 }))
   await check('albi', 'organizations_read', () => albi.listOrganizations({ pageSize: 1 }))
   await check('albi', 'activities_read', () => albi.listActivities({ page: 1 }))
-  for (const capability of ['contacts_create', 'organizations_create', 'contacts_update', 'organizations_update', 'contacts_associate_organization', 'activities_create']) {
-    await check('albi', capability, async () => capabilities[capability] === true, capabilityDiagnostics[capability])
+  for (const [capability, expected] of Object.entries(INFORMATIONAL_CAPABILITIES)) {
+    const matches = !capabilityReportReceived || capabilities[capability] === expected.reason
+    if (matches) details.albi.checks.push({ capability, status: 'informational',
+      label: PREFLIGHT_CAPABILITIES.albi[capability], reason: expected.reason,
+      ...(expected.requiredScope ? { requiredScope: expected.requiredScope } : {}) })
+    else await check('albi', capability, async () => false, 'unexpected_response')
   }
   await check('albi', 'options_read', async () => {
     const loaded = await albi.listOptions()
@@ -139,7 +163,7 @@ export async function runPreflight({ hubspot, albi, protectedValues = [] }) {
     return Object.keys(REQUIRED_OPTION_LABELS).every(group => Array.isArray(loaded[group]) && details.options[group]?.length === loaded[group].length)
   })
   for (const [group, label] of Object.entries(REQUIRED_OPTION_LABELS)) if (!details.options[group]?.length) details.missing.push(label)
-  for (const provider of ['hubspot', 'albi']) details[provider].status = details[provider].authenticated && details[provider].checks.every(check => check.status === 'valid') &&
+  for (const provider of ['hubspot', 'albi']) details[provider].status = details[provider].authenticated && details[provider].checks.every(check => check.status !== 'invalid') &&
     (provider !== 'albi' || Object.keys(REQUIRED_OPTION_LABELS).every(group => details.options[group]?.length)) ? 'valid' : 'invalid'
   return { status: details.hubspot.status === 'valid' && details.albi.status === 'valid' ? 'valid' : 'invalid', portalId, details: safePreflightDetails(details, protectedValues) }
 }

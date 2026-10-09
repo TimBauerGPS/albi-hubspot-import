@@ -1,14 +1,8 @@
-const DIAGNOSTIC_LABELS = Object.freeze({
-  authentication_rejected: 'Authentication rejected',
-  permission_denied: 'Permission denied',
-  probe_inconclusive: 'Write probe inconclusive',
-  unexpected_response: 'Unexpected response',
-  provider_unavailable: 'Provider unavailable',
-  not_implemented: 'Not implemented in this app',
-})
+import { presentAuthorizedCompany, presentPreflightCheck } from './preflightPresentation'
 
 function CheckGroup({ title, group }) {
   const checks = Array.isArray(group?.checks) ? group.checks : []
+  const authorizedCompany = title === 'Albi' ? presentAuthorizedCompany(group?.company) : ''
   return (
     <div>
       <div className="flex items-center justify-between gap-3">
@@ -17,14 +11,18 @@ function CheckGroup({ title, group }) {
           {group?.status === 'valid' ? 'Verified' : group?.status === 'invalid' ? 'Needs attention' : 'Not checked'}
         </span>
       </div>
+      {authorizedCompany && <p className="mt-2 text-xs font-medium text-gray-600">{authorizedCompany}</p>}
       {checks.length ? (
         <ul className="mt-2 space-y-1.5">
-          {checks.map(check => (
-            <li key={`${title}-${check.capability}`} className="flex items-start gap-2 text-sm text-gray-700">
-              <span className={`mt-1 h-2 w-2 shrink-0 rounded-full ${check.status === 'valid' ? 'bg-green-500' : 'bg-amber-500'}`} aria-hidden="true" />
-              <span>{check.label} — {check.status === 'valid' ? 'available' : DIAGNOSTIC_LABELS[check.reason] ?? 'Unavailable'}</span>
-            </li>
-          ))}
+          {checks.map(check => {
+            const presentation = presentPreflightCheck(check)
+            return (
+              <li key={`${title}-${check.capability}`} className={`flex items-start gap-2 text-sm ${presentation.textClass}`}>
+                <span className={`mt-1 h-2 w-2 shrink-0 rounded-full ${presentation.markerClass}`} aria-hidden="true" />
+                <span>{check.label} — {presentation.detail}</span>
+              </li>
+            )
+          })}
         </ul>
       ) : <p className="mt-2 text-sm text-gray-500">Run the check to verify this connection.</p>}
     </div>
@@ -37,7 +35,7 @@ export default function PreflightChecklist({ preflight, credentialsReady, isAdmi
   const hubspotChecks = Array.isArray(details?.hubspot?.checks) ? details.hubspot.checks : []
   const albiChecks = Array.isArray(details?.albi?.checks) ? details.albi.checks : []
   const hubspot = { status: details?.hubspot?.status, checks: hubspotChecks }
-  const albi = { status: details?.albi?.status, checks: albiChecks }
+  const albi = { status: details?.albi?.status, company: details?.albi?.company, checks: albiChecks }
   const canRun = isAdmin && credentialsReady && !busy
 
   return (

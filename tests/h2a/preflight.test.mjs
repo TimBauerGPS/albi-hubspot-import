@@ -10,6 +10,9 @@ const types = ['meetings', 'calls', 'emails', 'communications', 'notes']
 const groups = ['contactTypes', 'organizationTypes', 'relationshipTypes', 'referralSources', 'relationshipStatuses', 'activityTypes']
 const writes = ['contacts_create', 'organizations_create', 'contacts_update', 'organizations_update', 'contacts_associate_organization', 'activities_create']
 const unsupportedWrites = ['contacts_update', 'organizations_update', 'contacts_associate_organization']
+const createScopes = { contacts_create: 'contacts:create', organizations_create: 'organizations:create', activities_create: 'activities:create' }
+const capabilityStates = Object.fromEntries(writes.map(key => [key,
+  unsupportedWrites.includes(key) ? 'handled_through_conflicts' : 'verified_on_first_use']))
 const options = Object.fromEntries(groups.map(group => [group, [{ id: '1', label: 'Example' }]]))
 function clients({ missing, unavailableGroup, onRead = () => {} } = {}) {
   const calls = []
@@ -23,7 +26,8 @@ function clients({ missing, unavailableGroup, onRead = () => {} } = {}) {
       async estimateActivities({ objectType, occurredAtGte }) { calls.push({ objectType, occurredAtGte }); return { count: objectType === 'notes' ? 10000 : 1, capped: objectType === 'notes' } },
     },
     albi: {
-      async verifyCredentials() { check('credentials'); return { authenticated: true, capabilities: Object.fromEntries(writes.map(key => [key, !unsupportedWrites.includes(key) && key !== missing])) } },
+      async verifyCredentials() { check('credentials'); return { authenticated: true,
+        company: { id: '1319', name: 'Allied Restoration Services Inc' }, capabilities: { ...capabilityStates } } },
       async listContacts() { check('albi_contacts_read'); return { records: [], cursor: null } },
       async listOrganizations() { check('organizations_read'); return { records: [], cursor: null } },
       async listActivities() { check('activities_read'); return { records: [], cursor: null } },
@@ -32,14 +36,25 @@ function clients({ missing, unavailableGroup, onRead = () => {} } = {}) {
   }
 }
 
-test('preflight stays blocked while officially unsupported Albi update and association contracts are unavailable', async () => {
-  const unavailable = await runPreflight(clients())
-  assert.equal(unavailable.status, 'invalid')
-  for (const capability of unsupportedWrites) assert.equal(unavailable.details.albi.checks.find(check => check.capability === capability).status, 'invalid')
-  assert.ok(unavailable.details.missing.includes('Albi contact updates'))
-  assert.ok(unavailable.details.missing.includes('Albi organization updates'))
-  assert.ok(unavailable.details.missing.includes('Albi contact organization associations'))
-  for (const missing of [...types.map(type => `${type}_read`), 'contacts_read', 'companies_read', ...writes, 'albi_contacts_read', 'organizations_read', 'activities_read', 'options_read', 'account', 'credentials']) {
+test('preflight allows activation when required reads pass and writes are informational', async () => {
+  const result = await runPreflight(clients())
+  assert.equal(result.status, 'valid')
+  assert.deepEqual(result.details.albi.company, { id: '1319', name: 'Allied Restoration Services Inc' })
+  assert.equal(result.details.albi.checks.find(check => check.capability === 'company_access').status, 'valid')
+  for (const capability of ['contacts_create', 'organizations_create', 'activities_create']) {
+    const check = result.details.albi.checks.find(item => item.capability === capability)
+    assert.equal(check.status, 'informational')
+    assert.equal(check.reason, 'verified_on_first_use')
+    assert.equal(check.requiredScope, createScopes[capability])
+  }
+  for (const capability of unsupportedWrites) {
+    const check = result.details.albi.checks.find(item => item.capability === capability)
+    assert.equal(check.status, 'informational')
+    assert.equal(check.reason, 'handled_through_conflicts')
+  }
+  assert.ok(!result.details.missing.includes('Albi contact updates'))
+
+  for (const missing of [...types.map(type => `${type}_read`), 'contacts_read', 'companies_read', 'albi_contacts_read', 'organizations_read', 'activities_read', 'options_read', 'account', 'credentials']) {
     const result = await runPreflight(clients({ missing }))
     assert.equal(result.status, 'invalid', missing)
     assert.ok(!JSON.stringify(result).includes('private-token'))
@@ -55,34 +70,45 @@ test('missing permissions and individual option groups have fixed readable label
     assert.ok(result.details.missing.includes(label), group)
   }
   const readFailure = await runPreflight(clients({ missing: 'activities_read' }))
-  assert.equal(readFailure.details.albi.checks.find(check => check.capability === 'activities_create').status, 'valid')
+  assert.equal(readFailure.details.albi.checks.find(check => check.capability === 'activities_create').status, 'informational')
   assert.equal(readFailure.details.albi.checks.find(check => check.capability === 'activities_read').status, 'invalid')
 })
 
 test('Albi failures retain only safe actionable diagnostic reasons', async () => {
   const c = clients()
-  c.albi.verifyCredentials = async () => ({
-    authenticated: true,
-    capabilities: { contacts_create: false, organizations_create: false, activities_create: false },
-    diagnostics: {
-      contacts_create: 'probe_inconclusive', organizations_create: 'permission_denied', activities_create: 'provider_unavailable',
-      contacts_update: 'not_implemented', organizations_update: 'not_implemented', contacts_associate_organization: 'not_implemented',
-    },
-  })
   c.albi.listContacts = async () => { throw new ApiError('auth', { operation: 'listContacts', status: 401 }) }
   c.albi.listOrganizations = async () => { throw new ApiError('permission', { operation: 'listOrganizations', status: 403 }) }
   c.albi.listActivities = async () => { throw new ApiError('transient', { operation: 'listActivities', status: 503 }) }
-  c.albi.listOptions = async () => { throw new ApiError('permanent', { operation: 'listOptions', code: 'malformed_response' }) }
+  c.albi.listOptions = async () => { throw new ApiError('permission', { operation: 'listActivityTypes', status: 403,
+    requiredScope: 'options.activity-types:list', message: 'private-token raw provider failure' }) }
 
   const result = await runPreflight(c)
-  assert.deepEqual(Object.fromEntries(result.details.albi.checks.map(check => [check.capability, check.reason])), {
-    contacts_read: 'permission_denied', organizations_read: 'permission_denied', activities_read: 'provider_unavailable',
-    contacts_create: 'probe_inconclusive', organizations_create: 'permission_denied', contacts_update: 'not_implemented',
-    organizations_update: 'not_implemented', contacts_associate_organization: 'not_implemented', activities_create: 'provider_unavailable',
-    options_read: 'unexpected_response',
-  })
+  assert.equal(result.status, 'invalid')
+  const byCapability = Object.fromEntries(result.details.albi.checks.map(check => [check.capability, check]))
+  assert.equal(byCapability.contacts_read.reason, 'permission_denied')
+  assert.equal(byCapability.organizations_read.reason, 'permission_denied')
+  assert.equal(byCapability.activities_read.reason, 'provider_unavailable')
+  assert.equal(byCapability.options_read.reason, 'permission_denied')
+  assert.equal(byCapability.options_read.requiredScope, 'options.activity-types:list')
+  assert.equal(byCapability.contacts_create.reason, 'verified_on_first_use')
+  assert.equal(byCapability.contacts_update.reason, 'handled_through_conflicts')
   assert.equal(JSON.stringify(result).includes('listContacts'), false)
   assert.equal(JSON.stringify(result).includes('503'), false)
+  assert.equal(JSON.stringify(result).includes('private-token'), false)
+})
+
+test('authentication failure does not misreport informational wrapper operations as missing permissions', async () => {
+  const c = clients()
+  c.albi.verifyCredentials = async () => { throw new ApiError('auth', { operation: 'discoverCompany', status: 401 }) }
+  c.albi.listContacts = async () => { throw new ApiError('auth', { operation: 'discoverCompany', status: 401 }) }
+  c.albi.listOrganizations = c.albi.listContacts
+  c.albi.listActivities = c.albi.listContacts
+  c.albi.listOptions = c.albi.listContacts
+  const result = await runPreflight(c)
+  for (const capability of writes) {
+    assert.equal(result.details.albi.checks.find(check => check.capability === capability).status, 'informational')
+    assert.equal(result.details.missing.includes(result.details.albi.checks.find(check => check.capability === capability).label), false)
+  }
 })
 
 const keyring = { activeVersion: 1, keys: { 1: Buffer.alloc(32, 7) } }
@@ -145,17 +171,18 @@ test('preflight endpoint requires admin and authorized company before decrypting
   assert.equal((await fixture().request('preflight', {}, 'bad')).statusCode, 401)
 })
 
-test('preflight persists safe checklist and tenant options but remains invalid while write contracts are unsupported', async () => {
+test('preflight persists safe wrapper company, checklist, and tenant options', async () => {
   const f = fixture()
   const result = await f.request()
   assert.equal(result.statusCode, 200)
-  assert.equal(result.json.preflight.status, 'invalid')
+  assert.equal(result.json.preflight.status, 'valid')
   assert.equal(result.headers['Cache-Control'], 'no-store')
   const saved = f.tables.h2a_company_config[0]
   assert.equal(saved.portal_id, '123')
   assert.equal(saved.preflight_checked_at, '2026-10-02T06:30:00.000Z')
   assert.equal(saved.option_confirmation_status, 'unconfirmed')
   assert.deepEqual(saved.preflight_details.options.contactTypes, [{ id: '1', label: 'Example' }])
+  assert.deepEqual(saved.preflight_details.albi.company, { id: '1319', name: 'Allied Restoration Services Inc' })
   assert.deepEqual(Object.keys(saved.preflight_details).sort(), ['albi', 'hubspot', 'missing', 'options'])
   assert.ok(!JSON.stringify(f.mutations).includes('private-token'))
 })

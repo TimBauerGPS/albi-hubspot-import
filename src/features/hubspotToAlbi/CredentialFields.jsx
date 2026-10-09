@@ -52,7 +52,7 @@ export default function CredentialFields({
           />
         </div>
         <div>
-          <label htmlFor="h2a-albi-key" className="block text-sm font-medium text-gray-800">Albi API key</label>
+          <label htmlFor="h2a-albi-key" className="block text-sm font-medium text-gray-800">Guardian Albi API key</label>
           <p id="h2a-albi-mask" className="mt-1 text-xs text-gray-500">
             Saved value: <code className="font-mono text-gray-700">{albiApiKeyMask || 'Not saved'}</code>
           </p>
@@ -65,7 +65,7 @@ export default function CredentialFields({
             onChange={event => setAlbiApiKey(event.target.value)}
             disabled={!isAdmin || busy}
             aria-describedby="h2a-albi-mask h2a-credential-help"
-            placeholder={albiApiKeyMask ? 'Leave blank to keep current key' : 'Enter Albi API key'}
+            placeholder={albiApiKeyMask ? 'Leave blank to keep current key' : 'Enter Guardian Albi API key'}
             className={inputClass}
           />
         </div>
@@ -73,7 +73,7 @@ export default function CredentialFields({
 
       <div className="mt-4 flex flex-col gap-3 border-l-2 border-amber-400 bg-amber-50 px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between">
         <p id="h2a-credential-help" className="text-xs leading-5 text-amber-900">
-          Replacing either credential disables sync and requires another connection check and mapping confirmation. Saved secrets are never placed in these fields.
+          The Guardian Albi key is company-scoped. Replacing either credential disables sync and requires another connection check and mapping confirmation. Saved secrets are never placed in these fields.
         </p>
         <button
           type="submit"
