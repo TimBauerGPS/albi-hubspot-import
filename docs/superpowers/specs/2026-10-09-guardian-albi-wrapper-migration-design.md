@@ -1,7 +1,7 @@
 # Guardian Albi Wrapper Migration Design
 
 **Date:** 2026-10-09  
-**Status:** Draft for written review
+**Status:** Approved for implementation planning
 
 ## Purpose
 
