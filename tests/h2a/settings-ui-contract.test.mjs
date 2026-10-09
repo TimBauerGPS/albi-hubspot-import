@@ -36,17 +36,15 @@ test('credential fields keep secrets blank, masked-only, and admin gated', async
   assert.doesNotMatch(fields, /value=\{\s*hubspotTokenMask\s*\}|value=\{\s*albiApiKeyMask\s*\}/)
 })
 
-test('preflight checklist renders only safe capabilities and actionable missing labels', async () => {
+test('preflight checklist delegates safe presentation and keeps blockers actionable', async () => {
   const checklist = await source('PreflightChecklist.jsx')
   assert.match(checklist, /details\?\.missing/)
   assert.match(checklist, /details\?\.hubspot\?\.checks/)
   assert.match(checklist, /details\?\.albi\?\.checks/)
   assert.match(checklist, /Run connection check/)
   assert.match(checklist, /role="alert"/)
-  for (const label of ['Authentication rejected', 'Permission denied', 'Write probe inconclusive', 'Unexpected response', 'Provider unavailable', 'Not implemented in this app']) {
-    assert.match(checklist, new RegExp(label))
-  }
-  assert.match(checklist, /check\.reason/)
+  assert.match(checklist, /presentPreflightCheck/)
+  assert.match(checklist, /presentAuthorizedCompany/)
   assert.doesNotMatch(checklist, /JSON\.stringify|\.error\b|raw/i)
 })
 

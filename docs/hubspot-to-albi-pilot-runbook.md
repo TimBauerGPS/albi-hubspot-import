@@ -5,11 +5,11 @@ Status: implementation and local contracts are ready for controlled pilot verifi
 | Gate | Current evidence | Status |
 |---|---|---|
 | Local automation | H2A unit/contracts, static schema contract, fake-adapter smoke orchestration, build, and non-live importer regression scripts | Verified locally |
-| Provider documentation | Official HubSpot 2026.09 rollup and current meeting reference; official Albi public read/create pages, with limits called out below (checked 2026-10-07) | Documentation reviewed; sandbox behavior unverified |
+| Provider documentation | Official HubSpot 2026.09 references and Guardian Albi Wrapper OpenAPI, with limits called out below (checked 2026-10-09) | Documentation reviewed; tenant behavior unverified |
 | Provider runtime | HubSpot/Albi test credentials and explicit isolated-tenant/activity acknowledgements are unset | Blocked |
 | Database/security | No disposable Postgres/Supabase, Docker daemon, Supabase CLI, or `psql`; live grants/RLS/advisors/races not run | Blocked |
 | Authenticated UI | No approved disposable member/admin/super-admin sessions; local dev server cannot bind/write Netlify config in this environment | Blocked |
-| Pilot readiness | Albi update and standalone contact-association contracts remain unsupported; activity marker persistence also needs sandbox confirmation | Blocked; do not activate live sync |
+| Pilot readiness | Wrapper connection check, option confirmation, dry run, Conflict sampling, create scopes, and activity marker persistence still need tenant confirmation | Blocked; do not activate live sync yet |
 
 ## Current provider contracts and limits
 
@@ -25,11 +25,26 @@ Do not treat the CRM communications object as proof that SMS is readable: verify
 
 ### Albi
 
-The adapter's base host is `https://api.albiware.com`; requests use the `ApiKey` header and `/v5/Integrations` root. The public [Get All Activities reference](https://albi.readme.io/reference/get-all-projects-copy-1) documents `GET /v5/Integrations/Activities` with optional `contactId`, `organizationId`, `startDate`, `endDate`, numeric `page` (default 1), `pageSize` (default 25), and an `ApiKey` header. The public [Create a Contact reference](https://albi.readme.io/reference/update-an-equipment-copy) documents `POST /v5/Integrations/Contacts/Create`, requires `firstName`, `lastName`, and `contactTypeIds`, and exposes `organizationId` for an association at contact creation time.
+The adapter uses the Guardian Albi Wrapper at `https://albi.guardianrestoration.com`. It sends the saved company-scoped credential only in `X-API-Key`. `GET /v1/companies` must return exactly one authorized company before the adapter makes any company-scoped request. For Allied, confirm that the response is **Allied Restoration Services Inc**, company ID `1319`. The ID is discovered from the key; administrators do not enter it and browser requests cannot override it. Zero, multiple, or malformed company results fail closed.
 
-The current application adapter also calls these paths: `GET Contacts`, `GET Organizations`, `GET Options/GetRelationshipTypeOptions`, `GetReferralSourceOptions`, `GetRelationshipStatusOptions`, `GetActivityTypeOptions`; and POST `Organizations/Create`, `Activities/Create`. These exact endpoint paths and response envelopes are based on the implemented adapter's contract fixtures. The public docs available during this task did not establish their complete request, pagination, and response contracts. The adapter's activity request uses `typeId`, `date`, `notes`, contact or organization target, and `source: 'hubspot'` / `sourceId`; the public docs reviewed did not establish those field semantics, persisted visibility, or idempotency behavior. The activity list response includes marker candidates in the adapter's shape, but read-after-write marker visibility must be proven in the isolated Albi sandbox.
+The wrapper [OpenAPI document](https://albi.guardianrestoration.com/openapi.json) defines these H2A operations and required scopes:
 
-Albi contact/organization updates and a standalone contact-organization association call are intentionally unsupported by the adapter. No endpoint or payload is guessed. Their absence keeps H2A preflight invalid and therefore blocks live activation. The guarded smoke creates only an organization, a contact associated at contact creation, and an activity; its runtime capability check is limited to those three create endpoints and it requires the marker-readback contract to have been verified and acknowledged. A failed or absent capability check must be recorded as a blocker; do not bypass it. Passing this narrower smoke does not satisfy H2A live-sync preflight.
+| Operation | Scope |
+|---|---|
+| `GET /v1/companies/{companyId}/contacts` | `contacts:list` |
+| `POST /v1/companies/{companyId}/contacts` | `contacts:create` |
+| `GET /v1/companies/{companyId}/organizations` | `organizations:list` |
+| `POST /v1/companies/{companyId}/organizations` | `organizations:create` |
+| `GET /v1/companies/{companyId}/activities` | `activities:list` |
+| `POST /v1/companies/{companyId}/activities` | `activities:create` |
+| `GET /v1/companies/{companyId}/options/relationship-types` | `options.relationship-types:list` |
+| `GET /v1/companies/{companyId}/options/referral-sources` | `options.referral-sources:list` |
+| `GET /v1/companies/{companyId}/options/relationship-statuses` | `options.relationship-statuses:list` |
+| `GET /v1/companies/{companyId}/options/activity-types` | `options.activity-types:list` |
+
+Relationship types supply the contact-type and organization-type choices used in create payloads. Contact creation accepts `organizationId`, so H2A associates a new contact with its resolved organization in that request. The activity request uses `typeId`, `date`, `notes`, a contact or organization target, and the existing HubSpot source marker. Read-after-write marker visibility still must be proven in the isolated pilot tenant.
+
+The connection check is read-only. It validates authentication, exact-one-company access, list operations, and required option lists. Create operations appear as **Verified when first used** because proving their scopes during setup would create real records. Existing-record field changes and reassociations appear as **Handled through Conflicts** because the wrapper exposes no general update or standalone association contract. Neither informational state blocks activation. A wrapper `401` means the key is invalid or revoked. A `403` means the authenticated key lacks the exact scope displayed by the application.
 
 ## Guarded smoke script
 
@@ -48,7 +63,7 @@ The write path requires all of the following:
 - `H2A_SANDBOX_ISOLATION_ACK=I_CONFIRM_THIS_IS_AN_ISOLATED_ALBI_SANDBOX` after the operator has checked the Albi tenant and credentials.
 - `H2A_ALBI_ACTIVITY_CONTRACT_ACK=I_VERIFIED_ALBI_ACTIVITY_MARKER_READBACK` only after the operator has verified `source`/`sourceId` and the exact `Source: HubSpot meeting <id>` marker readback in that sandbox.
 - A stable `H2A_SMOKE_RUN_ID` (4–48 letters, digits, underscores, or hyphens). Reuse the same value for retry verification. Never set provider URL overrides; adapters use fixed official hosts.
-- Albi `OPTIONS` checks that explicitly report `POST` for the three create endpoints used by this smoke, plus nonempty tenant option lists. The script checks only these create capabilities because it performs no updates or standalone association request. This smoke does not clear H2A preflight: contact/organization updates and standalone contact-organization association remain unsupported by the adapter and continue to block live sync activation.
+- A wrapper key with `contacts:create`, `organizations:create`, and `activities:create`, plus the six required list/option scopes used by readback. The connection check cannot prove create scopes without writing, so the smoke's first guarded create is their runtime verification. Existing-record updates and reassociations remain Conflict-review operations and do not block live activation.
 
 When all gates are satisfied, it creates or reuses one uniquely prefixed organization and contact, associating the contact with the organization in the create request, then uses the production `buildAlbiActivity`, `reserveDelivery`, `completeDelivery`, and reconciliation code for one marked activity. It reruns the delivery claim and verifies exactly one matching activity marker. IDs are printed only as four-character suffixes. It never deletes records; operators manually remove the `H2A-SMOKE-<run id>` records after review. Credential-free self-test invokes this same smoke orchestration with fake adapters and checks read-only planning, create-plus-rerun exactly-once behavior, and that every missing write acknowledgement results in zero transport calls. It is a local orchestration test, not provider evidence.
 
@@ -59,7 +74,7 @@ As of this runbook revision, the test credentials and acknowledgements are absen
 1. Use a disposable Supabase project for pre-pilot database checks. Review `supabase/h2a-schema.sql`; do not apply it directly to production as part of this runbook. Use the project's approved SQL migration/deployment workflow and record the resulting revision.
 2. Ensure the project has the existing `companies`, `company_members`, and `super_admins` tables described in `AGENTS.md`. Apply the schema only after validating its prerequisites and SQL in a disposable database.
 3. Generate a fresh 32-byte key, base64 encode it, and configure it only as the Netlify function environment variable `H2A_CREDENTIAL_KEY_V1`. Never add it to Vite-prefixed variables, source control, logs, or browser settings. `H2A_CREDENTIAL_KEY_V2` is the rotation form.
-4. Rotate credentials using this supported manual workflow; no automatic re-encryption job exists. Add `H2A_CREDENTIAL_KEY_V2` while retaining V1, then deploy the current compatible functions. The keyring selects the highest configured version for encryption and retains older configured versions for decryption. For every tenant, have an authorized company admin open H2A Settings and replace both provider credentials (HubSpot token and Albi API key) with their current values. The `replace_credentials` action encrypts both envelopes with the active key, disables H2A, invalidates preflight, and resets mapping confirmation; after each replacement, repeat preflight and confirm option mappings before any reactivation. Track the complete tenant inventory and verify using authorized service-role SQL that every credential row has both version columns at 2, for example:
+4. Rotate credentials using this supported manual workflow; no automatic re-encryption job exists. Add `H2A_CREDENTIAL_KEY_V2` while retaining V1, then deploy the current compatible functions. The keyring selects the highest configured version for encryption and retains older configured versions for decryption. For every tenant, have an authorized company admin open H2A Settings and replace both provider credentials (HubSpot token and Guardian Albi API key) with their current values. The `replace_credentials` action encrypts both envelopes with the active key, disables H2A, invalidates preflight, and resets mapping confirmation; after each replacement, repeat preflight and confirm option mappings before any reactivation. Track the complete tenant inventory and verify using authorized service-role SQL that every credential row has both version columns at 2, for example:
 
    ```sql
    select count(*) as total,
@@ -75,18 +90,19 @@ As of this runbook revision, the test credentials and acknowledgements are absen
 ## Per-company onboarding and activation
 
 1. A super admin confirms the target company; a company admin is restricted to its own company. Confirm `user_app_access` and app membership independently.
-2. Save that company's HubSpot private-app token and Albi API key through H2A Settings. Confirm the returned masks, then verify that credential changes disable H2A and invalidate old preflight state.
-3. Run preflight and inspect every capability. Resolve missing HubSpot read scopes and Albi unsupported capabilities before continuing. Preflight must be `valid`; no direct SQL or UI state edit can substitute.
+2. Save that company's HubSpot private-app token and Guardian Albi API key through H2A Settings. Confirm the returned masks, then verify that credential changes disable H2A and invalidate old preflight state.
+3. Run the connection check. Confirm the authorized company is Allied Restoration Services Inc (`1319`), resolve every missing HubSpot or wrapper read/option scope, and require preflight to be `valid`. **Verified when first used** and **Handled through Conflicts** are informational, not missing permissions. No direct SQL or UI state edit can substitute.
 4. Review the tenant's Albi contact types, organization types, and activity types. Confirm the default mappings and each activity mapping. Confirm any organization-to-contact type inheritance explicitly.
 5. Select the Pacific calendar start date and review the estimated counts. Confirm the date means occurrence time, not HubSpot creation time.
 6. Enter dry run. Review the completed summary, sample conflicts, safe proposed actions, and skipped categories. Dry run must not create Albi records, claim live deliveries, or advance live cursors.
-7. Keep the company disabled if required update/association capabilities or other preflight checks remain unavailable. Only a completed dry run with current valid preflight and confirmed mappings can unlock the Settings activation control.
-8. For the eventual first live pilot, use one explicitly approved company. Monitor the first run and the tenant's configured email recipients. Check `h2a_sync_runs`, item results, deliveries, conflicts, audit events, and cursor boundaries through the authorized application path.
+7. Review a representative sample of Conflicts, including any proposed existing-record field or association changes. Only a completed dry run with current valid preflight and confirmed mappings can unlock the Settings activation control.
+8. For the first live pilot, use one explicitly approved company. Monitor the first contact, organization, and activity create. A `403` identifies the missing create scope; add that scope before retrying unresolved work. Check `h2a_sync_runs`, item results, deliveries, conflicts, audit events, and cursor boundaries through the authorized application path.
 9. Add later companies independently. Repeat credential, preflight, mapping, date, dry-run, and sign-off steps per company; never copy credentials or option IDs between tenants.
 
 ## Manual recovery and disablement
 
 - A failed or paused run is resumed through the existing admin Run now / retry path after reviewing its sanitized status and item outcomes. Do not reset cursors or delete delivery rows to force a retry.
+- For a wrapper `401`, replace the invalid or revoked Guardian key and rerun the connection check and mapping confirmation. For a read/option `403`, add the named scope and rerun the connection check. For a first-use create `403`, add the named create scope and rerun the unresolved work; never advance a checkpoint manually.
 - Delivery states `delivered` and `reconciled` are terminal. A stale `reserved` or due retryable `failed` claim must reconcile against Albi before another create. If Albi activity listing or exact marker matching fails, stop retries and investigate the tenant manually.
 - Conflict resolution is idempotent and schedules a targeted resume. If it reports saved-but-resume-pending, use the authorized retry path; do not create a duplicate mapping manually.
 - Disable the company in Settings before rotating credentials, changing mappings, or investigating. Disabling prevents new scheduled work but does not roll back records already created in Albi.
