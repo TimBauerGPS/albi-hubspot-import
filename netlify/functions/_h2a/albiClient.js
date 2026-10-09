@@ -79,6 +79,17 @@ function optionList(data) {
     return { id: optionId, label: value.name.trim() }
   })
 }
+function listEnvelope(value, expectedPage, expectedPageSize, operation) {
+  const pagination = isRecord(value) ? value.pagination : null
+  if (!isRecord(pagination) || !Array.isArray(value.data) ||
+    ![pagination.page, pagination.pageSize, pagination.totalPages, pagination.total].every(Number.isSafeInteger) ||
+    pagination.page !== expectedPage || pagination.pageSize !== expectedPageSize || pagination.total < 0 ||
+    pagination.totalPages < 1 || pagination.page > pagination.totalPages ||
+    pagination.totalPages !== Math.max(1, Math.ceil(pagination.total / pagination.pageSize)) ||
+    value.data.length !== Math.min(pagination.pageSize,
+      Math.max(0, pagination.total - (pagination.page - 1) * pagination.pageSize))) malformed(operation)
+  return { records: value.data, cursor: pagination.page < pagination.totalPages ? String(pagination.page + 1) : null }
+}
 
 export class AlbiClient {
   #request
@@ -133,8 +144,8 @@ export class AlbiClient {
       !Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) invalid('list')
     const query = new URLSearchParams({ page: String(cursor), pageSize: String(pageSize), ...filters })
     const data = await this.#scopedRequest(`${await this.#path(resource)}?${query}`, { operation }, SCOPES[operation])
-    if (!Array.isArray(data) || data.length > pageSize) malformed(operation)
-    return { records: data.map(value => normalizeRecord(value, fields, operation)), cursor: data.length === pageSize ? String(Number(cursor) + 1) : null }
+    const page = listEnvelope(data, Number(cursor), pageSize, operation)
+    return { records: page.records.map(value => normalizeRecord(value, fields, operation)), cursor: page.cursor }
   }
   async listContacts(args = {}) {
     if (!isRecord(args) || Object.keys(args).some(key => !['cursor', 'pageSize'].includes(key))) invalid('listContacts')

@@ -218,8 +218,30 @@ test('Albi creates validate payloads, preserve source fields, and normalize succ
   assert.equal(f.calls[3].url.pathname, '/v1/companies/1319/activities')
   const activities = await c.listActivities({ contactId: '101', startDate: '2024-06-01', endDate: '2024-06-06', page: 2 })
   assert.equal(activities.records[0].sourceId, '102')
+  assert.equal(activities.cursor, null)
   assert.equal(f.calls[4].url.searchParams.get('page'), '2')
   assert.deepEqual(f.calls.slice(1, 4).map(call => call.method), ['POST', 'POST', 'POST'])
+})
+
+test('Albi wrapper validates empty and malformed list pagination envelopes', async () => {
+  const empty = transport([accessibleCompany, {
+    data: [], pagination: { page: 1, pageSize: 25, totalPages: 1, total: 0 },
+  }])
+  assert.deepEqual(await new AlbiClient({ apiKey: 'key', fetch: empty.fetch }).listContacts(), {
+    records: [], cursor: null,
+  })
+
+  for (const response of [
+    { data: [] },
+    { data: [], pagination: { page: 2, pageSize: 25, totalPages: 2, total: 26 } },
+    { data: [], pagination: { page: 1, pageSize: 100, totalPages: 1, total: 0 } },
+    { data: [], pagination: { page: 1, pageSize: 25, totalPages: 2, total: 0 } },
+  ]) {
+    const malformed = transport([accessibleCompany, response])
+    await assert.rejects(new AlbiClient({ apiKey: 'key', fetch: malformed.fetch }).listContacts(), {
+      code: 'malformed_response',
+    })
+  }
 })
 
 test('Albi never retries ambiguous create responses; application errors and malformed IDs fail', async () => {
