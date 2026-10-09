@@ -25,8 +25,8 @@ const DIAGNOSTIC_REASONS = new Set([
   'authentication_rejected', 'permission_denied', 'probe_inconclusive',
   'unexpected_response', 'provider_unavailable', 'not_implemented',
 ])
-function diagnosticReason(error) {
-  if (error?.category === 'auth') return 'authentication_rejected'
+function diagnosticReason(error, authenticated = false) {
+  if (error?.category === 'auth') return authenticated ? 'permission_denied' : 'authentication_rejected'
   if (error?.category === 'permission') return 'permission_denied'
   if (error?.category === 'transient' || error?.category === 'rate_limit') return 'provider_unavailable'
   if (error?.code === 'unsupported_contract') return 'not_implemented'
@@ -103,7 +103,7 @@ export async function runPreflight({ hubspot, albi, protectedValues = [] }) {
     try {
       if (await operation() !== false) status = 'valid'
       else reason ??= 'unexpected_response'
-    } catch (error) { reason = diagnosticReason(error) }
+    } catch (error) { reason = diagnosticReason(error, provider === 'albi' && details.albi.authenticated) }
     const label = PREFLIGHT_CAPABILITIES[provider][capability]
     details[provider].checks.push({ capability, status, label, ...(status === 'invalid' ? { reason } : {}) })
     if (status !== 'valid') details.missing.push(label)

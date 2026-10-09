@@ -76,7 +76,7 @@ test('Albi failures retain only safe actionable diagnostic reasons', async () =>
 
   const result = await runPreflight(c)
   assert.deepEqual(Object.fromEntries(result.details.albi.checks.map(check => [check.capability, check.reason])), {
-    contacts_read: 'authentication_rejected', organizations_read: 'permission_denied', activities_read: 'provider_unavailable',
+    contacts_read: 'permission_denied', organizations_read: 'permission_denied', activities_read: 'provider_unavailable',
     contacts_create: 'probe_inconclusive', organizations_create: 'permission_denied', contacts_update: 'not_implemented',
     organizations_update: 'not_implemented', contacts_associate_organization: 'not_implemented', activities_create: 'provider_unavailable',
     options_read: 'unexpected_response',

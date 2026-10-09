@@ -193,7 +193,7 @@ test('Albi unverified update/association contracts fail without network calls', 
 })
 
 test('Albi capability checks use read-only OPTIONS and never submit create probes', async () => {
-  const f = transport([al.contacts,
+  const f = transport([[],
     { statusCode: 200, headers: { Allow: 'GET, POST, OPTIONS' } },
     { statusCode: 200, headers: { Allow: 'GET, POST, OPTIONS' } },
     { statusCode: 200, headers: { Allow: 'GET, POST, OPTIONS' } },
@@ -208,13 +208,15 @@ test('Albi capability checks use read-only OPTIONS and never submit create probe
     organizations_update: 'not_implemented',
     contacts_associate_organization: 'not_implemented',
   })
+  assert.equal(f.calls[0].url.pathname, '/v5/Integrations/Projects')
+  assert.equal(f.calls[0].url.searchParams.get('pageSize'), '1')
   assert.deepEqual(f.calls.slice(1).map(call => call.method), ['OPTIONS', 'OPTIONS', 'OPTIONS'])
   assert.ok(f.calls.every(call => call.body === undefined))
 })
 
 test('Albi OPTIONS without an explicit POST allowance leaves create capability unavailable', async () => {
-  const f = transport([al.contacts,
-    { statusCode: 204 }, { statusCode: 200, headers: { Allow: 'GET, OPTIONS' } },
+  const f = transport([[],
+    { statusCode: 401 }, { statusCode: 200, headers: { Allow: 'GET, OPTIONS' } },
     { statusCode: 403 },
   ])
   const result = await new AlbiClient({ apiKey: 'key', fetch: f.fetch }).verifyCredentials()
@@ -226,12 +228,20 @@ test('Albi OPTIONS without an explicit POST allowance leaves create capability u
     contacts_update: 'not_implemented',
     organizations_update: 'not_implemented',
     contacts_associate_organization: 'not_implemented',
-    contacts_create: 'probe_inconclusive',
+    contacts_create: 'permission_denied',
     organizations_create: 'probe_inconclusive',
     activities_create: 'permission_denied',
   })
   assert.ok(f.calls.slice(1).every(call => call.method === 'OPTIONS' && call.body === undefined))
   assert.equal(f.calls.length, 4)
+})
+
+test('Albi rejects authentication only when the read-only Projects baseline rejects the key', async () => {
+  const f = transport([{ statusCode: 401 }])
+  await assert.rejects(new AlbiClient({ apiKey: 'key', fetch: f.fetch }).verifyCredentials(), { category: 'auth', status: 401 })
+  assert.equal(f.calls.length, 1)
+  assert.equal(f.calls[0].url.pathname, '/v5/Integrations/Projects')
+  assert.equal(f.calls[0].method, 'GET')
 })
 
 test('Albi payload and list validation rejects undocumented fields, unsafe IDs, and invalid dates before fetch', async () => {

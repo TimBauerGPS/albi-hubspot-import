@@ -71,7 +71,8 @@ export class AlbiClient {
     this.#request = createHttpClient({ ...http, baseUrl: 'https://api.albiware.com', headers: { ApiKey: apiKey } })
   }
   async verifyCredentials() {
-    await this.listContacts({ pageSize: 1 })
+    const baseline = await this.#request(`${ROOT}/Projects?page=1&pageSize=1`, { operation: 'verifyCredentials' })
+    if (!Array.isArray(baseline) || baseline.length > 1) malformed('verifyCredentials')
     const capabilities = { contacts_update: false, organizations_update: false, contacts_associate_organization: false }
     const diagnostics = {
       contacts_update: 'not_implemented',
@@ -86,8 +87,7 @@ export class AlbiClient {
         if (!capabilities[capability]) diagnostics[capability] = 'probe_inconclusive'
       } catch (error) {
         capabilities[capability] = false
-        diagnostics[capability] = error.category === 'auth' ? 'authentication_rejected'
-          : error.category === 'permission' ? 'permission_denied'
+        diagnostics[capability] = ['auth', 'permission'].includes(error.category) ? 'permission_denied'
             : ['transient', 'rate_limit'].includes(error.category) ? 'provider_unavailable'
               : 'probe_inconclusive'
       }
