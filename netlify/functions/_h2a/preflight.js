@@ -29,6 +29,11 @@ const WRAPPER_SCOPES = new Set([
   'contacts:list', 'contacts:create', 'organizations:list', 'organizations:create', 'activities:list', 'activities:create',
   'options.relationship-types:list', 'options.referral-sources:list', 'options.relationship-statuses:list', 'options.activity-types:list',
 ])
+const PROTOCOL_ISSUES = new Set([
+  'envelope_invalid', 'data_invalid', 'pagination_missing', 'pagination_invalid', 'page_mismatch', 'page_size_mismatch',
+  'total_invalid', 'total_pages_invalid', 'total_pages_mismatch', 'record_count_mismatch', 'record_invalid',
+  'record_id_invalid', 'record_field_invalid',
+])
 const INFORMATIONAL_CAPABILITIES = Object.freeze({
   contacts_create: { reason: 'verified_on_first_use', requiredScope: 'contacts:create' },
   organizations_create: { reason: 'verified_on_first_use', requiredScope: 'organizations:create' },
@@ -70,6 +75,7 @@ export function safePreflightDetails(value, protectedValues = []) {
         Object.hasOwn(PREFLIGHT_CAPABILITIES[provider], check.capability) && STATUSES.has(check.status))
         .map(check => ({ capability: check.capability, status: check.status, label: PREFLIGHT_CAPABILITIES[provider][check.capability],
           ...(['invalid', 'informational'].includes(check.status) && DIAGNOSTIC_REASONS.has(check.reason) ? { reason: check.reason } : {}),
+          ...(check.status === 'invalid' && PROTOCOL_ISSUES.has(check.protocolIssue) ? { protocolIssue: check.protocolIssue } : {}),
           ...(WRAPPER_SCOPES.has(check.requiredScope) ? { requiredScope: check.requiredScope } : {}) }))
     }
     result[provider] = safe
@@ -118,15 +124,18 @@ export async function runPreflight({ hubspot, albi, protectedValues = [] }) {
     let status = 'invalid'
     let reason = configuredReason
     let requiredScope
+    let protocolIssue
     try {
       if (await operation() !== false) status = 'valid'
       else reason ??= 'unexpected_response'
     } catch (error) {
       reason = diagnosticReason(error, provider === 'albi' && details.albi.authenticated)
       if (WRAPPER_SCOPES.has(error?.requiredScope)) requiredScope = error.requiredScope
+      if (PROTOCOL_ISSUES.has(error?.protocolIssue)) protocolIssue = error.protocolIssue
     }
     const label = PREFLIGHT_CAPABILITIES[provider][capability]
-    details[provider].checks.push({ capability, status, label, ...(status === 'invalid' ? { reason } : {}), ...(requiredScope ? { requiredScope } : {}) })
+    details[provider].checks.push({ capability, status, label, ...(status === 'invalid' ? { reason } : {}),
+      ...(protocolIssue ? { protocolIssue } : {}), ...(requiredScope ? { requiredScope } : {}) })
     if (status !== 'valid') details.missing.push(label)
   }
   for (const type of ['contacts', 'companies']) await check('hubspot', `${type}_read`, () => hubspot.checkRead(type))

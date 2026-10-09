@@ -97,6 +97,21 @@ test('Albi failures retain only safe actionable diagnostic reasons', async () =>
   assert.equal(JSON.stringify(result).includes('private-token'), false)
 })
 
+test('Albi malformed responses retain only an allowlisted protocol issue', async () => {
+  const c = clients()
+  c.albi.listContacts = async () => { throw new ApiError('permanent', {
+    operation: 'listContacts', code: 'malformed_response', protocolIssue: 'page_size_mismatch',
+  }) }
+  c.albi.listOrganizations = async () => { throw new ApiError('permanent', {
+    operation: 'listOrganizations', code: 'malformed_response', protocolIssue: 'raw-provider-secret',
+  }) }
+  const result = await runPreflight(c)
+  const byCapability = Object.fromEntries(result.details.albi.checks.map(check => [check.capability, check]))
+  assert.equal(byCapability.contacts_read.protocolIssue, 'page_size_mismatch')
+  assert.equal(Object.hasOwn(byCapability.organizations_read, 'protocolIssue'), false)
+  assert.equal(JSON.stringify(result).includes('raw-provider-secret'), false)
+})
+
 test('authentication failure does not misreport informational wrapper operations as missing permissions', async () => {
   const c = clients()
   c.albi.verifyCredentials = async () => { throw new ApiError('auth', { operation: 'discoverCompany', status: 401 }) }

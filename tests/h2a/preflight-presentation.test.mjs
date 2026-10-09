@@ -21,11 +21,15 @@ test('preflight presentation distinguishes verified, informational, and blocking
   assert.deepEqual(presentPreflightCheck({ status: 'invalid', reason: 'permission_denied', requiredScope: 'options.activity-types:list' }), {
     detail: 'Permission denied · Required scope: options.activity-types:list', markerClass: 'bg-amber-500', textClass: 'text-gray-700',
   })
+  assert.deepEqual(presentPreflightCheck({ status: 'invalid', reason: 'unexpected_response', protocolIssue: 'page_size_mismatch' }), {
+    detail: 'Unexpected response · Diagnostic: pagination page size mismatch', markerClass: 'bg-amber-500', textClass: 'text-gray-700',
+  })
 })
 
 test('preflight presentation omits unknown scope and unsafe company identity', async () => {
   const { presentPreflightCheck, presentAuthorizedCompany } = await presentation()
   assert.equal(presentPreflightCheck({ status: 'invalid', reason: 'permission_denied', requiredScope: 'secret raw scope' }).detail, 'Permission denied')
+  assert.equal(presentPreflightCheck({ status: 'invalid', reason: 'unexpected_response', protocolIssue: 'private response text' }).detail, 'Unexpected response')
   assert.equal(presentAuthorizedCompany({ id: '1319', name: 'Allied Restoration Services Inc' }),
     'Authorized company: Allied Restoration Services Inc (1319)')
   assert.equal(presentAuthorizedCompany({ id: '../1319', name: 'Allied' }), '')

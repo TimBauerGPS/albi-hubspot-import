@@ -244,6 +244,25 @@ test('Albi wrapper validates empty and malformed list pagination envelopes', asy
   }
 })
 
+test('Albi wrapper identifies the failed response invariant without retaining provider data', async () => {
+  const cases = [
+    [{ data: [] }, 'pagination_missing'],
+    [{ data: [], pagination: { page: 2, pageSize: 25, totalPages: 2, total: 26 } }, 'page_mismatch'],
+    [{ data: [], pagination: { page: 1, pageSize: 100, totalPages: 1, total: 0 } }, 'page_size_mismatch'],
+    [{ data: [{}], pagination: { page: 1, pageSize: 25, totalPages: 1, total: 1 } }, 'record_id_invalid'],
+  ]
+  for (const [response, protocolIssue] of cases) {
+    const malformed = transport([accessibleCompany, response])
+    await assert.rejects(new AlbiClient({ apiKey: 'key', fetch: malformed.fetch }).listContacts(), error => {
+      assert.equal(error.code, 'malformed_response')
+      assert.equal(error.protocolIssue, protocolIssue)
+      assert.equal(Object.hasOwn(error, 'response'), false)
+      assert.equal(Object.hasOwn(error, 'body'), false)
+      return true
+    })
+  }
+})
+
 test('Albi never retries ambiguous create responses; application errors and malformed IDs fail', async () => {
   for (const response of [{ statusCode: 503 }, { status: 2, data: 0, message: 'private-key' }, { status: 1 }]) {
     const f = transport([accessibleCompany, response])

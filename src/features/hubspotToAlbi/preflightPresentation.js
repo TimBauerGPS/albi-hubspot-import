@@ -12,12 +12,30 @@ const WRAPPER_SCOPES = new Set([
   'options.relationship-types:list', 'options.referral-sources:list', 'options.relationship-statuses:list', 'options.activity-types:list',
 ])
 
+const PROTOCOL_ISSUE_LABELS = Object.freeze({
+  envelope_invalid: 'response envelope',
+  data_invalid: 'data list',
+  pagination_missing: 'missing pagination',
+  pagination_invalid: 'pagination field types',
+  page_mismatch: 'pagination page mismatch',
+  page_size_mismatch: 'pagination page size mismatch',
+  total_invalid: 'pagination total',
+  total_pages_invalid: 'pagination page range',
+  total_pages_mismatch: 'pagination total pages',
+  record_count_mismatch: 'pagination record count',
+  record_invalid: 'record shape',
+  record_id_invalid: 'record ID',
+  record_field_invalid: 'record field type',
+})
+
 export function presentPreflightCheck(check = {}) {
   const status = ['valid', 'invalid', 'informational'].includes(check.status) ? check.status : 'invalid'
   const label = status === 'valid' ? 'available' : DIAGNOSTIC_LABELS[check.reason] ?? 'Unavailable'
   const scope = WRAPPER_SCOPES.has(check.requiredScope) ? ` · Required scope: ${check.requiredScope}` : ''
+  const diagnostic = status === 'invalid' && PROTOCOL_ISSUE_LABELS[check.protocolIssue]
+    ? ` · Diagnostic: ${PROTOCOL_ISSUE_LABELS[check.protocolIssue]}` : ''
   return {
-    detail: `${label}${scope}`,
+    detail: `${label}${diagnostic}${scope}`,
     markerClass: status === 'valid' ? 'bg-green-500' : status === 'informational' ? 'bg-blue-400' : 'bg-amber-500',
     textClass: 'text-gray-700',
   }

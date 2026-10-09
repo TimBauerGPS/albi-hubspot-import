@@ -53,17 +53,21 @@ const CONTACT_FIELDS = ['firstName', 'lastName', 'email', 'phoneNumber', 'mobile
 const ORGANIZATION_FIELDS = ['name', 'email', 'phoneNumber', 'organizationTypeIds', 'parentOrganizationId', 'address1', 'address2', 'city', 'state', 'zipcode', 'country', 'referralSourceID', 'relationshipStatusID']
 const ACTIVITY_FIELDS = ['contactId', 'organizationId', 'relationshipName', 'date', 'type', 'notes', 'source', 'sourceId']
 function normalizeRecord(value, fields, operation) {
-  if (!isRecord(value)) malformed(operation)
-  const result = { id: responseId(value.id, operation) }
+  if (!isRecord(value)) malformed(operation, 'record_invalid')
+  let recordId
+  try { recordId = responseId(value.id, operation) } catch { malformed(operation, 'record_id_invalid') }
+  const result = { id: recordId }
   for (const field of fields) {
     if (value[field] === undefined) continue
     if (value[field] === null || value[field] === 0) result[field] = null
     else if (/Ids$/.test(field)) {
-      if (!Array.isArray(value[field])) malformed(operation)
-      result[field] = value[field].map(item => responseId(item, operation))
-    } else if (/Id$|ID$/.test(field)) result[field] = responseId(value[field], operation)
+      if (!Array.isArray(value[field])) malformed(operation, 'record_field_invalid')
+      try { result[field] = value[field].map(item => responseId(item, operation)) } catch { malformed(operation, 'record_field_invalid') }
+    } else if (/Id$|ID$/.test(field)) {
+      try { result[field] = responseId(value[field], operation) } catch { malformed(operation, 'record_field_invalid') }
+    }
     else {
-      if (typeof value[field] !== 'string') malformed(operation)
+      if (typeof value[field] !== 'string') malformed(operation, 'record_field_invalid')
       result[field] = value[field]
     }
   }
@@ -80,14 +84,18 @@ function optionList(data) {
   })
 }
 function listEnvelope(value, expectedPage, expectedPageSize, operation) {
-  const pagination = isRecord(value) ? value.pagination : null
-  if (!isRecord(pagination) || !Array.isArray(value.data) ||
-    ![pagination.page, pagination.pageSize, pagination.totalPages, pagination.total].every(Number.isSafeInteger) ||
-    pagination.page !== expectedPage || pagination.pageSize !== expectedPageSize || pagination.total < 0 ||
-    pagination.totalPages < 1 || pagination.page > pagination.totalPages ||
-    pagination.totalPages !== Math.max(1, Math.ceil(pagination.total / pagination.pageSize)) ||
-    value.data.length !== Math.min(pagination.pageSize,
-      Math.max(0, pagination.total - (pagination.page - 1) * pagination.pageSize))) malformed(operation)
+  if (!isRecord(value)) malformed(operation, 'envelope_invalid')
+  if (!Array.isArray(value.data)) malformed(operation, 'data_invalid')
+  const pagination = value.pagination
+  if (!isRecord(pagination)) malformed(operation, 'pagination_missing')
+  if (![pagination.page, pagination.pageSize, pagination.totalPages, pagination.total].every(Number.isSafeInteger)) malformed(operation, 'pagination_invalid')
+  if (pagination.page !== expectedPage) malformed(operation, 'page_mismatch')
+  if (pagination.pageSize !== expectedPageSize) malformed(operation, 'page_size_mismatch')
+  if (pagination.total < 0) malformed(operation, 'total_invalid')
+  if (pagination.totalPages < 1 || pagination.page > pagination.totalPages) malformed(operation, 'total_pages_invalid')
+  if (pagination.totalPages !== Math.max(1, Math.ceil(pagination.total / pagination.pageSize))) malformed(operation, 'total_pages_mismatch')
+  if (value.data.length !== Math.min(pagination.pageSize,
+    Math.max(0, pagination.total - (pagination.page - 1) * pagination.pageSize))) malformed(operation, 'record_count_mismatch')
   return { records: value.data, cursor: pagination.page < pagination.totalPages ? String(pagination.page + 1) : null }
 }
 
@@ -120,7 +128,7 @@ export class AlbiClient {
     try { return await this.#request(path, options) } catch (error) {
       if (!(error instanceof ApiError)) throw error
       throw new ApiError(error.category, { operation: error.operation, status: error.status, code: error.code,
-        retryAfterMs: error.retryAfterMs, requiredScope })
+        retryAfterMs: error.retryAfterMs, requiredScope, protocolIssue: error.protocolIssue })
     }
   }
   async verifyCredentials() {

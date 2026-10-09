@@ -1,14 +1,14 @@
 // Errors intentionally contain no URL, response body, headers, token, or original cause.
 export class ApiError extends Error {
-  constructor(category, { operation = 'request', status = null, code = category, retryAfterMs = null, requiredScope = null } = {}) {
+  constructor(category, { operation = 'request', status = null, code = category, retryAfterMs = null, requiredScope = null, protocolIssue = null } = {}) {
     super(`Provider request failed (${category}).`)
     this.name = 'ApiError'
-    Object.assign(this, { category, operation, status, code, retryAfterMs, requiredScope })
+    Object.assign(this, { category, operation, status, code, retryAfterMs, requiredScope, protocolIssue })
   }
 }
 
 export function invalid(operation) { throw new ApiError('validation', { operation }) }
-export function malformed(operation) { throw new ApiError('permanent', { operation, code: 'malformed_response' }) }
+export function malformed(operation, protocolIssue = null) { throw new ApiError('permanent', { operation, code: 'malformed_response', protocolIssue }) }
 export const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 export function id(value, operation = 'response') {
   if ((typeof value !== 'string' && !Number.isSafeInteger(value)) || !/^[1-9][0-9]*$/.test(String(value))) invalid(operation)
