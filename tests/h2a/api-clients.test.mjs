@@ -8,6 +8,7 @@ import { createHttpClient } from '../../netlify/functions/_h2a/http.js'
 const hs = JSON.parse(readFileSync(new URL('./fixtures/hubspot/responses.json', import.meta.url)))
 const al = JSON.parse(readFileSync(new URL('./fixtures/albi/responses.json', import.meta.url)))
 const contractMetadata = JSON.parse(readFileSync(new URL('./fixtures/metadata.json', import.meta.url)))
+const accessibleCompany = { data: [{ companyId: '1319', name: 'Allied Restoration Services Inc' }] }
 const start = '2026-10-01T07:00:00.000Z'
 const end = '2026-10-02T07:00:00.000Z'
 function transport(responses) {
@@ -143,23 +144,68 @@ test('malformed records, invalid input and repeating pagination fail closed', as
   await assert.rejects(c.getContacts(['../steal']), { category: 'validation' })
 })
 
-test('Albi pages normalize integer IDs and options reuse documented relationship types', async () => {
-  const f = transport([al.contacts, al.organizations, al.relationshipTypes, al.referralSources, al.relationshipStatuses, al.activityTypes])
+test('Albi wrapper discovers exactly one company and scopes every read to it', async () => {
+  const f = transport([accessibleCompany, al.contacts, al.organizations, al.relationshipTypes, al.referralSources, al.relationshipStatuses, al.activityTypes])
   const c = new AlbiClient({ apiKey: 'private-key', fetch: f.fetch })
+  assert.deepEqual(await c.verifyCredentials(), {
+    authenticated: true,
+    company: { id: '1319', name: 'Allied Restoration Services Inc' },
+    capabilities: {
+      contacts_create: 'verified_on_first_use',
+      organizations_create: 'verified_on_first_use',
+      activities_create: 'verified_on_first_use',
+      contacts_update: 'handled_through_conflicts',
+      organizations_update: 'handled_through_conflicts',
+      contacts_associate_organization: 'handled_through_conflicts',
+    },
+  })
   const contacts = await c.listContacts({ cursor: '2', pageSize: 1 })
   assert.equal(contacts.records[0].id, '101')
   assert.equal(contacts.cursor, '3')
-  assert.equal(f.calls[0].url.searchParams.get('page'), '2')
-  assert.equal(f.calls[0].headers.ApiKey, 'private-key')
+  assert.equal(f.calls[0].url.pathname, '/v1/companies')
+  assert.equal(f.calls[0].headers['X-API-Key'], 'private-key')
+  assert.equal(f.calls[0].headers.ApiKey, undefined)
+  assert.equal(f.calls[1].url.searchParams.get('page'), '2')
   assert.equal((await c.listOrganizations({ pageSize: 25 })).cursor, null)
   const options = await c.listOptions()
   assert.deepEqual(options.contactTypes, [{ id: '11616', label: 'Customer' }, { id: '11611', label: 'Referrer' }])
   assert.deepEqual(options.organizationTypes, options.relationshipTypes)
   assert.equal(options.activityTypes[2].label, 'Text Message')
+  assert.ok(f.calls.slice(1).every(call => call.url.pathname.startsWith('/v1/companies/1319/')))
+  assert.equal(f.calls.filter(call => call.url.pathname === '/v1/companies').length, 1)
+})
+
+test('Albi wrapper fails closed for zero, multiple, or malformed authorized companies', async () => {
+  const invalid = [
+    { data: [] },
+    { data: [{ companyId: '1319', name: 'Allied' }, { companyId: '1351', name: 'Sandbox' }] },
+    { data: 'not-an-array' },
+    { data: [{ companyId: '', name: 'Allied' }] },
+    { data: [{ companyId: '../1319', name: 'Allied' }] },
+    { data: [{ companyId: '1319', name: `${'a'.repeat(201)}` }] },
+    { data: [{ companyId: '1319', name: 'Allied\u0000' }] },
+  ]
+  for (const response of invalid) {
+    const f = transport([response])
+    const client = new AlbiClient({ apiKey: 'private-key', fetch: f.fetch })
+    await assert.rejects(client.listContacts(), { category: 'permanent', code: 'company_access_invalid' })
+    assert.equal(f.calls.length, 1)
+  }
+})
+
+test('Albi wrapper reports authentication rejection from company discovery', async () => {
+  const f = transport([{ statusCode: 401, body: { detail: 'private-key raw provider text' } }])
+  await assert.rejects(new AlbiClient({ apiKey: 'private-key', fetch: f.fetch }).verifyCredentials(), error => {
+    assert.equal(error.category, 'auth')
+    assert.equal(error.status, 401)
+    assert.equal(JSON.stringify(error).includes('private-key'), false)
+    return true
+  })
+  assert.equal(f.calls.length, 1)
 })
 
 test('Albi creates validate payloads, preserve source fields, and normalize success IDs', async () => {
-  const f = transport([al.createContact, al.createOrganization, al.createActivity, al.activities])
+  const f = transport([accessibleCompany, al.createContact, al.createOrganization, al.createActivity, al.activities])
   const c = new AlbiClient({ apiKey: 'key', fetch: f.fetch })
   await assert.rejects(c.createContact({ firstName: 'Test', contactTypeIds: [11616] }), { category: 'validation', operation: 'createContact' })
   await assert.rejects(c.createOrganization({ name: 'Example' }), { category: 'validation', operation: 'createOrganization' })
@@ -167,19 +213,21 @@ test('Albi creates validate payloads, preserve source fields, and normalize succ
   assert.deepEqual(await c.createContact({ firstName: 'Test', lastName: 'Contact', contactTypeIds: [11616] }), { id: '102' })
   assert.deepEqual(await c.createOrganization({ name: 'Example', organizationTypeIds: [11616] }), { id: '202' })
   assert.deepEqual(await c.createActivity({ contactId: 101, typeId: 6711, date: start, notes: 'Test', source: 'hubspot', sourceId: 102 }), { id: '402' })
-  assert.equal(f.calls[2].body.sourceId, 102)
-  assert.equal(f.calls[2].body.source, 'hubspot')
-  assert.equal(f.calls[2].url.pathname, '/v5/Integrations/Activities/Create')
+  assert.equal(f.calls[3].body.sourceId, 102)
+  assert.equal(f.calls[3].body.source, 'hubspot')
+  assert.equal(f.calls[3].url.pathname, '/v1/companies/1319/activities')
   const activities = await c.listActivities({ contactId: '101', startDate: '2024-06-01', endDate: '2024-06-06', page: 2 })
   assert.equal(activities.records[0].sourceId, '102')
-  assert.equal(f.calls[3].url.searchParams.get('page'), '2')
+  assert.equal(f.calls[4].url.searchParams.get('page'), '2')
+  assert.deepEqual(f.calls.slice(1, 4).map(call => call.method), ['POST', 'POST', 'POST'])
 })
 
 test('Albi never retries ambiguous create responses; application errors and malformed IDs fail', async () => {
   for (const response of [{ statusCode: 503 }, { status: 2, data: 0, message: 'private-key' }, { status: 1 }]) {
-    const f = transport([response])
+    const f = transport([accessibleCompany, response])
     await assert.rejects(new AlbiClient({ apiKey: 'private-key', fetch: f.fetch }).createContact({ firstName: 'Test', lastName: 'Contact', contactTypeIds: [1] }))
-    assert.equal(f.calls.length, 1)
+    assert.equal(f.calls.length, 2)
+    assert.equal(f.calls.filter(call => call.method === 'POST').length, 1)
   }
 })
 
@@ -190,58 +238,6 @@ test('Albi unverified update/association contracts fail without network calls', 
     await assert.rejects(promise, { category: 'permanent', code: 'unsupported_contract' })
   }
   assert.equal(f.calls.length, 0)
-})
-
-test('Albi capability checks use read-only OPTIONS and never submit create probes', async () => {
-  const f = transport([[],
-    { statusCode: 200, headers: { Allow: 'GET, POST, OPTIONS' } },
-    { statusCode: 200, headers: { Allow: 'GET, POST, OPTIONS' } },
-    { statusCode: 200, headers: { Allow: 'GET, POST, OPTIONS' } },
-  ])
-  const result = await new AlbiClient({ apiKey: 'key', fetch: f.fetch }).verifyCredentials()
-  assert.equal(result.authenticated, true)
-  assert.equal(result.capabilities.contacts_create, true)
-  assert.equal(result.capabilities.activities_create, true)
-  assert.equal(result.capabilities.contacts_update, false)
-  assert.deepEqual(result.diagnostics, {
-    contacts_update: 'not_implemented',
-    organizations_update: 'not_implemented',
-    contacts_associate_organization: 'not_implemented',
-  })
-  assert.equal(f.calls[0].url.pathname, '/v5/Integrations/Projects')
-  assert.equal(f.calls[0].url.searchParams.get('pageSize'), '1')
-  assert.deepEqual(f.calls.slice(1).map(call => call.method), ['OPTIONS', 'OPTIONS', 'OPTIONS'])
-  assert.ok(f.calls.every(call => call.body === undefined))
-})
-
-test('Albi OPTIONS without an explicit POST allowance leaves create capability unavailable', async () => {
-  const f = transport([[],
-    { statusCode: 401 }, { statusCode: 200, headers: { Allow: 'GET, OPTIONS' } },
-    { statusCode: 403 },
-  ])
-  const result = await new AlbiClient({ apiKey: 'key', fetch: f.fetch }).verifyCredentials()
-  assert.equal(result.capabilities.contacts_create, false)
-  assert.equal(result.capabilities.organizations_create, false)
-  assert.equal(result.capabilities.activities_create, false)
-  assert.equal(result.authenticated, true)
-  assert.deepEqual(result.diagnostics, {
-    contacts_update: 'not_implemented',
-    organizations_update: 'not_implemented',
-    contacts_associate_organization: 'not_implemented',
-    contacts_create: 'permission_denied',
-    organizations_create: 'probe_inconclusive',
-    activities_create: 'permission_denied',
-  })
-  assert.ok(f.calls.slice(1).every(call => call.method === 'OPTIONS' && call.body === undefined))
-  assert.equal(f.calls.length, 4)
-})
-
-test('Albi rejects authentication only when the read-only Projects baseline rejects the key', async () => {
-  const f = transport([{ statusCode: 401 }])
-  await assert.rejects(new AlbiClient({ apiKey: 'key', fetch: f.fetch }).verifyCredentials(), { category: 'auth', status: 401 })
-  assert.equal(f.calls.length, 1)
-  assert.equal(f.calls[0].url.pathname, '/v5/Integrations/Projects')
-  assert.equal(f.calls[0].method, 'GET')
 })
 
 test('Albi payload and list validation rejects undocumented fields, unsafe IDs, and invalid dates before fetch', async () => {

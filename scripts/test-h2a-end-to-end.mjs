@@ -33,7 +33,7 @@ export function smokeWriteBlockers(env = process.env, capabilities = null) {
   }
   if (capabilities) {
     for (const name of REQUIRED_WRITE_CAPABILITIES) {
-      if (capabilities[name] !== true) blockers.push(`Albi capability is not verified: ${name}`)
+      if (capabilities[name] !== 'verified_on_first_use') blockers.push(`Albi wrapper create contract is unavailable: ${name}`)
     }
   }
   return blockers
@@ -121,7 +121,8 @@ function makeSelfTestAdapters() {
     },
     async verifyCredentials() {
       calls.push('albi:capabilities:read')
-      return { authenticated: true, capabilities: Object.fromEntries(REQUIRED_WRITE_CAPABILITIES.map(name => [name, true])) }
+      return { authenticated: true, company: { id: '1319', name: 'Allied Restoration Services Inc' },
+        capabilities: Object.fromEntries(REQUIRED_WRITE_CAPABILITIES.map(name => [name, 'verified_on_first_use'])) }
     },
     async createOrganization(payload) {
       calls.push('albi:organizations:create')
@@ -185,11 +186,13 @@ function makeRunId(env) {
 
 async function readAndReport(hubspot, albi, runId, log) {
   const account = await hubspot.getAccountInfo()
+  const verification = await albi.verifyCredentials()
   const options = await albi.listOptions()
   const [contacts, organizations, albiActivities] = await Promise.all([
     albi.listContacts({ pageSize: 1 }), albi.listOrganizations({ pageSize: 1 }), albi.listActivities({ page: 1 }),
   ])
   log(`HubSpot account authenticated (portal ending ${cleanId(account.portalId)}).`)
+  log(`Guardian Albi wrapper authenticated for ${verification.company.name} (company ${verification.company.id}).`)
   log(`Albi options loaded: contacts=${options.contactTypes.length}, organizations=${options.organizationTypes.length}, activities=${options.activityTypes.length}.`)
   log(`Albi read shapes passed: contacts=${contacts.records.length ? 'sample available' : 'empty'}, organizations=${organizations.records.length ? 'sample available' : 'empty'}, activities=${albiActivities.records.length ? 'sample available' : 'empty'}.`)
 

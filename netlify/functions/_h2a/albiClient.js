@@ -1,7 +1,14 @@
 import { ApiError, createHttpClient, id, invalid, isRecord, malformed, responseId } from './http.js'
 
-const ROOT = '/v5/Integrations'
-const CREATE_PATHS = { contacts_create: 'Contacts/Create', organizations_create: 'Organizations/Create', activities_create: 'Activities/Create' }
+const COMPANY_ROOT = '/v1/companies'
+const CAPABILITIES = Object.freeze({
+  contacts_create: 'verified_on_first_use',
+  organizations_create: 'verified_on_first_use',
+  activities_create: 'verified_on_first_use',
+  contacts_update: 'handled_through_conflicts',
+  organizations_update: 'handled_through_conflicts',
+  contacts_associate_organization: 'handled_through_conflicts',
+})
 const text = value => typeof value === 'string' && Boolean(value.trim())
 const ADDRESS_FIELDS = ['address1', 'address2', 'city', 'state', 'zipCode', 'country', 'latitude', 'longitude', 'email', 'phoneNumber', 'referralSourceId', 'relationshipStatusId', 'salespersonId', 'sandbox', 'parentOrganizationId']
 const WRITE_FIELDS = {
@@ -66,39 +73,38 @@ function optionList(data) {
 
 export class AlbiClient {
   #request
+  #companyPromise
   constructor({ apiKey, ...http } = {}) {
     if (!text(apiKey)) invalid('credentials')
-    this.#request = createHttpClient({ ...http, baseUrl: 'https://api.albiware.com', headers: { ApiKey: apiKey } })
+    this.#request = createHttpClient({ ...http, baseUrl: 'https://albi.guardianrestoration.com', headers: { 'X-API-Key': apiKey } })
+  }
+  async #discoverCompany() {
+    const result = await this.#request(COMPANY_ROOT, { operation: 'discoverCompany' })
+    const company = isRecord(result) && Array.isArray(result.data) && result.data.length === 1 ? result.data[0] : null
+    const validId = isRecord(company) && typeof company.companyId === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(company.companyId)
+    const name = isRecord(company) && typeof company.name === 'string' ? company.name.trim() : ''
+    if (!validId || !name || name.length > 200 || /[\u0000-\u001f\u007f]/.test(name)) {
+      throw new ApiError('permanent', { operation: 'discoverCompany', code: 'company_access_invalid' })
+    }
+    return { id: company.companyId, name }
+  }
+  async #company() {
+    this.#companyPromise ??= this.#discoverCompany()
+    return this.#companyPromise
+  }
+  async #path(suffix) {
+    const company = await this.#company()
+    return `${COMPANY_ROOT}/${encodeURIComponent(company.id)}/${suffix}`
   }
   async verifyCredentials() {
-    const baseline = await this.#request(`${ROOT}/Projects?page=1&pageSize=1`, { operation: 'verifyCredentials' })
-    if (!Array.isArray(baseline) || baseline.length > 1) malformed('verifyCredentials')
-    const capabilities = { contacts_update: false, organizations_update: false, contacts_associate_organization: false }
-    const diagnostics = {
-      contacts_update: 'not_implemented',
-      organizations_update: 'not_implemented',
-      contacts_associate_organization: 'not_implemented',
-    }
-    for (const [capability, path] of Object.entries(CREATE_PATHS)) {
-      try {
-        // OPTIONS is read-only. A 2xx alone does not prove POST support; require Allow to name POST.
-        const result = await this.#request(`${ROOT}/${path}`, { method: 'OPTIONS', operation: 'preflightOptions', retrySafe: false, statusOnly: true })
-        capabilities[capability] = result.allow.split(',').some(method => method.trim().toUpperCase() === 'POST')
-        if (!capabilities[capability]) diagnostics[capability] = 'probe_inconclusive'
-      } catch (error) {
-        capabilities[capability] = false
-        diagnostics[capability] = ['auth', 'permission'].includes(error.category) ? 'permission_denied'
-            : ['transient', 'rate_limit'].includes(error.category) ? 'provider_unavailable'
-              : 'probe_inconclusive'
-      }
-    }
-    return { authenticated: true, capabilities, diagnostics }
+    const company = await this.#company()
+    return { authenticated: true, company: { ...company }, capabilities: { ...CAPABILITIES } }
   }
   async listOptions() {
-    const relationshipTypes = optionList(await this.#request(`${ROOT}/Options/GetRelationshipTypeOptions`, { operation: 'listOptions' }))
-    const referralSources = optionList(await this.#request(`${ROOT}/Options/GetReferralSourceOptions`, { operation: 'listOptions' }))
-    const relationshipStatuses = optionList(await this.#request(`${ROOT}/Options/GetRelationshipStatusOptions`, { operation: 'listOptions' }))
-    const activityTypes = optionList(await this.#request(`${ROOT}/Options/GetActivityTypeOptions`, { operation: 'listOptions' }))
+    const relationshipTypes = optionList(await this.#request(await this.#path('options/relationship-types'), { operation: 'listOptions' }))
+    const referralSources = optionList(await this.#request(await this.#path('options/referral-sources'), { operation: 'listOptions' }))
+    const relationshipStatuses = optionList(await this.#request(await this.#path('options/relationship-statuses'), { operation: 'listOptions' }))
+    const activityTypes = optionList(await this.#request(await this.#path('options/activity-types'), { operation: 'listOptions' }))
     // The documented relationship-type IDs are shared by contactTypeIds and organizationTypeIds.
     return { contactTypes: relationshipTypes.map(value => ({ ...value })), organizationTypes: relationshipTypes.map(value => ({ ...value })), relationshipTypes, referralSources, relationshipStatuses, activityTypes }
   }
@@ -106,17 +112,17 @@ export class AlbiClient {
     if (!/^\d+$/.test(String(cursor)) || !Number.isSafeInteger(Number(cursor)) || Number(cursor) < 1 ||
       !Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) invalid('list')
     const query = new URLSearchParams({ page: String(cursor), pageSize: String(pageSize), ...filters })
-    const data = await this.#request(`${ROOT}/${resource}?${query}`, { operation: `list${resource}` })
+    const data = await this.#request(`${await this.#path(resource)}?${query}`, { operation: `list${resource}` })
     if (!Array.isArray(data) || data.length > pageSize) malformed(`list${resource}`)
     return { records: data.map(value => normalizeRecord(value, fields, `list${resource}`)), cursor: data.length === pageSize ? String(Number(cursor) + 1) : null }
   }
   async listContacts(args = {}) {
     if (!isRecord(args) || Object.keys(args).some(key => !['cursor', 'pageSize'].includes(key))) invalid('listContacts')
-    return this.#list('Contacts', CONTACT_FIELDS, args)
+    return this.#list('contacts', CONTACT_FIELDS, args)
   }
   async listOrganizations(args = {}) {
     if (!isRecord(args) || Object.keys(args).some(key => !['cursor', 'pageSize'].includes(key))) invalid('listOrganizations')
-    return this.#list('Organizations', ORGANIZATION_FIELDS, args)
+    return this.#list('organizations', ORGANIZATION_FIELDS, args)
   }
   async listActivities({ contactId, organizationId, startDate, endDate, page = 1 } = {}) {
     const filters = {}
@@ -127,22 +133,22 @@ export class AlbiClient {
       if (!validDate(value)) invalid('listActivities')
       filters[key] = value
     }
-    return this.#list('Activities', ACTIVITY_FIELDS, { cursor: page, ...filters })
+    return this.#list('activities', ACTIVITY_FIELDS, { cursor: page, ...filters })
   }
   async #create(resource, payload, operation) {
     // Non-idempotent writes are single-attempt. Worker delivery reconciliation owns ambiguous outcomes.
-    const data = await this.#request(`${ROOT}/${resource}/Create`, { method: 'POST', body: payload, operation, retrySafe: false })
+    const data = await this.#request(await this.#path(resource), { method: 'POST', body: payload, operation, retrySafe: false })
     if (!isRecord(data)) malformed(operation)
     if (data.status !== 1) throw new ApiError('validation', { operation, code: 'application_error' })
     return { id: responseId(data.data, operation) }
   }
-  async createContact(payload) { return this.#create('Contacts', validatePayload(payload, ['firstName', 'lastName', 'contactTypeIds'], 'createContact'), 'createContact') }
-  async createOrganization(payload) { return this.#create('Organizations', validatePayload(payload, ['name', 'organizationTypeIds'], 'createOrganization'), 'createOrganization') }
+  async createContact(payload) { return this.#create('contacts', validatePayload(payload, ['firstName', 'lastName', 'contactTypeIds'], 'createContact'), 'createContact') }
+  async createOrganization(payload) { return this.#create('organizations', validatePayload(payload, ['name', 'organizationTypeIds'], 'createOrganization'), 'createOrganization') }
   async createActivity(payload) {
     const validated = validatePayload(payload, ['date', 'notes'], 'createActivity')
     numericId(validated.typeId, 'createActivity')
     if ((!validated.contactId && !validated.organizationId) || !validDate(validated.date.slice(0, 10)) || !Number.isFinite(Date.parse(validated.date))) invalid('createActivity')
-    return this.#create('Activities', validated, 'createActivity')
+    return this.#create('activities', validated, 'createActivity')
   }
   async updateContact() { throw new ApiError('permanent', { operation: 'updateContact', code: 'unsupported_contract' }) }
   async updateOrganization() { throw new ApiError('permanent', { operation: 'updateOrganization', code: 'unsupported_contract' }) }
