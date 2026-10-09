@@ -73,18 +73,26 @@ export class AlbiClient {
   async verifyCredentials() {
     await this.listContacts({ pageSize: 1 })
     const capabilities = { contacts_update: false, organizations_update: false, contacts_associate_organization: false }
-    let authenticated = true
+    const diagnostics = {
+      contacts_update: 'not_implemented',
+      organizations_update: 'not_implemented',
+      contacts_associate_organization: 'not_implemented',
+    }
     for (const [capability, path] of Object.entries(CREATE_PATHS)) {
       try {
         // OPTIONS is read-only. A 2xx alone does not prove POST support; require Allow to name POST.
         const result = await this.#request(`${ROOT}/${path}`, { method: 'OPTIONS', operation: 'preflightOptions', retrySafe: false, statusOnly: true })
         capabilities[capability] = result.allow.split(',').some(method => method.trim().toUpperCase() === 'POST')
+        if (!capabilities[capability]) diagnostics[capability] = 'probe_inconclusive'
       } catch (error) {
-        if (error.category === 'auth' || error.category === 'permission') authenticated = false
         capabilities[capability] = false
+        diagnostics[capability] = error.category === 'auth' ? 'authentication_rejected'
+          : error.category === 'permission' ? 'permission_denied'
+            : ['transient', 'rate_limit'].includes(error.category) ? 'provider_unavailable'
+              : 'probe_inconclusive'
       }
     }
-    return { authenticated, capabilities }
+    return { authenticated: true, capabilities, diagnostics }
   }
   async listOptions() {
     const relationshipTypes = optionList(await this.#request(`${ROOT}/Options/GetRelationshipTypeOptions`, { operation: 'listOptions' }))

@@ -17,7 +17,9 @@ function transport(responses) {
     const next = responses.shift()
     assert.ok(next, 'Unexpected extra network request')
     if (next instanceof Error) throw next
-    return new Response(JSON.stringify(next.body ?? next), { status: next.statusCode ?? 200, headers: next.headers })
+    const status = next.statusCode ?? 200
+    const responseBody = [204, 205, 304].includes(status) ? null : JSON.stringify(next.body ?? next)
+    return new Response(responseBody, { status, headers: next.headers })
   }
   return { fetch, calls }
 }
@@ -201,6 +203,11 @@ test('Albi capability checks use read-only OPTIONS and never submit create probe
   assert.equal(result.capabilities.contacts_create, true)
   assert.equal(result.capabilities.activities_create, true)
   assert.equal(result.capabilities.contacts_update, false)
+  assert.deepEqual(result.diagnostics, {
+    contacts_update: 'not_implemented',
+    organizations_update: 'not_implemented',
+    contacts_associate_organization: 'not_implemented',
+  })
   assert.deepEqual(f.calls.slice(1).map(call => call.method), ['OPTIONS', 'OPTIONS', 'OPTIONS'])
   assert.ok(f.calls.every(call => call.body === undefined))
 })
@@ -214,7 +221,15 @@ test('Albi OPTIONS without an explicit POST allowance leaves create capability u
   assert.equal(result.capabilities.contacts_create, false)
   assert.equal(result.capabilities.organizations_create, false)
   assert.equal(result.capabilities.activities_create, false)
-  assert.equal(result.authenticated, false)
+  assert.equal(result.authenticated, true)
+  assert.deepEqual(result.diagnostics, {
+    contacts_update: 'not_implemented',
+    organizations_update: 'not_implemented',
+    contacts_associate_organization: 'not_implemented',
+    contacts_create: 'probe_inconclusive',
+    organizations_create: 'probe_inconclusive',
+    activities_create: 'permission_denied',
+  })
   assert.ok(f.calls.slice(1).every(call => call.method === 'OPTIONS' && call.body === undefined))
   assert.equal(f.calls.length, 4)
 })

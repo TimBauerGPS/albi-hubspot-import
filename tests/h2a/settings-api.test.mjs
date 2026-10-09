@@ -377,13 +377,19 @@ test('preflight read schema drops prefixed envelopes and arbitrary message/error
     ...unsafe, unexpected: [{ nested: unsafe }],
     hubspot: { status: 'valid', authenticated: true, ...unsafe,
       checks: [{ capability: 'contacts_read', status: 'valid', ...unsafe, extra: [unsafe] }, unsafe] },
-    albi: { status: 'invalid', authenticated: true, checks: [{ capability: 'activities_create', status: 'invalid', ...unsafe }] },
+    albi: { status: 'invalid', authenticated: true, checks: [
+      { capability: 'activities_create', status: 'invalid', reason: 'permission_denied', ...unsafe },
+      { capability: 'contacts_create', status: 'invalid', reason: 'raw provider error' },
+    ] },
   }
   const result = await f.request()
   assert.equal(result.statusCode, 200)
   assert.deepEqual(result.json.preflight.details, {
     hubspot: { status: 'valid', authenticated: true, checks: [{ capability: 'contacts_read', status: 'valid', label: 'HubSpot contact reads' }] },
-    albi: { status: 'invalid', authenticated: true, checks: [{ capability: 'activities_create', status: 'invalid', label: 'Albi activity creation' }] },
+    albi: { status: 'invalid', authenticated: true, checks: [
+      { capability: 'activities_create', status: 'invalid', label: 'Albi activity creation', reason: 'permission_denied' },
+      { capability: 'contacts_create', status: 'invalid', label: 'Albi contact creation' },
+    ] },
   })
   for (const value of [hubspotToken, albiApiKey, ...Object.values(stored.hubspot_envelope).filter(value => typeof value === 'string'),
     ...Object.values(stored.albi_envelope).filter(value => typeof value === 'string'), 'PostgREST', 'unrelated-secret-token']) {

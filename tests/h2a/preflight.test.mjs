@@ -4,6 +4,7 @@ import { runPreflight } from '../../netlify/functions/_h2a/preflight.js'
 import { createPreflightHandler } from '../../netlify/functions/h2a-preflight.js'
 import { createEstimateHandler } from '../../netlify/functions/h2a-estimate.js'
 import { encryptSecret } from '../../netlify/functions/_h2a/crypto.js'
+import { ApiError } from '../../netlify/functions/_h2a/http.js'
 
 const types = ['meetings', 'calls', 'emails', 'communications', 'notes']
 const groups = ['contactTypes', 'organizationTypes', 'relationshipTypes', 'referralSources', 'relationshipStatuses', 'activityTypes']
@@ -56,6 +57,32 @@ test('missing permissions and individual option groups have fixed readable label
   const readFailure = await runPreflight(clients({ missing: 'activities_read' }))
   assert.equal(readFailure.details.albi.checks.find(check => check.capability === 'activities_create').status, 'valid')
   assert.equal(readFailure.details.albi.checks.find(check => check.capability === 'activities_read').status, 'invalid')
+})
+
+test('Albi failures retain only safe actionable diagnostic reasons', async () => {
+  const c = clients()
+  c.albi.verifyCredentials = async () => ({
+    authenticated: true,
+    capabilities: { contacts_create: false, organizations_create: false, activities_create: false },
+    diagnostics: {
+      contacts_create: 'probe_inconclusive', organizations_create: 'permission_denied', activities_create: 'provider_unavailable',
+      contacts_update: 'not_implemented', organizations_update: 'not_implemented', contacts_associate_organization: 'not_implemented',
+    },
+  })
+  c.albi.listContacts = async () => { throw new ApiError('auth', { operation: 'listContacts', status: 401 }) }
+  c.albi.listOrganizations = async () => { throw new ApiError('permission', { operation: 'listOrganizations', status: 403 }) }
+  c.albi.listActivities = async () => { throw new ApiError('transient', { operation: 'listActivities', status: 503 }) }
+  c.albi.listOptions = async () => { throw new ApiError('permanent', { operation: 'listOptions', code: 'malformed_response' }) }
+
+  const result = await runPreflight(c)
+  assert.deepEqual(Object.fromEntries(result.details.albi.checks.map(check => [check.capability, check.reason])), {
+    contacts_read: 'authentication_rejected', organizations_read: 'permission_denied', activities_read: 'provider_unavailable',
+    contacts_create: 'probe_inconclusive', organizations_create: 'permission_denied', contacts_update: 'not_implemented',
+    organizations_update: 'not_implemented', contacts_associate_organization: 'not_implemented', activities_create: 'provider_unavailable',
+    options_read: 'unexpected_response',
+  })
+  assert.equal(JSON.stringify(result).includes('listContacts'), false)
+  assert.equal(JSON.stringify(result).includes('503'), false)
 })
 
 const keyring = { activeVersion: 1, keys: { 1: Buffer.alloc(32, 7) } }

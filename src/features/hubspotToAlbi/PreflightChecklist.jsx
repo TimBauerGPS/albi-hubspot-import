@@ -1,3 +1,12 @@
+const DIAGNOSTIC_LABELS = Object.freeze({
+  authentication_rejected: 'Authentication rejected',
+  permission_denied: 'Permission denied',
+  probe_inconclusive: 'Write probe inconclusive',
+  unexpected_response: 'Unexpected response',
+  provider_unavailable: 'Provider unavailable',
+  not_implemented: 'Not implemented in this app',
+})
+
 function CheckGroup({ title, group }) {
   const checks = Array.isArray(group?.checks) ? group.checks : []
   return (
@@ -13,7 +22,7 @@ function CheckGroup({ title, group }) {
           {checks.map(check => (
             <li key={`${title}-${check.capability}`} className="flex items-start gap-2 text-sm text-gray-700">
               <span className={`mt-1 h-2 w-2 shrink-0 rounded-full ${check.status === 'valid' ? 'bg-green-500' : 'bg-amber-500'}`} aria-hidden="true" />
-              <span>{check.label} — {check.status === 'valid' ? 'available' : 'missing'}</span>
+              <span>{check.label} — {check.status === 'valid' ? 'available' : DIAGNOSTIC_LABELS[check.reason] ?? 'Unavailable'}</span>
             </li>
           ))}
         </ul>
