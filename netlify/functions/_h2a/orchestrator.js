@@ -16,7 +16,16 @@ const clockMs = deps => (deps.clockMs ?? Date.now)()
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 const ERROR_CATEGORIES = new Set(['auth', 'permission', 'validation', 'permanent', 'transient', 'rate_limit'])
 const ERROR_CODES = new Set(['pagination_loop', 'malformed_response', 'application_error', 'unsupported_contract', 'timeout', 'network'])
-const safeError = error => `${ERROR_CATEGORIES.has(error?.category) ? error.category : 'error'}:${ERROR_CODES.has(error?.code) ? error.code : 'operation_failed'}`
+const WRAPPER_SCOPES = new Set([
+  'contacts:list', 'contacts:create', 'organizations:list', 'organizations:create', 'activities:list', 'activities:create',
+  'options.relationship-types:list', 'options.referral-sources:list', 'options.relationship-statuses:list', 'options.activity-types:list',
+])
+const safeScope = error => WRAPPER_SCOPES.has(error?.requiredScope) ? { requiredScope: error.requiredScope } : {}
+function safeFailure(error) {
+  return { reason: `${ERROR_CATEGORIES.has(error?.category) ? error.category : 'error'}:${ERROR_CODES.has(error?.code) ? error.code : 'operation_failed'}`,
+    ...safeScope(error) }
+}
+const safeError = error => safeFailure(error).reason
 function logCleanupFailure(deps, phase, error) {
   const logger = deps.logger ?? console
   try { (logger.warn ?? logger.error)?.call(logger, 'H2A cleanup failed', { phase, reason: safeError(error) }) }
@@ -257,7 +266,11 @@ async function processActivity(deps, ctx, activity, deadline) {
   const organizationBySourceId = new Map()
   for (const source of companies) {
     try { organizationBySourceId.set(idOf(source), await resolveOrganization(deps, ctx, source)) }
-    catch (error) { organizationBySourceId.set(idOf(source), { id: idOf(source), action: 'conflict', reason: safeError(error) }) }
+    catch (error) {
+      await recordOnce(deps.repository, companyId, runId, { portal_id: portalId, object_type: 'companies', source_id: idOf(source),
+        outcome: 'failed', sanitized_details: safeFailure(error) })
+      organizationBySourceId.set(idOf(source), { id: idOf(source), action: 'conflict', reason: safeError(error) })
+    }
   }
   const organizations = companyIds.map(id => organizationBySourceId.get(id) ?? { id, action: 'conflict', reason: 'missing_hubspot_company' })
   const contactsResolved = []
@@ -280,7 +293,11 @@ async function processActivity(deps, ctx, activity, deadline) {
         ? organizationBySourceId.get(associatedIds[0]) ?? { id: associatedIds[0], action: 'conflict', reason: 'missing_hubspot_company' }
         : null
       contactsResolved.push(await resolveContact(deps, ctx, source, organization))
-    } catch (error) { contactsResolved.push({ id: idOf(source), action: 'conflict', reason: safeError(error) }) }
+    } catch (error) {
+      await recordOnce(deps.repository, companyId, runId, { portal_id: portalId, object_type: 'contacts', source_id: idOf(source),
+        outcome: 'failed', sanitized_details: safeFailure(error) })
+      contactsResolved.push({ id: idOf(source), action: 'conflict', reason: safeError(error) })
+    }
   }
   const resolved = resolveActivityTargets({ contacts: contactsResolved, organizations })
   for (const targetConflict of resolved.conflicts) await conflict(deps, ctx, { objectType: activity.objectType,
@@ -329,12 +346,13 @@ async function processActivity(deps, ctx, activity, deadline) {
         source_id: sourceId, albi_target_type: target.type, albi_target_id: target.id,
         activity_delivery_id: completed.delivery?.id ?? null,
         outcome: completed.disposition === 'reconciled' ? 'reconciled' : completed.disposition === 'delivered' ? 'delivered' : 'failed',
-        sanitized_details: { reason: completed.disposition } })
+        sanitized_details: { reason: completed.disposition,
+          ...(error && !['delivered', 'reconciled'].includes(completed.disposition) ? safeScope(error) : {}) } })
     } catch (error) {
       allResolved = false
       await recordOnce(deps.repository, companyId, runId, { portal_id: portalId, object_type: activity.objectType,
         source_id: sourceId, albi_target_type: target.type, albi_target_id: target.id,
-        outcome: 'failed', sanitized_details: { reason: safeError(error) } })
+        outcome: 'failed', sanitized_details: safeFailure(error) })
     }
   }
   return allResolved && resolved.targets.length > 0

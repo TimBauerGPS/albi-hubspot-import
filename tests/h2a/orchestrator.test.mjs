@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { runCompanySync } from '../../netlify/functions/_h2a/orchestrator.js'
+import { ApiError } from '../../netlify/functions/_h2a/http.js'
 import { createH2ARepository } from '../../netlify/functions/_h2a/repository.js'
 import { createSettingsHandler } from '../../netlify/functions/h2a-settings.js'
 import { presentDryRunTotals } from '../../src/features/hubspotToAlbi/dryRunTotals.js'
@@ -180,6 +181,46 @@ test('missing name leaves a review conflict and does not create a contact', asyn
   assert.equal(result.status, 'partially_failed')
   assert.ok(deps.events.includes('conflict:missing_required_name'))
   assert.ok(!deps.events.includes('create:contact'))
+  assert.equal(deps.cursors.length, 0)
+})
+
+test('first-use create scope denial fails the item and holds the checkpoint', async () => {
+  const deps = liveFixture({ companyIds: [] })
+  deps.albi.createContact = async () => {
+    throw new ApiError('permission', { operation: 'createContact', status: 403, requiredScope: 'contacts:create' })
+  }
+  const result = await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
+  assert.equal(result.status, 'partially_failed')
+  assert.equal(deps.cursors.length, 0)
+  assert.ok(deps.items.some(item => item.outcome === 'failed' && item.sanitized_details.requiredScope === 'contacts:create'))
+})
+
+test('activity create scope denial keeps delivery disposition and names the required scope', async () => {
+  const deps = liveFixture()
+  deps.albi.createActivity = async () => {
+    throw new ApiError('permission', { operation: 'createActivity', status: 403, requiredScope: 'activities:create' })
+  }
+  const result = await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
+  const failed = deps.items.find(item => item.object_type === 'calls' && item.outcome === 'failed')
+  assert.equal(result.status, 'partially_failed')
+  assert.equal(failed.sanitized_details.reason, 'failed')
+  assert.equal(failed.sanitized_details.requiredScope, 'activities:create')
+  assert.equal(deps.cursors.length, 0)
+})
+
+test('existing contact reassociation becomes a conflict without wrapper mutations', async () => {
+  const deps = liveFixture({
+    albiOrganizations: [{ id: '100', name: 'Company20', phoneNumber: '415-555-0123', organizationTypeIds: ['2'] }],
+    albiContacts: [{ id: '200', firstName: 'First10', lastName: 'Last10', email: '10@example.com', organizationId: '999' }],
+  })
+  let mutationCalls = 0
+  deps.albi.updateContact = async () => { mutationCalls += 1; throw new Error('must not mutate') }
+  deps.albi.updateOrganization = async () => { mutationCalls += 1; throw new Error('must not mutate') }
+  deps.albi.associateContact = async () => { mutationCalls += 1; throw new Error('must not mutate') }
+  const result = await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
+  assert.equal(result.status, 'partially_failed')
+  assert.equal(mutationCalls, 0)
+  assert.ok(deps.events.includes('conflict:albi_contact_association_contract_unverified'))
   assert.equal(deps.cursors.length, 0)
 })
 

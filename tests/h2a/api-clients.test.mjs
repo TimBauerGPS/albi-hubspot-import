@@ -231,6 +231,17 @@ test('Albi never retries ambiguous create responses; application errors and malf
   }
 })
 
+test('Albi wrapper attaches only the known required scope to permission failures', async () => {
+  const f = transport([accessibleCompany, { statusCode: 403, body: { detail: 'private-key raw provider text' } }])
+  const client = new AlbiClient({ apiKey: 'private-key', fetch: f.fetch })
+  await assert.rejects(
+    client.createContact({ firstName: 'A', lastName: 'B', contactTypeIds: [1] }),
+    error => error.category === 'permission' && error.requiredScope === 'contacts:create' &&
+      !JSON.stringify(error).includes('private-key'),
+  )
+  assert.equal(f.calls.length, 2)
+})
+
 test('Albi unverified update/association contracts fail without network calls', async () => {
   const f = transport([])
   const c = new AlbiClient({ apiKey: 'key', fetch: f.fetch })

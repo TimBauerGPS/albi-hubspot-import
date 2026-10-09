@@ -1,9 +1,9 @@
 // Errors intentionally contain no URL, response body, headers, token, or original cause.
 export class ApiError extends Error {
-  constructor(category, { operation = 'request', status = null, code = category, retryAfterMs = null } = {}) {
+  constructor(category, { operation = 'request', status = null, code = category, retryAfterMs = null, requiredScope = null } = {}) {
     super(`Provider request failed (${category}).`)
     this.name = 'ApiError'
-    Object.assign(this, { category, operation, status, code, retryAfterMs })
+    Object.assign(this, { category, operation, status, code, retryAfterMs, requiredScope })
   }
 }
 

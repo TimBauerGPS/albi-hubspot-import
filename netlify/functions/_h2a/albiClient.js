@@ -9,6 +9,15 @@ const CAPABILITIES = Object.freeze({
   organizations_update: 'handled_through_conflicts',
   contacts_associate_organization: 'handled_through_conflicts',
 })
+const SCOPES = Object.freeze({
+  listContacts: 'contacts:list', createContact: 'contacts:create',
+  listOrganizations: 'organizations:list', createOrganization: 'organizations:create',
+  listActivities: 'activities:list', createActivity: 'activities:create',
+  listRelationshipTypes: 'options.relationship-types:list',
+  listReferralSources: 'options.referral-sources:list',
+  listRelationshipStatuses: 'options.relationship-statuses:list',
+  listActivityTypes: 'options.activity-types:list',
+})
 const text = value => typeof value === 'string' && Boolean(value.trim())
 const ADDRESS_FIELDS = ['address1', 'address2', 'city', 'state', 'zipCode', 'country', 'latitude', 'longitude', 'email', 'phoneNumber', 'referralSourceId', 'relationshipStatusId', 'salespersonId', 'sandbox', 'parentOrganizationId']
 const WRITE_FIELDS = {
@@ -96,33 +105,44 @@ export class AlbiClient {
     const company = await this.#company()
     return `${COMPANY_ROOT}/${encodeURIComponent(company.id)}/${suffix}`
   }
+  async #scopedRequest(path, options, requiredScope) {
+    try { return await this.#request(path, options) } catch (error) {
+      if (!(error instanceof ApiError)) throw error
+      throw new ApiError(error.category, { operation: error.operation, status: error.status, code: error.code,
+        retryAfterMs: error.retryAfterMs, requiredScope })
+    }
+  }
   async verifyCredentials() {
     const company = await this.#company()
     return { authenticated: true, company: { ...company }, capabilities: { ...CAPABILITIES } }
   }
   async listOptions() {
-    const relationshipTypes = optionList(await this.#request(await this.#path('options/relationship-types'), { operation: 'listOptions' }))
-    const referralSources = optionList(await this.#request(await this.#path('options/referral-sources'), { operation: 'listOptions' }))
-    const relationshipStatuses = optionList(await this.#request(await this.#path('options/relationship-statuses'), { operation: 'listOptions' }))
-    const activityTypes = optionList(await this.#request(await this.#path('options/activity-types'), { operation: 'listOptions' }))
+    const relationshipTypes = optionList(await this.#scopedRequest(await this.#path('options/relationship-types'),
+      { operation: 'listRelationshipTypes' }, SCOPES.listRelationshipTypes))
+    const referralSources = optionList(await this.#scopedRequest(await this.#path('options/referral-sources'),
+      { operation: 'listReferralSources' }, SCOPES.listReferralSources))
+    const relationshipStatuses = optionList(await this.#scopedRequest(await this.#path('options/relationship-statuses'),
+      { operation: 'listRelationshipStatuses' }, SCOPES.listRelationshipStatuses))
+    const activityTypes = optionList(await this.#scopedRequest(await this.#path('options/activity-types'),
+      { operation: 'listActivityTypes' }, SCOPES.listActivityTypes))
     // The documented relationship-type IDs are shared by contactTypeIds and organizationTypeIds.
     return { contactTypes: relationshipTypes.map(value => ({ ...value })), organizationTypes: relationshipTypes.map(value => ({ ...value })), relationshipTypes, referralSources, relationshipStatuses, activityTypes }
   }
-  async #list(resource, fields, { cursor = '1', pageSize = 25, ...filters } = {}) {
+  async #list(resource, fields, operation, { cursor = '1', pageSize = 25, ...filters } = {}) {
     if (!/^\d+$/.test(String(cursor)) || !Number.isSafeInteger(Number(cursor)) || Number(cursor) < 1 ||
       !Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) invalid('list')
     const query = new URLSearchParams({ page: String(cursor), pageSize: String(pageSize), ...filters })
-    const data = await this.#request(`${await this.#path(resource)}?${query}`, { operation: `list${resource}` })
-    if (!Array.isArray(data) || data.length > pageSize) malformed(`list${resource}`)
-    return { records: data.map(value => normalizeRecord(value, fields, `list${resource}`)), cursor: data.length === pageSize ? String(Number(cursor) + 1) : null }
+    const data = await this.#scopedRequest(`${await this.#path(resource)}?${query}`, { operation }, SCOPES[operation])
+    if (!Array.isArray(data) || data.length > pageSize) malformed(operation)
+    return { records: data.map(value => normalizeRecord(value, fields, operation)), cursor: data.length === pageSize ? String(Number(cursor) + 1) : null }
   }
   async listContacts(args = {}) {
     if (!isRecord(args) || Object.keys(args).some(key => !['cursor', 'pageSize'].includes(key))) invalid('listContacts')
-    return this.#list('contacts', CONTACT_FIELDS, args)
+    return this.#list('contacts', CONTACT_FIELDS, 'listContacts', args)
   }
   async listOrganizations(args = {}) {
     if (!isRecord(args) || Object.keys(args).some(key => !['cursor', 'pageSize'].includes(key))) invalid('listOrganizations')
-    return this.#list('organizations', ORGANIZATION_FIELDS, args)
+    return this.#list('organizations', ORGANIZATION_FIELDS, 'listOrganizations', args)
   }
   async listActivities({ contactId, organizationId, startDate, endDate, page = 1 } = {}) {
     const filters = {}
@@ -133,11 +153,12 @@ export class AlbiClient {
       if (!validDate(value)) invalid('listActivities')
       filters[key] = value
     }
-    return this.#list('activities', ACTIVITY_FIELDS, { cursor: page, ...filters })
+    return this.#list('activities', ACTIVITY_FIELDS, 'listActivities', { cursor: page, ...filters })
   }
   async #create(resource, payload, operation) {
     // Non-idempotent writes are single-attempt. Worker delivery reconciliation owns ambiguous outcomes.
-    const data = await this.#request(await this.#path(resource), { method: 'POST', body: payload, operation, retrySafe: false })
+    const data = await this.#scopedRequest(await this.#path(resource),
+      { method: 'POST', body: payload, operation, retrySafe: false }, SCOPES[operation])
     if (!isRecord(data)) malformed(operation)
     if (data.status !== 1) throw new ApiError('validation', { operation, code: 'application_error' })
     return { id: responseId(data.data, operation) }
