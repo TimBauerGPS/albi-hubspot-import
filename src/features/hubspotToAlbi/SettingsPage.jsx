@@ -11,6 +11,7 @@ import CredentialFields from './CredentialFields'
 import OptionMappingForm from './OptionMappingForm'
 import PreflightChecklist from './PreflightChecklist'
 import { presentDryRunTotals } from './dryRunTotals.js'
+import { dryRunActions } from './dryRunFlow.js'
 
 const ACTIVITY_TYPES = ['meetings', 'calls', 'emails', 'communications', 'notes']
 const EMPTY_OPTIONS = Object.freeze({})
@@ -182,6 +183,7 @@ export default function SettingsPage() {
   const dryRunReady = Boolean(settings?.dryRunReviewReady)
   const sampleDryRunReady = Boolean(settings?.lastCompletedSampleDryRun)
   const live = settings?.config?.state === 'live'
+  const dryRunControls = dryRunActions({ state: settings?.config?.state, live, dryRunReady, sampleDryRunReady })
   const locked = Boolean(settings?.config?.initial_start_locked_at)
   const busy = Boolean(busyAction)
   const disabledReason = 'This page is read-only for members. Ask a company admin to make changes.'
@@ -469,17 +471,17 @@ export default function SettingsPage() {
               <p className="text-sm font-semibold text-gray-900">Dry run</p>
               <p className="mt-1 text-sm leading-6 text-gray-500">Start with a quick sample of up to 10 from each activity type. Dry runs never create Albi records, consume delivery keys, or move live cursors.</p>
               <div className="mt-3 flex flex-wrap gap-2">
-                {settings.config.state !== 'dry_run' && !live && (
+                {dryRunControls.showStartSample && (
                   <button type="button" onClick={() => queueDryRun({ enter: true, dryRunScope: 'sample' })} disabled={!canEnterDryRun} className={buttonPrimary}>
                     {busyAction === 'dry-run' ? 'Queueing…' : 'Run sample dry run'}
                   </button>
                 )}
-                {settings.config.state === 'dry_run' && !dryRunReady && !sampleDryRunReady && (
+                {dryRunControls.showRetrySample && (
                   <button type="button" onClick={() => queueDryRun({ dryRunScope: 'sample' })} disabled={!isAdmin || busy} className={buttonPrimary}>
                     {busyAction === 'dry-run' ? 'Queueing…' : 'Retry sample dry run'}
                   </button>
                 )}
-                {settings.config.state === 'dry_run' && !dryRunReady && sampleDryRunReady && (<>
+                {dryRunControls.showSampleAndFull && (<>
                   <button type="button" onClick={() => queueDryRun({ dryRunScope: 'sample' })} disabled={!isAdmin || busy} className={buttonSecondary}>
                     {busyAction === 'dry-run' ? 'Queueing…' : 'Run sample again'}
                   </button>

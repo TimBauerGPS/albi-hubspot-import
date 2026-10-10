@@ -78,6 +78,7 @@ export class HubSpotClient {
     if (upper && lower >= upper) invalid('listActivities')
     const filters = [{ propertyName: 'hs_timestamp', operator: 'GTE', value: lower }]
     if (upper) filters.push({ propertyName: 'hs_timestamp', operator: 'LT', value: upper })
+    if (objectType === 'emails') filters.push({ propertyName: 'hs_email_direction', operator: 'EQ', value: 'EMAIL' })
     const data = await this.#request(`${ROOT}/${objectType}/search`, { method: 'POST', retrySafe: true, operation: 'listActivities',
       body: { filterGroups: [{ filters }], properties: PROPERTIES[objectType], sorts: ['hs_timestamp'], limit, ...(after ? { after } : {}) } })
     const result = page(data, 'listActivities')

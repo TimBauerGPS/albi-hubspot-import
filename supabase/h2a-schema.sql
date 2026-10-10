@@ -87,6 +87,7 @@ create table public.h2a_run_checkpoints (
   page_after text check (page_after is null or length(page_after) <= 2000),
   cursor_timestamp timestamptz,
   cursor_object_id text,
+  processed_count smallint not null default 0 check (processed_count between 0 and 50),
   completed boolean not null default false,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),

@@ -6,12 +6,12 @@ import { HubSpotClient } from './_h2a/hubspotClient.js'
 import { AlbiClient } from './_h2a/albiClient.js'
 import { notifyRunExceptions } from './_h2a/notifications.js'
 import { pacificStartOfDate } from './_h2a/time.js'
+import { SAMPLE_LIMIT_PER_TYPE } from './_h2a/constants.js'
 
 const allowedModes = new Set(['dry_run', 'live', 'backfill'])
 const allowedTriggers = new Set(['manual', 'scheduled', 'resume', 'conflict_resolution'])
 const ACTIVITY_TYPES = new Set(['meetings', 'calls', 'emails', 'communications', 'notes'])
 const SOURCE_TYPES = new Set(['contacts', 'companies', ...ACTIVITY_TYPES])
-const SAMPLE_LIMIT_PER_TYPE = 10
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const reply = (statusCode, body) => ({ statusCode, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store',
   'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Internal-Cron-Secret',
@@ -97,10 +97,18 @@ export function createRunHandler(options = {}, { background = false } = {}) {
       notificationContext = { auth, companyId }
       const repository = options.repository ?? createH2ARepository(auth.supabase)
       if (!background) {
+        if (body.mode === 'dry_run' && !['sample', 'full'].includes(body.dryRunScope)) {
+          fail(400, 'Choose a sample or full dry run.')
+        }
         const config = await repository.getConfig(companyId)
         if (!config || config.preflight_status !== 'valid' || !config.portal_id ||
           (body.mode === 'dry_run' ? !['dry_run', 'live'].includes(config.state) : config.state !== 'live')) {
           fail(409, 'H2A configuration is not ready for this run.')
+        }
+        if (body.mode === 'dry_run' && body.dryRunScope === 'full' &&
+          (!config.initial_start_locked_at ||
+            !await repository.hasCompletedSampleDryRun(companyId, config.initial_start_locked_at))) {
+          fail(409, 'Complete a sample dry run before running the full dry run.')
         }
         if (await repository.getActiveLease(companyId)) return reply(200, { status: 'already_running', companyId })
         const run = await repository.queueRun(companyId, { mode: body.mode, trigger: 'manual', requestedBy: auth.userId,

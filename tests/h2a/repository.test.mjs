@@ -95,6 +95,34 @@ test('queueRun persists the bounded sample limit only on the durable run row', a
   assert.equal(Object.hasOwn(inserted, 'dryRunScope'), false)
 })
 
+test('completed sample prerequisite is tenant scoped and newer than the locked start-date decision', async () => {
+  const calls = []
+  const query = {
+    select() { return this },
+    eq(key, value) { calls.push(['eq', key, value]); return this },
+    gt(key, value) { calls.push(['gt', key, value]); return this },
+    order(key, options) { calls.push(['order', key, options]); return this },
+    limit(value) { calls.push(['limit', value]); return this },
+    maybeSingle: async () => ({ data: { id: 'sample-run' }, error: null }),
+  }
+  const repository = createH2ARepository({ from: table => {
+    calls.push(['from', table])
+    return query
+  }, rpc: async () => ({ data: true }) })
+
+  assert.equal(await repository.hasCompletedSampleDryRun('company-1', '2026-10-01T00:00:00.000Z'), true)
+  assert.deepEqual(calls, [
+    ['from', 'h2a_sync_runs'],
+    ['eq', 'company_id', 'company-1'],
+    ['eq', 'mode', 'dry_run'],
+    ['eq', 'status', 'completed'],
+    ['eq', 'sample_limit_per_type', 10],
+    ['gt', 'created_at', '2026-10-01T00:00:00.000Z'],
+    ['order', 'created_at', { ascending: false }],
+    ['limit', 1],
+  ])
+})
+
 test('delivery repository passes tenant identity to atomic reserve and transition RPCs', async () => {
   const calls = []
   const repository = createH2ARepository({ from: () => { throw Error('table access is unexpected') },
@@ -252,7 +280,7 @@ test('dry-run checkpoints are tenant and run scoped and persist atomically by ac
   const calls = []
   const stored = { company_id: 'company-1', run_id: 'run-1', object_type: 'calls',
     upper_bound: '2026-10-09T20:00:00.001Z', page_after: 'page-2',
-    cursor_timestamp: '2026-10-02T12:00:00.000Z', cursor_object_id: '50', completed: false }
+    cursor_timestamp: '2026-10-02T12:00:00.000Z', cursor_object_id: '50', processed_count: 4, completed: false }
   const supabase = { rpc: async () => ({ data: true }), from(table) {
     calls.push(['from', table])
     return {
@@ -266,14 +294,15 @@ test('dry-run checkpoints are tenant and run scoped and persist atomically by ac
   const repository = createH2ARepository(supabase)
   assert.deepEqual(await repository.getRunCheckpoint('company-1', 'run-1', 'calls'), {
     timestamp: '2026-10-02T12:00:00.000Z', objectId: '50',
-    upperBound: '2026-10-09T20:00:00.001Z', pageAfter: 'page-2', completed: false,
+    upperBound: '2026-10-09T20:00:00.001Z', pageAfter: 'page-2', processedCount: 4, completed: false,
   })
   await repository.saveRunCheckpoint('company-1', 'run-1', 'calls', {
     upperBound: '2026-10-09T20:00:00.001Z', pageAfter: null,
-    timestamp: '2026-10-02T12:01:00.000Z', objectId: '51', completed: true,
+    timestamp: '2026-10-02T12:01:00.000Z', objectId: '51', processedCount: 5, completed: true,
   })
   assert.ok(calls.some(call => call[0] === 'upsert' && call[1].company_id === 'company-1' &&
     call[1].run_id === 'run-1' && call[1].object_type === 'calls' && call[1].completed === true &&
+    call[1].processed_count === 5 &&
     call[1].upper_bound === '2026-10-09T20:00:00.001Z' && call[1].page_after === null &&
     call[2].onConflict === 'company_id,run_id,object_type'))
   assert.ok(calls.some(call => call[0] === 'eq' && call[1] === 'company_id' && call[2] === 'company-1'))

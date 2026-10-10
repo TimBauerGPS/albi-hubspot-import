@@ -275,7 +275,7 @@ export default function OverviewPage() {
         <section className="flex flex-col gap-3 border-l-4 border-brand-500 bg-brand-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between" aria-labelledby="h2a-active-run">
           <div>
             <h3 id="h2a-active-run" className="text-sm font-semibold text-brand-950">Active sync · {words(activeRun.status)}</h3>
-            <p className="mt-0.5 text-xs text-brand-800">{activeRun.sampleLimitPerType ? 'Sample dry run' : `${words(activeRun.mode)} mode`}, started {dateTime(activeRun.started_at || activeRun.created_at)}. Status refresh is bounded to one minute.</p>
+            <p className="mt-0.5 text-xs text-brand-800">{activeRun.sampleLimitPerType ? 'Sample dry run' : activeRun.mode === 'dry_run' ? 'Full dry run' : `${words(activeRun.mode)} mode`}, started {dateTime(activeRun.started_at || activeRun.created_at)}. Status refresh is bounded to one minute.</p>
           </div>
           <StatusBadge status={activeRun.status} />
         </section>

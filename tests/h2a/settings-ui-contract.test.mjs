@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import { DRY_RUN_REVIEW_TOTAL_FIELDS } from '../../netlify/functions/_h2a/constants.js'
 import { DRY_RUN_TOTAL_LABELS, presentDryRunTotals } from '../../src/features/hubspotToAlbi/dryRunTotals.js'
+import { dryRunActions } from '../../src/features/hubspotToAlbi/dryRunFlow.js'
 
 const root = new URL('../../src/features/hubspotToAlbi/', import.meta.url)
 const source = name => readFile(new URL(name, root), 'utf8')
@@ -168,4 +169,16 @@ test('dry-run controls lead with a ten-per-type sample and gate the full run on 
   assert.match(page, /Run full dry run/)
   assert.match(page, /dryRunScope: 'sample'/)
   assert.match(page, /dryRunScope: 'full'/)
+  assert.deepEqual(dryRunActions({ state: 'ready', live: false, dryRunReady: false, sampleDryRunReady: false }), {
+    showStartSample: true, showRetrySample: false, showSampleAndFull: false,
+  })
+  assert.deepEqual(dryRunActions({ state: 'dry_run', live: false, dryRunReady: false, sampleDryRunReady: false }), {
+    showStartSample: false, showRetrySample: true, showSampleAndFull: false,
+  })
+  assert.deepEqual(dryRunActions({ state: 'dry_run', live: false, dryRunReady: false, sampleDryRunReady: true }), {
+    showStartSample: false, showRetrySample: false, showSampleAndFull: true,
+  })
+  assert.deepEqual(dryRunActions({ state: 'dry_run', live: false, dryRunReady: true, sampleDryRunReady: true }), {
+    showStartSample: false, showRetrySample: false, showSampleAndFull: false,
+  })
 })

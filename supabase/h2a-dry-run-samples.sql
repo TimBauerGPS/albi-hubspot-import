@@ -15,4 +15,18 @@ alter table public.h2a_sync_runs
 alter table public.h2a_sync_runs
   validate constraint h2a_sync_runs_sample_limit_per_type_check;
 
+alter table public.h2a_run_checkpoints
+  add column if not exists processed_count smallint not null default 0;
+
+alter table public.h2a_run_checkpoints
+  drop constraint if exists h2a_run_checkpoints_processed_count_check;
+
+alter table public.h2a_run_checkpoints
+  add constraint h2a_run_checkpoints_processed_count_check
+  check (processed_count between 0 and 50)
+  not valid;
+
+alter table public.h2a_run_checkpoints
+  validate constraint h2a_run_checkpoints_processed_count_check;
+
 commit;

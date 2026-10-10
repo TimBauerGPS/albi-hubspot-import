@@ -420,6 +420,13 @@ export async function runCompanySync(deps, input = {}) {
       const runCheckpoint = mode === 'dry_run' && typeof repo.getRunCheckpoint === 'function'
         ? await repo.getRunCheckpoint(companyId, run.id, objectType) : null
       if (runCheckpoint?.completed) continue
+      let sampleProcessedCount = sampleLimitPerType === null ? 0 : runCheckpoint?.processedCount ?? 0
+      if (sampleLimitPerType !== null && sampleProcessedCount >= sampleLimitPerType) {
+        await repo.saveRunCheckpoint(companyId, run.id, objectType, { upperBound: runCheckpoint?.upperBound ??
+          new Date((deps.now?.() ?? new Date()).getTime() + 1).toISOString(), pageAfter: null,
+        processedCount: sampleProcessedCount, completed: true })
+        continue
+      }
       const seeds = mode === 'backfill' ? await repo.listBackfillWindows(companyId, objectType) : [null]
       const windows = seeds.flatMap(seed => {
         if (!seed) return [null]
@@ -443,6 +450,7 @@ export async function runCompanySync(deps, input = {}) {
         const seen = new Set()
         for (let pageNo = 0; pageNo < 1000; pageNo += 1) {
           if (clockMs(deps) >= deadline - 5000) { continuation = true; break }
+          const sampleRemaining = sampleLimitPerType === null ? null : sampleLimitPerType - sampleProcessedCount
           const page = await retryRead(deps, () => deps.hubspot.listActivities({ objectType,
             occurredAtGte: mode === 'dry_run' ? lowerBound : readStartWithOverlap(checkpoint, lowerBound), occurredAtLt: upperBound,
             ...(after ? { after } : {}), limit: sampleLimitPerType ?? 100 }), deadline)
@@ -460,6 +468,7 @@ export async function runCompanySync(deps, input = {}) {
             if (checkpoint && !blocked && (mode === 'dry_run'
               ? compareBoundary(itemBoundary, checkpoint) <= 0
               : Date.parse(activity.occurredAt) <= Date.parse(checkpoint.timestamp) && itemBoundary.objectId === checkpoint.objectId)) continue
+            if (sampleRemaining !== null && outcomes.length >= sampleRemaining) break
             ctx.activity = activity
             try {
               const resolved = await processActivity(deps, ctx, activity, deadline)
@@ -473,15 +482,19 @@ export async function runCompanySync(deps, input = {}) {
             }
           }
           if (mode === 'dry_run') {
+            if (sampleLimitPerType !== null) sampleProcessedCount += outcomes.length
             const next = advanceCheckpoint({ current: checkpoint, items: outcomes })
             if (continuation) {
-              await repo.saveRunCheckpoint(companyId, run.id, objectType, { upperBound, pageAfter: after, ...(next ?? {}), completed: false })
+              await repo.saveRunCheckpoint(companyId, run.id, objectType, { upperBound, pageAfter: after,
+                processedCount: sampleProcessedCount, ...(next ?? {}), completed: false })
               checkpoint = next
             } else if (page.after && sampleLimitPerType === null) {
-              await repo.saveRunCheckpoint(companyId, run.id, objectType, { upperBound, pageAfter: page.after, completed: false })
+              await repo.saveRunCheckpoint(companyId, run.id, objectType, { upperBound, pageAfter: page.after,
+                processedCount: sampleProcessedCount, completed: false })
               checkpoint = null
             } else {
-              await repo.saveRunCheckpoint(companyId, run.id, objectType, { upperBound, pageAfter: null, completed: true })
+              await repo.saveRunCheckpoint(companyId, run.id, objectType, { upperBound, pageAfter: null,
+                processedCount: sampleProcessedCount, completed: true })
               checkpoint = null
             }
           } else if (!blocked) {

@@ -170,6 +170,8 @@ test('claims are atomic and heartbeat/release cannot alter a successor lease', (
   const checkpoints = tableBody(sql, 'public.h2a_run_checkpoints')
   assert.match(checkpoints, /upper_bound timestamptz not null/)
   assert.match(checkpoints, /page_after text/)
+  assert.match(checkpoints, /processed_count smallint not null default 0/)
+  assert.match(checkpoints, /processed_count between 0 and 50/)
   assert.match(checkpoints, /unique \(company_id, run_id, object_type\)/)
   assert.match(checkpoints, /foreign key \(company_id, run_id\) references public\.h2a_sync_runs \(company_id, id\)/)
   assert.match(checkpoints, /check \(\(cursor_timestamp is null\) = \(cursor_object_id is null\)\)/)
@@ -182,6 +184,8 @@ test('sample dry-run migration is idempotent and constrains the server-owned per
   assert.match(sql, /alter table public\.h2a_sync_runs\s+add column if not exists sample_limit_per_type smallint/)
   assert.match(sql, /drop constraint if exists h2a_sync_runs_sample_limit_per_type_check/)
   assert.match(sql, /add constraint h2a_sync_runs_sample_limit_per_type_check\s+check \(sample_limit_per_type is null or \(mode = 'dry_run' and sample_limit_per_type between 1 and 50\)\)/)
+  assert.match(sql, /alter table public\.h2a_run_checkpoints\s+add column if not exists processed_count smallint not null default 0/)
+  assert.match(sql, /add constraint h2a_run_checkpoints_processed_count_check\s+check \(processed_count between 0 and 50\)/)
 })
 
 test('execution lease fencing tokens are not directly readable by authenticated users', () => {

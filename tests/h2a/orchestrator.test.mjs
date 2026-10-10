@@ -124,6 +124,64 @@ test('sample dry run processes at most ten earliest records per activity type an
   assert.equal(processed, 50)
 })
 
+async function assertSampleContinuation(pageChanges) {
+  const deps = liveFixture({ contactIds: [], companyIds: [], activities: [] })
+  deps.repository.getConfig = async () => ({ state: 'dry_run', portal_id: '123', selected_start_date: '2026-10-01', preflight_status: 'valid' })
+  deps.repository.startRun = async () => ({ id: 'sample-run', sample_limit_per_type: 10 })
+  const checkpoints = new Map()
+  deps.repository.getRunCheckpoint = async (_company, _run, type) => checkpoints.get(type) ?? null
+  deps.repository.saveRunCheckpoint = async (_company, _run, type, checkpoint) => {
+    checkpoints.set(type, structuredClone(checkpoint))
+    return checkpoint
+  }
+  let invocation = 1
+  let clock = 0
+  const callLimits = []
+  const processed = []
+  deps.clockMs = () => clock
+  deps.now = () => new Date('2026-10-09T20:00:00.000Z')
+  deps.hubspot.listActivities = async ({ objectType, limit }) => {
+    if (objectType !== 'calls') return { records: [], after: null }
+    callLimits.push(limit)
+    const count = 10
+    const base = pageChanges && invocation > 1 ? 200 : 100
+    const minuteOffset = pageChanges && invocation > 1 ? 10 : 0
+    return { records: Array.from({ length: count }, (_, index) => ({
+      id: String(base + index),
+      occurredAt: `2026-10-02T12:${String(index + minuteOffset).padStart(2, '0')}:00Z`,
+      objectType: 'calls', properties: {},
+    })), after: 'provider-has-more' }
+  }
+  deps.hubspot.getAssociations = async ({ objectIds }) => { processed.push(objectIds[0]); return [] }
+  const recordItem = deps.repository.recordItem
+  deps.repository.recordItem = async (companyId, row) => {
+    await recordItem(companyId, row)
+    if (row.object_type === 'calls' && processed.length === 4) clock = 2000
+  }
+  deps.dispatchContinuation = async () => {}
+
+  const first = await runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'resume', runId: 'sample-run', timeBudgetMs: 6000 })
+  assert.equal(first.status, 'paused')
+  assert.equal(checkpoints.get('calls')?.processedCount, 4)
+
+  invocation = 2
+  clock = 0
+  const second = await runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'resume', runId: 'sample-run' })
+  assert.equal(second.status, 'completed')
+  assert.deepEqual(callLimits, [10, 10])
+  assert.equal(processed.length, 10)
+  assert.equal(checkpoints.get('calls')?.processedCount, 10)
+  assert.equal(checkpoints.get('calls')?.completed, true)
+}
+
+test('resumed sample dry run fills its durable remaining count from a stable first page', async () => {
+  await assertSampleContinuation(false)
+})
+
+test('resumed sample dry run never exceeds its durable remaining count when the first page changes', async () => {
+  await assertSampleContinuation(true)
+})
+
 function liveFixture({ contactIds = ['10'], companyIds = ['20'], activities = [{ id: '50', occurredAt: '2026-10-02T12:00:00Z', objectType: 'calls', properties: { hs_timestamp: '2026-10-02T12:00:00Z' } }], albiContacts = [], albiOrganizations = [] } = {}) {
   const events = [], items = [], durableItems = [], cursors = [], persistedRuns = [], runCheckpoints = new Map()
   const totalsRepository = createH2ARepository({
@@ -467,7 +525,7 @@ test('dry-run continuation resumes from a durable per-run checkpoint instead of 
   assert.equal(dispatched, 1)
   assert.deepEqual(checkpoints.get('calls'), {
     upperBound: '2026-10-09T20:00:00.001Z', pageAfter: null,
-    timestamp: '2026-10-02T12:00:00.000Z', objectId: '50', completed: false,
+    processedCount: 0, timestamp: '2026-10-02T12:00:00.000Z', objectId: '50', completed: false,
   })
 
   clock = 0
@@ -475,7 +533,7 @@ test('dry-run continuation resumes from a durable per-run checkpoint instead of 
   assert.equal(second.status, 'completed')
   assert.deepEqual(processed, ['50', '51'])
   assert.deepEqual(checkpoints.get('calls'), {
-    upperBound: '2026-10-09T20:00:00.001Z', pageAfter: null, completed: true,
+    upperBound: '2026-10-09T20:00:00.001Z', pageAfter: null, processedCount: 0, completed: true,
   })
 })
 

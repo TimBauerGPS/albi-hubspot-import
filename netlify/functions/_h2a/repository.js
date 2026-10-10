@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { DRY_RUN_PROPOSED_ACTION_TOTALS, DRY_RUN_REVIEW_TOTAL_FIELDS } from './constants.js'
+import { DRY_RUN_PROPOSED_ACTION_TOTALS, DRY_RUN_REVIEW_TOTAL_FIELDS, SAMPLE_LIMIT_PER_TYPE } from './constants.js'
 
 const BASE_RUN_TOTAL_FIELDS = ['created', 'updated', 'linked', 'delivered', 'reconciled', 'skipped', 'conflict', 'failed', 'dry_run']
 
@@ -130,6 +130,12 @@ export function createH2ARepository(supabase) {
       const lease = checked(await scoped(supabase, 'h2a_execution_leases', companyId).maybeSingle())
       return lease && Date.parse(lease.expires_at) > Date.now() ? lease : null
     },
+    async hasCompletedSampleDryRun(companyId, after) {
+      const run = checked(await scoped(supabase, 'h2a_sync_runs', companyId)
+        .eq('mode', 'dry_run').eq('status', 'completed').eq('sample_limit_per_type', SAMPLE_LIMIT_PER_TYPE)
+        .gt('created_at', after).order('created_at', { ascending: false }).limit(1).maybeSingle())
+      return Boolean(run)
+    },
     async queueRun(companyId, { mode, trigger, requestedBy = null, runId = null, businessDate = null,
       sampleLimitPerType = null }) {
       if (sampleLimitPerType !== null && (mode !== 'dry_run' || !Number.isInteger(sampleLimitPerType) ||
@@ -228,7 +234,8 @@ export function createH2ARepository(supabase) {
       if (!row) return null
       return { ...(row.cursor_timestamp && row.cursor_object_id
         ? { timestamp: row.cursor_timestamp, objectId: row.cursor_object_id } : {}),
-      upperBound: row.upper_bound, pageAfter: row.page_after ?? null, completed: row.completed === true }
+      upperBound: row.upper_bound, pageAfter: row.page_after ?? null,
+      processedCount: Number.isInteger(row.processed_count) ? row.processed_count : 0, completed: row.completed === true }
     },
     async saveRunCheckpoint(companyId, runId, objectType, checkpoint) {
       const timestamp = checkpoint?.timestamp ?? null
@@ -236,6 +243,7 @@ export function createH2ARepository(supabase) {
       return checked(await supabase.from('h2a_run_checkpoints').upsert({ company_id: companyId, run_id: runId,
         object_type: objectType, upper_bound: checkpoint?.upperBound, page_after: checkpoint?.pageAfter ?? null,
         cursor_timestamp: timestamp, cursor_object_id: objectId,
+        processed_count: checkpoint?.processedCount ?? 0,
         completed: checkpoint?.completed === true, updated_at: new Date().toISOString() },
       { onConflict: 'company_id,run_id,object_type' }).select('*').single())
     },

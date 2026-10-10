@@ -23,7 +23,8 @@ test('manual sample dry run persists the server-owned ten-per-type limit and dis
   const handler = createRunHandler({
     requireRequest: async () => ({ companyId: 'c1', userId: 'u1' }),
     repository: {
-      getConfig: async () => ({ state: 'dry_run', preflight_status: 'valid', portal_id: '123' }),
+      getConfig: async () => ({ state: 'dry_run', preflight_status: 'valid', portal_id: '123',
+        initial_start_locked_at: '2026-10-01T00:00:00.000Z' }),
       getActiveLease: async () => null,
       queueRun: async (_companyId, input) => { queued.push(input); return { id: 'sample-run' } },
     },
@@ -37,6 +38,54 @@ test('manual sample dry run persists the server-owned ten-per-type limit and dis
   assert.equal(result.statusCode, 202)
   assert.deepEqual(queued, [{ mode: 'dry_run', trigger: 'manual', requestedBy: 'u1', sampleLimitPerType: 10 }])
   assert.deepEqual(dispatched, [{ companyId: 'c1', mode: 'dry_run', trigger: 'resume', runId: 'sample-run' }])
+})
+
+test('manual dry runs require an explicit sample or full scope', async () => {
+  let queued = 0
+  const handler = createRunHandler({
+    requireRequest: async () => ({ companyId: 'c1', userId: 'u1' }),
+    repository: {
+      getConfig: async () => ({ state: 'dry_run', preflight_status: 'valid', portal_id: '123',
+        initial_start_locked_at: '2026-10-01T00:00:00.000Z' }),
+      getActiveLease: async () => null,
+      queueRun: async () => { queued += 1; return { id: 'run1' } },
+    },
+  })
+
+  const response = await handler({ httpMethod: 'POST', body: JSON.stringify({ companyId: 'c1', mode: 'dry_run' }) })
+  assert.equal(response.statusCode, 400)
+  assert.equal(JSON.parse(response.body).error, 'Choose a sample or full dry run.')
+  assert.equal(queued, 0)
+})
+
+test('full dry run requires a completed tenant sample after the initial start date was locked', async () => {
+  const queued = []
+  const checks = []
+  const makeHandler = completed => createRunHandler({
+    requireRequest: async () => ({ companyId: 'c1', userId: 'u1' }),
+    repository: {
+      getConfig: async () => ({ state: 'dry_run', preflight_status: 'valid', portal_id: '123',
+        initial_start_locked_at: '2026-10-01T00:00:00.000Z' }),
+      hasCompletedSampleDryRun: async (companyId, after) => { checks.push([companyId, after]); return completed },
+      getActiveLease: async () => null,
+      queueRun: async (_companyId, input) => { queued.push(input); return { id: 'full-run' } },
+    },
+    dispatch: async () => {},
+  })
+  const body = JSON.stringify({ companyId: 'c1', mode: 'dry_run', dryRunScope: 'full' })
+
+  const rejected = await makeHandler(false)({ httpMethod: 'POST', body })
+  assert.equal(rejected.statusCode, 409)
+  assert.equal(JSON.parse(rejected.body).error, 'Complete a sample dry run before running the full dry run.')
+  assert.equal(queued.length, 0)
+
+  const accepted = await makeHandler(true)({ httpMethod: 'POST', body })
+  assert.equal(accepted.statusCode, 202)
+  assert.deepEqual(checks, [
+    ['c1', '2026-10-01T00:00:00.000Z'],
+    ['c1', '2026-10-01T00:00:00.000Z'],
+  ])
+  assert.deepEqual(queued, [{ mode: 'dry_run', trigger: 'manual', requestedBy: 'u1', sampleLimitPerType: null }])
 })
 
 test('dry-run scope is restricted to manual dry runs and fixed supported values', async () => {

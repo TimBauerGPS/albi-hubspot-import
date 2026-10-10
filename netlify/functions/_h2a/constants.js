@@ -1,5 +1,6 @@
 export const H2A_STATES = Object.freeze(['disabled', 'ready', 'dry_run', 'live'])
 export const HUBSPOT_ACTIVITY_TYPES = Object.freeze(['meetings', 'calls', 'emails', 'communications', 'notes'])
+export const SAMPLE_LIMIT_PER_TYPE = 10
 
 export const DRY_RUN_PROPOSED_ACTION_TOTALS = Object.freeze({
   create_organization: 'would_create_organizations',
