@@ -11,6 +11,7 @@ const allowedModes = new Set(['dry_run', 'live', 'backfill'])
 const allowedTriggers = new Set(['manual', 'scheduled', 'resume', 'conflict_resolution'])
 const ACTIVITY_TYPES = new Set(['meetings', 'calls', 'emails', 'communications', 'notes'])
 const SOURCE_TYPES = new Set(['contacts', 'companies', ...ACTIVITY_TYPES])
+const SAMPLE_LIMIT_PER_TYPE = 10
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const reply = (statusCode, body) => ({ statusCode, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store',
   'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Internal-Cron-Secret',
@@ -44,9 +45,10 @@ function requestBody(event) {
       ['originatingRunId', 'activityDeliveryId'].some(key => body[key] !== undefined && !UUID.test(body[key]))) fail(400, 'Invalid targeted resume payload.')
     return body
   }
-  if (Object.keys(body).some(key => !['companyId', 'mode', 'trigger', 'runId', 'schedulerClaimId', 'businessDate'].includes(key))) fail(400, 'Unsupported request fields.')
+  if (Object.keys(body).some(key => !['companyId', 'mode', 'trigger', 'runId', 'schedulerClaimId', 'businessDate', 'dryRunScope'].includes(key))) fail(400, 'Unsupported request fields.')
   if (!allowedModes.has(body.mode)) fail(400, 'Invalid sync mode.')
-      if (body.runId !== undefined && (typeof body.runId !== 'string' || !body.runId.trim())) fail(400, 'Invalid run ID.')
+  if (body.dryRunScope !== undefined && (body.mode !== 'dry_run' || !['sample', 'full'].includes(body.dryRunScope))) fail(400, 'Invalid dry-run scope.')
+  if (body.runId !== undefined && (typeof body.runId !== 'string' || !body.runId.trim())) fail(400, 'Invalid run ID.')
   if (body.schedulerClaimId !== undefined && body.schedulerClaimId !== body.runId) fail(400, 'Invalid scheduler identity.')
   if (body.trigger !== undefined && !allowedTriggers.has(body.trigger)) fail(400, 'Invalid sync trigger.')
   return body
@@ -84,6 +86,7 @@ export function createRunHandler(options = {}, { background = false } = {}) {
     try {
       const body = requestBody(event)
       if (background && (typeof body.companyId !== 'string' || !body.companyId.trim())) fail(400, 'Company ID is required.')
+      if (background && body.dryRunScope !== undefined) fail(400, 'Background runs use their persisted scope.')
       if (!background && (body.runId || body.trigger && body.trigger !== 'manual')) fail(400, 'Manual runs cannot resume or select a trigger.')
       const auth = await (options.requireRequest ?? requireH2ARequest)({ ...event, body }, {
         supabase: options.supabase, getSupabase: options.getSupabase,
@@ -100,7 +103,8 @@ export function createRunHandler(options = {}, { background = false } = {}) {
           fail(409, 'H2A configuration is not ready for this run.')
         }
         if (await repository.getActiveLease(companyId)) return reply(200, { status: 'already_running', companyId })
-        const run = await repository.queueRun(companyId, { mode: body.mode, trigger: 'manual', requestedBy: auth.userId })
+        const run = await repository.queueRun(companyId, { mode: body.mode, trigger: 'manual', requestedBy: auth.userId,
+          sampleLimitPerType: body.dryRunScope === 'sample' ? SAMPLE_LIMIT_PER_TYPE : null })
         try { await dispatchBackground({ companyId, mode: body.mode, trigger: 'resume', runId: run.id }, options) }
         catch (error) { await repository.markQueueFailed(companyId, run.id); throw error }
         return reply(202, { status: 'queued', companyId, runId: run.id })

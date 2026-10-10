@@ -70,7 +70,9 @@ function toCompletedDryRun(row) {
   const totals = Object.fromEntries(DRY_RUN_REVIEW_TOTAL_FIELDS
     .filter(field => Number.isSafeInteger(row.totals?.[field]) && row.totals[field] > 0)
     .map(field => [field, row.totals[field]]))
-  return { id: row.id, createdAt: row.created_at, finishedAt: row.finished_at, totals }
+  return { id: row.id, createdAt: row.created_at, finishedAt: row.finished_at,
+    ...(Number.isInteger(row.sample_limit_per_type) && row.sample_limit_per_type >= 1 && row.sample_limit_per_type <= 50
+      ? { sampleLimitPerType: row.sample_limit_per_type } : {}), totals }
 }
 
 function validateDate(value, today) {
@@ -151,14 +153,16 @@ export function createSettingsHandler(options = {}) {
         albiApiKey: decryptSecret(fromRpc(credentials.albi_envelope), getKeyring()),
       } : { hubspotToken: null, albiApiKey: null }
 
-      async function getCompletedDryRun() {
+      async function getCompletedDryRun({ sample = false } = {}) {
         if (!config.initial_start_locked_at) return null
-        return checked(supabase.from('h2a_sync_runs')
-          .select('id, created_at, finished_at, totals')
+        let query = supabase.from('h2a_sync_runs')
+          .select('id, created_at, finished_at, totals, sample_limit_per_type')
           .eq('company_id', companyId)
           .eq('mode', 'dry_run')
           .eq('status', 'completed')
           .gt('created_at', config.initial_start_locked_at)
+        query = sample ? query.eq('sample_limit_per_type', 10) : query.is('sample_limit_per_type', null)
+        return checked(query
           .order('created_at', { ascending: false })
           .limit(1)
           .maybeSingle())
@@ -297,12 +301,14 @@ export function createSettingsHandler(options = {}) {
         .filter(value => typeof value === 'string' && value.length > 0)
       const safeConfig = Object.fromEntries(CONFIG_FIELDS.filter(field => config[field] !== undefined).map(field => [field, config[field]]))
       const completedDryRun = await getCompletedDryRun()
+      const completedSampleDryRun = await getCompletedDryRun({ sample: true })
       return response(200, {
         companyId, companyName: context.companyName,
         config: safeConfig, optionMappings: mappings.map(toMapping),
         preflight: { status: config.preflight_status, details: safePreflightDetails(config.preflight_details, protectedValues), checkedAt: config.preflight_checked_at },
         hubspotTokenMask: maskSecret(secrets.hubspotToken), albiApiKeyMask: maskSecret(secrets.albiApiKey),
         dryRunReviewReady: Boolean(completedDryRun), lastCompletedDryRun: toCompletedDryRun(completedDryRun),
+        lastCompletedSampleDryRun: toCompletedDryRun(completedSampleDryRun),
         ...(backfillRequestId ? { backfillRequestId } : {}),
       })
     } catch (error) {

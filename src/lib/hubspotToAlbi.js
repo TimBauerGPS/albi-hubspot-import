@@ -169,8 +169,9 @@ export function estimateH2AActivities(session, companyId, startDate, { signal } 
   return request(session, 'h2a-estimate', { method: 'POST', companyId, body: { startDate }, signal })
 }
 
-export function runH2ASync(session, companyId, mode, { signal } = {}) {
-  return request(session, 'h2a-run', { method: 'POST', companyId, body: { mode }, signal })
+export function runH2ASync(session, companyId, mode, { signal, dryRunScope } = {}) {
+  return request(session, 'h2a-run', { method: 'POST', companyId,
+    body: { mode, ...(dryRunScope ? { dryRunScope } : {}) }, signal })
 }
 
 export function getH2AOverview(session, companyId, { cursor, limit, signal } = {}) {

@@ -4,6 +4,7 @@ import { test } from 'node:test'
 
 // Static deployment contract only: this does not replace PostgreSQL role/concurrency tests.
 const schemaUrl = new URL('../supabase/h2a-schema.sql', import.meta.url)
+const sampleMigrationUrl = new URL('../supabase/h2a-dry-run-samples.sql', import.meta.url)
 const requiredTables = [
   'h2a_company_config', 'h2a_option_mappings', 'h2a_sync_runs',
   'h2a_cursors', 'h2a_backfill_windows', 'h2a_contact_mappings',
@@ -13,6 +14,7 @@ const requiredTables = [
   'h2a_run_checkpoints',
 ]
 const readSchema = () => readFileSync(schemaUrl, 'utf8').replace(/--[^\n]*/g, '').toLowerCase()
+const readSampleMigration = () => readFileSync(sampleMigrationUrl, 'utf8').replace(/--[^\n]*/g, '').toLowerCase()
 const tableBody = (sql, table) => {
   const body = sql.match(new RegExp(`create table ${table.replace('.', '\\.')} \\(([\\s\\S]*?)\\n\\);`))?.[1]
   assert.ok(body, `${table} must exist`)
@@ -163,6 +165,8 @@ test('claims are atomic and heartbeat/release cannot alter a successor lease', (
   assert.match(tableBody(sql, 'public.h2a_sync_runs'), /resume_id uuid/)
   assert.match(tableBody(sql, 'public.h2a_sync_runs'), /cancel_requested_at timestamptz/)
   assert.match(tableBody(sql, 'public.h2a_sync_runs'), /cancel_requested_by uuid references auth\.users\(id\)/)
+  assert.match(tableBody(sql, 'public.h2a_sync_runs'), /sample_limit_per_type smallint/)
+  assert.match(tableBody(sql, 'public.h2a_sync_runs'), /sample_limit_per_type is null or \(mode = 'dry_run' and sample_limit_per_type between 1 and 50\)/)
   const checkpoints = tableBody(sql, 'public.h2a_run_checkpoints')
   assert.match(checkpoints, /upper_bound timestamptz not null/)
   assert.match(checkpoints, /page_after text/)
@@ -171,6 +175,13 @@ test('claims are atomic and heartbeat/release cannot alter a successor lease', (
   assert.match(checkpoints, /check \(\(cursor_timestamp is null\) = \(cursor_object_id is null\)\)/)
   assert.match(sql, /create unique index h2a_runs_company_scheduler_claim_uidx/)
   assert.match(sql, /create unique index h2a_runs_company_resume_uidx/)
+})
+
+test('sample dry-run migration is idempotent and constrains the server-owned per-type limit', () => {
+  const sql = readSampleMigration()
+  assert.match(sql, /alter table public\.h2a_sync_runs\s+add column if not exists sample_limit_per_type smallint/)
+  assert.match(sql, /drop constraint if exists h2a_sync_runs_sample_limit_per_type_check/)
+  assert.match(sql, /add constraint h2a_sync_runs_sample_limit_per_type_check\s+check \(sample_limit_per_type is null or \(mode = 'dry_run' and sample_limit_per_type between 1 and 50\)\)/)
 })
 
 test('execution lease fencing tokens are not directly readable by authenticated users', () => {

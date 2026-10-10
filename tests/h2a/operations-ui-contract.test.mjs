@@ -145,6 +145,8 @@ test('overview covers loading, empty, metrics, active status, run-now, and keyse
   assert.match(page, /presentRunTotals/)
   assert.match(page, /mutationControllers/)
   assert.match(page, /controller\.abort\(\)/)
+  assert.match(page, /Sample dry run/)
+  assert.match(page, /sampleLimitPerType/)
 })
 
 test('conflict queue exposes count, focused refresh, pagination, and member read-only mode', async () => {

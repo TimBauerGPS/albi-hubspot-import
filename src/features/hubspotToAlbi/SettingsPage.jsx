@@ -180,6 +180,7 @@ export default function SettingsPage() {
   const dateReady = validDate(startDate) && startDate === settings?.config?.selected_start_date
   const mappingsReady = hasRequiredMappings(settings)
   const dryRunReady = Boolean(settings?.dryRunReviewReady)
+  const sampleDryRunReady = Boolean(settings?.lastCompletedSampleDryRun)
   const live = settings?.config?.state === 'live'
   const locked = Boolean(settings?.config?.initial_start_locked_at)
   const busy = Boolean(busyAction)
@@ -191,12 +192,14 @@ export default function SettingsPage() {
       : !connectionReady ? 'Run the connection check.'
         : !dateReady ? 'Save the Pacific start date.'
           : !mappingsReady ? 'Confirm all seven required mappings.'
-            : !dryRunReady ? 'Queue and review a dry run.'
+            : !sampleDryRunReady ? 'Queue and review a sample dry run.'
+              : !dryRunReady ? 'Queue and review the full dry run.'
               : !live ? 'Confirm live activation.' : 'Monitor sync operations on Overview.'
   const canEnterDryRun = isAdmin && !busy && credentialsReady && connectionReady && dateReady && mappingsReady && !live
   const canActivate = isAdmin && !busy && connectionReady && mappingsReady && dryRunReady && settings?.config?.state === 'dry_run'
   const options = settings?.preflight?.details?.options ?? EMPTY_OPTIONS
   const completedDryRunTotals = presentDryRunTotals(settings?.lastCompletedDryRun?.totals)
+  const completedSampleDryRunTotals = presentDryRunTotals(settings?.lastCompletedSampleDryRun?.totals)
 
   async function saveCredentials(update) {
     const result = await perform('credentials', signal => saveH2ASettings(session, companyId, { action: 'replace_credentials', ...update }, { signal }),
@@ -239,16 +242,18 @@ export default function SettingsPage() {
     }, { signal }), 'Additional notification recipients saved.')
   }
 
-  async function queueDryRun({ enter = false } = {}) {
+  async function queueDryRun({ enter = false, dryRunScope = 'sample' } = {}) {
     await perform('dry-run', async signal => {
       let current = settings
       if (enter) {
         current = await saveH2ASettings(session, companyId, { action: 'enter_dry_run' }, { signal })
         if (tenantKeyRef.current === tenantKey) applySettings(current)
       }
-      await runH2ASync(session, companyId, 'dry_run', { signal })
+      await runH2ASync(session, companyId, 'dry_run', { signal, dryRunScope })
       return current
-    }, 'Dry run queued. Refresh readiness after it completes, then review it on Overview.')
+    }, dryRunScope === 'sample'
+      ? 'Sample dry run queued. Refresh readiness after it completes, then review it on Overview.'
+      : 'Full dry run queued. Refresh readiness after it completes, then review it on Overview.')
   }
 
   async function activateLive() {
@@ -462,18 +467,26 @@ export default function SettingsPage() {
           <div className="mt-5 grid gap-5 lg:grid-cols-2">
             <div>
               <p className="text-sm font-semibold text-gray-900">Dry run</p>
-              <p className="mt-1 text-sm leading-6 text-gray-500">Dry runs preview work without creating Albi records, consuming delivery keys, or moving live cursors.</p>
+              <p className="mt-1 text-sm leading-6 text-gray-500">Start with a quick sample of up to 10 from each activity type. Dry runs never create Albi records, consume delivery keys, or move live cursors.</p>
               <div className="mt-3 flex flex-wrap gap-2">
                 {settings.config.state !== 'dry_run' && !live && (
-                  <button type="button" onClick={() => queueDryRun({ enter: true })} disabled={!canEnterDryRun} className={buttonPrimary}>
-                    {busyAction === 'dry-run' ? 'Queueing…' : 'Start first dry run'}
+                  <button type="button" onClick={() => queueDryRun({ enter: true, dryRunScope: 'sample' })} disabled={!canEnterDryRun} className={buttonPrimary}>
+                    {busyAction === 'dry-run' ? 'Queueing…' : 'Run sample dry run'}
                   </button>
                 )}
-                {settings.config.state === 'dry_run' && !dryRunReady && (
-                  <button type="button" onClick={() => queueDryRun()} disabled={!isAdmin || busy} className={buttonSecondary}>
-                    {busyAction === 'dry-run' ? 'Queueing…' : 'Retry dry run'}
+                {settings.config.state === 'dry_run' && !dryRunReady && !sampleDryRunReady && (
+                  <button type="button" onClick={() => queueDryRun({ dryRunScope: 'sample' })} disabled={!isAdmin || busy} className={buttonPrimary}>
+                    {busyAction === 'dry-run' ? 'Queueing…' : 'Retry sample dry run'}
                   </button>
                 )}
+                {settings.config.state === 'dry_run' && !dryRunReady && sampleDryRunReady && (<>
+                  <button type="button" onClick={() => queueDryRun({ dryRunScope: 'sample' })} disabled={!isAdmin || busy} className={buttonSecondary}>
+                    {busyAction === 'dry-run' ? 'Queueing…' : 'Run sample again'}
+                  </button>
+                  <button type="button" onClick={() => queueDryRun({ dryRunScope: 'full' })} disabled={!isAdmin || busy} className={buttonPrimary}>
+                    {busyAction === 'dry-run' ? 'Queueing…' : 'Run full dry run'}
+                  </button>
+                </>)}
                 {settings.config.state === 'dry_run' && (
                   <button
                     type="button"
@@ -485,6 +498,22 @@ export default function SettingsPage() {
                   >{busyAction === 'readiness-refresh' ? 'Refreshing readiness…' : 'Refresh readiness'}</button>
                 )}
               </div>
+              {sampleDryRunReady && !dryRunReady && (
+                <div className="mt-4 rounded-lg border border-brand-200 bg-brand-50 px-3 py-3">
+                  <p className="text-sm font-semibold text-brand-950">Sample completed successfully</p>
+                  <p className="mt-1 text-xs text-brand-800">Finished {settings.lastCompletedSampleDryRun?.finishedAt ? new Date(settings.lastCompletedSampleDryRun.finishedAt).toLocaleString() : 'recently'}. Review it on Overview before running the full history.</p>
+                  {completedSampleDryRunTotals.length > 0 && (
+                    <dl className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
+                      {completedSampleDryRunTotals.map(total => (
+                        <div key={total.key} className="flex gap-1 text-xs">
+                          <dt className="text-brand-800">{total.label}</dt>
+                          <dd className="font-semibold tabular-nums text-brand-950">{total.value.toLocaleString()}</dd>
+                        </div>
+                      ))}
+                    </dl>
+                  )}
+                </div>
+              )}
               {!canEnterDryRun && !locked && <p className="mt-2 text-xs text-gray-500">Complete credentials, connection, saved start date, and seven confirmed mappings first.</p>}
             </div>
 

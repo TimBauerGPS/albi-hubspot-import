@@ -75,6 +75,26 @@ test('completed dry runs persist every safe review total at zero when no propose
   })
 })
 
+test('queueRun persists the bounded sample limit only on the durable run row', async () => {
+  let inserted
+  const supabase = { rpc: async () => ({ data: true }), from: table => {
+    assert.equal(table, 'h2a_sync_runs')
+    return {
+      insert(row) { inserted = row; return this },
+      select() { return this },
+      single: async () => ({ data: { id: 'sample-run', ...inserted }, error: null }),
+    }
+  } }
+
+  const result = await createH2ARepository(supabase).queueRun('company-1', {
+    mode: 'dry_run', trigger: 'manual', requestedBy: 'user-1', sampleLimitPerType: 10,
+  })
+
+  assert.equal(result.sample_limit_per_type, 10)
+  assert.equal(inserted.company_id, 'company-1')
+  assert.equal(Object.hasOwn(inserted, 'dryRunScope'), false)
+})
+
 test('delivery repository passes tenant identity to atomic reserve and transition RPCs', async () => {
   const calls = []
   const repository = createH2ARepository({ from: () => { throw Error('table access is unexpected') },

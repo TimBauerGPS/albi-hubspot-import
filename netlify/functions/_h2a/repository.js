@@ -130,10 +130,16 @@ export function createH2ARepository(supabase) {
       const lease = checked(await scoped(supabase, 'h2a_execution_leases', companyId).maybeSingle())
       return lease && Date.parse(lease.expires_at) > Date.now() ? lease : null
     },
-    async queueRun(companyId, { mode, trigger, requestedBy = null, runId = null, businessDate = null }) {
+    async queueRun(companyId, { mode, trigger, requestedBy = null, runId = null, businessDate = null,
+      sampleLimitPerType = null }) {
+      if (sampleLimitPerType !== null && (mode !== 'dry_run' || !Number.isInteger(sampleLimitPerType) ||
+        sampleLimitPerType < 1 || sampleLimitPerType > 50)) {
+        throw new TypeError('Invalid sample limit')
+      }
       const payload = { ...(runId ? { id: runId } : {}), company_id: companyId,
         mode: mode === 'backfill' ? 'live' : mode, trigger: mode === 'backfill' ? 'backfill' : trigger,
-        requested_by: requestedBy, business_date: businessDate, status: 'queued' }
+        requested_by: requestedBy, business_date: businessDate, status: 'queued',
+        ...(sampleLimitPerType === null ? {} : { sample_limit_per_type: sampleLimitPerType }) }
       try { return checked(await supabase.from('h2a_sync_runs').insert(payload).select('*').single()) }
       catch (error) {
         if (!runId) throw error

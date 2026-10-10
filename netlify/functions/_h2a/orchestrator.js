@@ -387,6 +387,10 @@ export async function runCompanySync(deps, input = {}) {
       await repo.finishRun(companyId, run.id, status, totals)
       return { status, companyId, runId: run.id, totals, newConflictCount: 0, continuation: false }
     }
+    const storedSampleLimit = run.sample_limit_per_type
+    if (storedSampleLimit != null && (mode !== 'dry_run' || !Number.isInteger(storedSampleLimit) ||
+      storedSampleLimit < 1 || storedSampleLimit > 50)) throw new Error('Run has an invalid sample boundary')
+    const sampleLimitPerType = storedSampleLimit ?? null
     const mappings = await repo.getMappings(companyId)
     const indexes = { contacts: await listAll(deps, deps.albi, 'listContacts', deadline),
       organizations: await listAll(deps, deps.albi, 'listOrganizations', deadline) }
@@ -441,10 +445,11 @@ export async function runCompanySync(deps, input = {}) {
           if (clockMs(deps) >= deadline - 5000) { continuation = true; break }
           const page = await retryRead(deps, () => deps.hubspot.listActivities({ objectType,
             occurredAtGte: mode === 'dry_run' ? lowerBound : readStartWithOverlap(checkpoint, lowerBound), occurredAtLt: upperBound,
-            ...(after ? { after } : {}), limit: 100 }), deadline)
+            ...(after ? { after } : {}), limit: sampleLimitPerType ?? 100 }), deadline)
           if (!Array.isArray(page?.records)) throw new Error('HubSpot returned an invalid activity page')
           const outcomes = []
-          for (const activity of [...page.records].sort((a, b) => {
+          const boundedRecords = sampleLimitPerType === null ? page.records : page.records.slice(0, sampleLimitPerType)
+          for (const activity of [...boundedRecords].sort((a, b) => {
             const t = Date.parse(a.occurredAt) - Date.parse(b.occurredAt)
             return t || (BigInt(a.id) < BigInt(b.id) ? -1 : BigInt(a.id) > BigInt(b.id) ? 1 : 0)
           })) {
@@ -472,7 +477,7 @@ export async function runCompanySync(deps, input = {}) {
             if (continuation) {
               await repo.saveRunCheckpoint(companyId, run.id, objectType, { upperBound, pageAfter: after, ...(next ?? {}), completed: false })
               checkpoint = next
-            } else if (page.after) {
+            } else if (page.after && sampleLimitPerType === null) {
               await repo.saveRunCheckpoint(companyId, run.id, objectType, { upperBound, pageAfter: page.after, completed: false })
               checkpoint = null
             } else {
@@ -497,6 +502,7 @@ export async function runCompanySync(deps, input = {}) {
           }
           if (!(await repo.heartbeatLease(companyId, ownerToken, 900))) throw new Error('H2A lease was lost')
           if (continuation) break
+          if (sampleLimitPerType !== null) break
           if (!page.after) break
           if (seen.has(page.after)) throw new Error('HubSpot pagination repeated a cursor')
           seen.add(page.after)

@@ -68,6 +68,7 @@ create table public.h2a_sync_runs (
   resume_id uuid,
   cancel_requested_at timestamptz,
   cancel_requested_by uuid references auth.users(id) on delete set null,
+  sample_limit_per_type smallint check (sample_limit_per_type is null or (mode = 'dry_run' and sample_limit_per_type between 1 and 50)),
   started_at timestamptz,
   finished_at timestamptz,
   error_summary text,

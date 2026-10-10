@@ -40,7 +40,7 @@ function fixture({ role = 'admin', superAdmin = false, config = {}, credentials 
     h2a_option_mappings: mappings.map(dbMapping), h2a_backfill_windows: [], h2a_cursors: [],
     h2a_sync_runs: runs.map((run, index) => ({
       id: `run-${index + 1}`, company_id: 'company-a', mode: 'dry_run', status: 'completed',
-      totals: { dry_run: 7 }, created_at: '2026-10-02T10:00:01.000Z',
+      sample_limit_per_type: null, totals: { dry_run: 7 }, created_at: '2026-10-02T10:00:01.000Z',
       finished_at: '2026-10-02T10:05:00.000Z', ...run,
     })),
   }
@@ -561,7 +561,7 @@ test('first dry run locks the selected date and activation waits for a later com
   assert.equal(f.tables.h2a_company_config[0].initial_start_locked_at, now)
   assert.equal((await f.request('PUT', { action: 'activate_live' })).statusCode, 409)
   f.tables.h2a_sync_runs.push({
-    id: 'run-ready', company_id: 'company-a', mode: 'dry_run', status: 'completed', totals: { dry_run: 12 },
+    id: 'run-ready', company_id: 'company-a', mode: 'dry_run', status: 'completed', sample_limit_per_type: null, totals: { dry_run: 12 },
     created_at: '2026-10-02T10:00:01.000Z', finished_at: '2026-10-02T10:05:00.000Z',
   })
   assert.equal((await f.request('PUT', { action: 'activate_live' })).statusCode, 200)
@@ -570,6 +570,34 @@ test('first dry run locks the selected date and activation waits for a later com
   assert.equal(f.tables.h2a_company_config[0].state, 'disabled')
   assert.equal(f.tables.h2a_company_config[0].initial_start_locked_at, now)
   assert.equal(f.tables.h2a_cursors.length, 0)
+})
+
+test('a completed sample is exposed for review but cannot unlock live activation', async () => {
+  const f = fixture({
+    config: { state: 'dry_run', initial_start_locked_at: now, preflight_status: 'valid', option_confirmation_status: 'confirmed' },
+    mappings: optionMappings,
+    runs: [{
+      id: 'sample-ready', sample_limit_per_type: 10, created_at: '2026-10-02T10:00:01.000Z',
+      finished_at: '2026-10-02T10:05:00.000Z', totals: { dry_run: 45, requires_review: 7 },
+    }],
+  })
+
+  const read = await f.request()
+  assert.equal(read.statusCode, 200)
+  assert.equal(read.json.dryRunReviewReady, false)
+  assert.equal(read.json.lastCompletedDryRun, null)
+  assert.deepEqual(read.json.lastCompletedSampleDryRun, {
+    id: 'sample-ready', createdAt: '2026-10-02T10:00:01.000Z', finishedAt: '2026-10-02T10:05:00.000Z',
+    sampleLimitPerType: 10, totals: { requires_review: 7 },
+  })
+  assert.equal((await f.request('PUT', { action: 'activate_live' })).statusCode, 409)
+  assert.equal(f.tables.h2a_company_config[0].state, 'dry_run')
+
+  f.tables.h2a_sync_runs.push({
+    id: 'full-ready', company_id: 'company-a', mode: 'dry_run', status: 'completed', sample_limit_per_type: null,
+    totals: { dry_run: 100 }, created_at: '2026-10-02T10:06:00.000Z', finished_at: '2026-10-02T10:10:00.000Z',
+  })
+  assert.equal((await f.request('PUT', { action: 'activate_live' })).statusCode, 200)
 })
 
 test('GET exposes only a tenant-scoped completed dry-run summary created after the date lock', async () => {

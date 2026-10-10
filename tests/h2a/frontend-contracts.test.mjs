@@ -89,6 +89,16 @@ test('activity estimate is an authenticated read-only operation with no credenti
   assert.equal(call.options.body.includes('token'), false)
 })
 
+test('client sends an explicit bounded sample scope without exposing a record-count override', async () => {
+  const { runH2ASync } = await import('../../src/lib/hubspotToAlbi.js')
+  const [call] = await captureRequests(() => runH2ASync(session, 'company-1', 'dry_run', { dryRunScope: 'sample' }))
+
+  assert.deepEqual(JSON.parse(call.options.body), {
+    companyId: 'company-1', mode: 'dry_run', dryRunScope: 'sample',
+  })
+  assert.equal(call.options.body.includes('limit'), false)
+})
+
 test('client exposes actionable fixed endpoint errors and keeps unknown text generic', async () => {
   const { getH2ASettings } = await import('../../src/lib/hubspotToAlbi.js')
   const originalFetch = globalThis.fetch

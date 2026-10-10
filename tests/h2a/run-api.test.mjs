@@ -17,6 +17,48 @@ test('manual run authorizes selected company and queues without invoking provide
   assert.deepEqual(calls, [{ companyId: 'c1', mode: 'live', trigger: 'resume', runId: 'run1' }])
 })
 
+test('manual sample dry run persists the server-owned ten-per-type limit and dispatches by run identity', async () => {
+  const queued = []
+  const dispatched = []
+  const handler = createRunHandler({
+    requireRequest: async () => ({ companyId: 'c1', userId: 'u1' }),
+    repository: {
+      getConfig: async () => ({ state: 'dry_run', preflight_status: 'valid', portal_id: '123' }),
+      getActiveLease: async () => null,
+      queueRun: async (_companyId, input) => { queued.push(input); return { id: 'sample-run' } },
+    },
+    dispatch: async payload => { dispatched.push(payload) },
+  })
+
+  const result = await handler({ httpMethod: 'POST', body: JSON.stringify({
+    companyId: 'c1', mode: 'dry_run', dryRunScope: 'sample',
+  }) })
+
+  assert.equal(result.statusCode, 202)
+  assert.deepEqual(queued, [{ mode: 'dry_run', trigger: 'manual', requestedBy: 'u1', sampleLimitPerType: 10 }])
+  assert.deepEqual(dispatched, [{ companyId: 'c1', mode: 'dry_run', trigger: 'resume', runId: 'sample-run' }])
+})
+
+test('dry-run scope is restricted to manual dry runs and fixed supported values', async () => {
+  let queued = 0
+  const handler = createRunHandler({
+    requireRequest: async () => ({ companyId: 'c1', userId: 'u1' }),
+    repository: {
+      getConfig: async () => ({ state: 'live', preflight_status: 'valid', portal_id: '123' }),
+      getActiveLease: async () => null,
+      queueRun: async () => { queued += 1; return { id: 'run1' } },
+    },
+  })
+
+  for (const body of [
+    { companyId: 'c1', mode: 'live', dryRunScope: 'sample' },
+    { companyId: 'c1', mode: 'dry_run', dryRunScope: 'tiny' },
+  ]) {
+    assert.equal((await handler({ httpMethod: 'POST', body: JSON.stringify(body) })).statusCode, 400)
+  }
+  assert.equal(queued, 0)
+})
+
 test('internal resume requires explicit company and secret through shared auth', async () => {
   const handler = createRunHandler({
     requireRequest: async (_event, options) => { assert.equal(options.internalJob, true); return { companyId: 'c1' } },

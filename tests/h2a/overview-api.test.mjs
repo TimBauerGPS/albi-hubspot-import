@@ -127,6 +127,16 @@ test('overview sanitizes run metadata, totals, and fixed error categories', () =
   assert.equal(inheritedKey.errorCategory, undefined)
 })
 
+test('overview exposes only validated sample metadata needed to label bounded dry runs', () => {
+  const sample = sanitizeOverviewRun(run({ mode: 'dry_run', sample_limit_per_type: 10 }))
+  assert.equal(sample.sampleLimitPerType, 10)
+
+  for (const value of [0, 51, 1.5, '10']) {
+    assert.equal(sanitizeOverviewRun(run({ mode: 'dry_run', sample_limit_per_type: value })).sampleLimitPerType, undefined)
+  }
+  assert.equal(sanitizeOverviewRun(run({ mode: 'live', sample_limit_per_type: 10 })).sampleLimitPerType, undefined)
+})
+
 test('overview uses an opaque deterministic effective-time and id cursor', async () => {
   const second = run({ id: '00000000-0000-4000-8000-000000000002', started_at: null,
     created_at: '2026-10-04T09:00:00.000Z' })

@@ -97,6 +97,33 @@ test('dry run records previews and leaves every live mutation unused', async () 
   assert.equal(items[0].outcome, 'dry_run')
 })
 
+test('sample dry run processes at most ten earliest records per activity type and ignores later pages', async () => {
+  const deps = liveFixture({ contactIds: [], companyIds: [], activities: [] })
+  deps.repository.getConfig = async () => ({ state: 'dry_run', portal_id: '123', selected_start_date: '2026-10-01', preflight_status: 'valid' })
+  deps.repository.startRun = async () => ({ id: 'sample-run', sample_limit_per_type: 10 })
+  const searches = []
+  let processed = 0
+  deps.hubspot.listActivities = async ({ objectType, limit, after }) => {
+    searches.push({ objectType, limit, after: after ?? null })
+    const records = Array.from({ length: 15 }, (_, index) => ({
+      id: String(1000 + searches.length * 100 + index),
+      occurredAt: `2026-10-02T12:${String(index).padStart(2, '0')}:00Z`,
+      objectType,
+      properties: objectType === 'emails' ? { hs_email_direction: 'EMAIL' } : {},
+    }))
+    return { records, after: 'later-page' }
+  }
+  deps.hubspot.getAssociations = async () => { processed += 1; return [] }
+
+  const result = await runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'resume', runId: 'sample-run' })
+
+  assert.equal(result.status, 'completed')
+  assert.equal(searches.length, 5)
+  assert.deepEqual(searches.map(search => search.limit), [10, 10, 10, 10, 10])
+  assert.deepEqual(searches.map(search => search.after), [null, null, null, null, null])
+  assert.equal(processed, 50)
+})
+
 function liveFixture({ contactIds = ['10'], companyIds = ['20'], activities = [{ id: '50', occurredAt: '2026-10-02T12:00:00Z', objectType: 'calls', properties: { hs_timestamp: '2026-10-02T12:00:00Z' } }], albiContacts = [], albiOrganizations = [] } = {}) {
   const events = [], items = [], durableItems = [], cursors = [], persistedRuns = [], runCheckpoints = new Map()
   const totalsRepository = createH2ARepository({
@@ -135,7 +162,8 @@ function liveFixture({ contactIds = ['10'], companyIds = ['20'], activities = [{
     recordConflict: async (_company, row) => { events.push(`conflict:${row.reason}`); return row },
     totals: (_company, runId, mode) => totalsRepository.totals('c1', runId, mode),
     finishRun: async (_company, runId, status, totals) => { persistedRuns.push({ id: runId, company_id: 'c1', runId, status, totals,
-      mode: 'dry_run', created_at: '2026-10-02T10:00:01.000Z', finished_at: '2026-10-02T10:05:00.000Z' }); events.push('finish') },
+      mode: 'dry_run', sample_limit_per_type: null,
+      created_at: '2026-10-02T10:00:01.000Z', finished_at: '2026-10-02T10:05:00.000Z' }); events.push('finish') },
     deliveryStore: () => ({
       reserve: async ({ identity }) => {
         const key = `${identity.objectType}:${identity.activityId}:${identity.albiTargetId}`
@@ -279,6 +307,7 @@ test('dry run evaluates associations and proposed creations without provider wri
       const query = {
         select() { return this },
         eq(key, value) { filters.push(row => row[key] === value); return this },
+        is(key, value) { filters.push(row => row[key] === value); return this },
         gt(key, value) { filters.push(row => row[key] > value); return this },
         order(key, options = {}) { orderedBy = key; ascending = options.ascending !== false; return this },
         limit(value) { rowLimit = value; return this },

@@ -159,3 +159,13 @@ test('readiness refresh preserves the mounted form and activation explicitly con
   assert.match(page, /activating confirms/i)
   assert.match(page, /detailed per-record review is not available yet/i)
 })
+
+test('dry-run controls lead with a ten-per-type sample and gate the full run on sample success', async () => {
+  const page = await source('SettingsPage.jsx')
+  assert.match(page, /Run sample dry run/)
+  assert.match(page, /up to 10 from each activity type/i)
+  assert.match(page, /lastCompletedSampleDryRun/)
+  assert.match(page, /Run full dry run/)
+  assert.match(page, /dryRunScope: 'sample'/)
+  assert.match(page, /dryRunScope: 'full'/)
+})

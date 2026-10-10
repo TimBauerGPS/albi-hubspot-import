@@ -1,6 +1,6 @@
 import { H2AAuthError, requireH2ARequest } from './_h2a/auth.js'
 
-const RUN_SELECT = 'id,mode,trigger,status,totals,created_at,started_at,finished_at,error_summary'
+const RUN_SELECT = 'id,mode,trigger,status,totals,sample_limit_per_type,created_at,started_at,finished_at,error_summary'
 const RUN_FIELDS = ['id', 'mode', 'trigger', 'status', 'created_at', 'started_at', 'finished_at']
 const TOTAL_FIELDS = new Set([
   'created', 'updated', 'linked', 'delivered', 'reconciled', 'skipped', 'conflict', 'failed', 'dry_run',
@@ -60,6 +60,10 @@ export function sanitizeOverviewRun(run) {
   if (!run || typeof run !== 'object') return null
   const result = Object.fromEntries(RUN_FIELDS.filter(field => run[field] !== undefined).map(field => [field, run[field]]))
   result.totals = sanitizeTotals(run.totals)
+  if (run.mode === 'dry_run' && Number.isInteger(run.sample_limit_per_type) &&
+    run.sample_limit_per_type >= 1 && run.sample_limit_per_type <= 50) {
+    result.sampleLimitPerType = run.sample_limit_per_type
+  }
   const errorCategory = typeof run.error_summary === 'string' && Object.hasOwn(ERROR_CATEGORIES, run.error_summary)
     ? ERROR_CATEGORIES[run.error_summary]
     : null
