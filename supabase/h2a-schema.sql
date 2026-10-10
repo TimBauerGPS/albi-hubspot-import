@@ -66,6 +66,8 @@ create table public.h2a_sync_runs (
   business_date date,
   scheduler_claim_id uuid,
   resume_id uuid,
+  cancel_requested_at timestamptz,
+  cancel_requested_by uuid references auth.users(id) on delete set null,
   started_at timestamptz,
   finished_at timestamptz,
   error_summary text,
@@ -73,6 +75,23 @@ create table public.h2a_sync_runs (
   updated_at timestamptz not null default now(),
   unique (company_id, id),
   check (finished_at is null or (started_at is not null and finished_at >= started_at))
+);
+
+create table public.h2a_run_checkpoints (
+  id uuid primary key default gen_random_uuid(),
+  company_id uuid not null references public.companies(id),
+  run_id uuid not null,
+  object_type text not null check (object_type in ('meetings', 'calls', 'emails', 'communications', 'notes')),
+  upper_bound timestamptz not null,
+  page_after text check (page_after is null or length(page_after) <= 2000),
+  cursor_timestamp timestamptz,
+  cursor_object_id text,
+  completed boolean not null default false,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  foreign key (company_id, run_id) references public.h2a_sync_runs (company_id, id),
+  unique (company_id, run_id, object_type),
+  check ((cursor_timestamp is null) = (cursor_object_id is null))
 );
 
 create table public.h2a_cursors (
@@ -285,6 +304,7 @@ create index h2a_credentials_updated_by_idx on private.h2a_credentials (updated_
 create index h2a_config_confirmed_by_idx on public.h2a_company_config (options_confirmed_by);
 create index h2a_options_confirmed_by_idx on public.h2a_option_mappings (confirmed_by);
 create index h2a_runs_requested_by_idx on public.h2a_sync_runs (requested_by);
+create index h2a_runs_cancel_requested_by_idx on public.h2a_sync_runs (cancel_requested_by);
 create index h2a_runs_company_started_idx on public.h2a_sync_runs (company_id, started_at desc);
 create unique index h2a_runs_company_scheduler_claim_uidx on public.h2a_sync_runs (company_id, scheduler_claim_id) where scheduler_claim_id is not null;
 create unique index h2a_runs_company_resume_uidx on public.h2a_sync_runs (company_id, resume_id) where resume_id is not null;
@@ -342,6 +362,11 @@ create policy h2a_sync_runs_select on public.h2a_sync_runs
     exists (select 1 from public.company_members m where m.user_id = (select auth.uid()) and m.company_id = h2a_sync_runs.company_id)
     or exists (select 1 from public.super_admins s where s.user_id = (select auth.uid()))
   );
+
+alter table public.h2a_run_checkpoints enable row level security;
+revoke all on table public.h2a_run_checkpoints from public, anon, authenticated;
+revoke all on table public.h2a_run_checkpoints from service_role;
+grant select, insert, update on table public.h2a_run_checkpoints to service_role;
 
 alter table public.h2a_cursors enable row level security;
 revoke all on table public.h2a_cursors from public, anon, authenticated;

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { HUBSPOT_ACTIVITY_TYPES } from './constants.js'
 import { pacificBusinessDate, pacificStartOfDate } from './time.js'
-import { advanceCheckpoint, planBackfillWindows, readStartWithOverlap } from './checkpoints.js'
+import { advanceCheckpoint, compareBoundary, planBackfillWindows, readStartWithOverlap } from './checkpoints.js'
 import { decideContactMatch, decideOrganizationMatch } from './match.js'
 import { resolveActivityTargets, buildAlbiActivity } from './activity.js'
 import { resolveActivityType, resolveContactType } from './options.js'
@@ -381,6 +381,12 @@ export async function runCompanySync(deps, input = {}) {
     if (input.resumeId && !['queued', 'running', 'paused', 'partially_failed', 'failed'].includes(run.status)) {
       return { status: 'already_accepted', companyId, runId: run.id, resumeId: input.resumeId }
     }
+    if (run.cancel_requested_at) {
+      totals = await repo.totals(companyId, run.id, mode)
+      status = 'cancelled'
+      await repo.finishRun(companyId, run.id, status, totals)
+      return { status, companyId, runId: run.id, totals, newConflictCount: 0, continuation: false }
+    }
     const mappings = await repo.getMappings(companyId)
     const indexes = { contacts: await listAll(deps, deps.albi, 'listContacts', deadline),
       organizations: await listAll(deps, deps.albi, 'listOrganizations', deadline) }
@@ -407,6 +413,9 @@ export async function runCompanySync(deps, input = {}) {
     }
     for (const objectType of HUBSPOT_ACTIVITY_TYPES) {
       if (clockMs(deps) >= deadline - 5000) { continuation = true; break }
+      const runCheckpoint = mode === 'dry_run' && typeof repo.getRunCheckpoint === 'function'
+        ? await repo.getRunCheckpoint(companyId, run.id, objectType) : null
+      if (runCheckpoint?.completed) continue
       const seeds = mode === 'backfill' ? await repo.listBackfillWindows(companyId, objectType) : [null]
       const windows = seeds.flatMap(seed => {
         if (!seed) return [null]
@@ -419,15 +428,19 @@ export async function runCompanySync(deps, input = {}) {
       for (const window of windows) {
         if (clockMs(deps) >= deadline - 5000) { continuation = true; break }
         const lowerBound = window?.start_at ?? pacificStartOfDate(config.selected_start_date)
-        const upperBound = window?.end_at ?? new Date(Date.now() + 1).toISOString()
+        const upperBound = window?.end_at ?? (mode === 'dry_run' && runCheckpoint?.upperBound
+          ? runCheckpoint.upperBound : new Date((deps.now?.() ?? new Date()).getTime() + 1).toISOString())
         let checkpoint = window?.checkpoint_timestamp ? { timestamp: window.checkpoint_timestamp, objectId: window.checkpoint_object_id }
-          : mode === 'live' ? await repo.getCursor(companyId, objectType) : null
-        let after = null, blocked = window ? blockedSeeds.has(window.id) : false, pendingOutcomes = []
+          : mode === 'live' ? await repo.getCursor(companyId, objectType)
+            : runCheckpoint?.timestamp && runCheckpoint?.objectId
+              ? { timestamp: runCheckpoint.timestamp, objectId: runCheckpoint.objectId } : null
+        let after = mode === 'dry_run' ? runCheckpoint?.pageAfter ?? null : null
+        let blocked = window ? blockedSeeds.has(window.id) : false, pendingOutcomes = []
         const seen = new Set()
         for (let pageNo = 0; pageNo < 1000; pageNo += 1) {
           if (clockMs(deps) >= deadline - 5000) { continuation = true; break }
           const page = await retryRead(deps, () => deps.hubspot.listActivities({ objectType,
-            occurredAtGte: readStartWithOverlap(checkpoint, lowerBound), occurredAtLt: upperBound,
+            occurredAtGte: mode === 'dry_run' ? lowerBound : readStartWithOverlap(checkpoint, lowerBound), occurredAtLt: upperBound,
             ...(after ? { after } : {}), limit: 100 }), deadline)
           if (!Array.isArray(page?.records)) throw new Error('HubSpot returned an invalid activity page')
           const outcomes = []
@@ -439,8 +452,9 @@ export async function runCompanySync(deps, input = {}) {
             if (!activity.occurredAt || Date.parse(activity.occurredAt) < Date.parse(lowerBound) ||
               Date.parse(activity.occurredAt) >= Date.parse(upperBound)) continue
             const itemBoundary = { timestamp: activity.occurredAt, objectId: String(activity.id) }
-            if (checkpoint && !blocked && Date.parse(activity.occurredAt) <= Date.parse(checkpoint.timestamp) &&
-              itemBoundary.objectId === checkpoint.objectId) continue
+            if (checkpoint && !blocked && (mode === 'dry_run'
+              ? compareBoundary(itemBoundary, checkpoint) <= 0
+              : Date.parse(activity.occurredAt) <= Date.parse(checkpoint.timestamp) && itemBoundary.objectId === checkpoint.objectId)) continue
             ctx.activity = activity
             try {
               const resolved = await processActivity(deps, ctx, activity, deadline)
@@ -453,7 +467,19 @@ export async function runCompanySync(deps, input = {}) {
               outcomes.push({ ...itemBoundary, resolved: mode === 'dry_run' })
             }
           }
-          if (mode !== 'dry_run' && !blocked) {
+          if (mode === 'dry_run') {
+            const next = advanceCheckpoint({ current: checkpoint, items: outcomes })
+            if (continuation) {
+              await repo.saveRunCheckpoint(companyId, run.id, objectType, { upperBound, pageAfter: after, ...(next ?? {}), completed: false })
+              checkpoint = next
+            } else if (page.after) {
+              await repo.saveRunCheckpoint(companyId, run.id, objectType, { upperBound, pageAfter: page.after, completed: false })
+              checkpoint = null
+            } else {
+              await repo.saveRunCheckpoint(companyId, run.id, objectType, { upperBound, pageAfter: null, completed: true })
+              checkpoint = null
+            }
+          } else if (!blocked) {
             const combined = [...pendingOutcomes, ...outcomes]
             const maxTimestamp = combined.length ? Math.max(...combined.map(item => Date.parse(item.timestamp))) : null
             const ready = page.after && maxTimestamp !== null

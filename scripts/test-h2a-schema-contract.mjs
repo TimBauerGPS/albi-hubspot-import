@@ -10,6 +10,7 @@ const requiredTables = [
   'h2a_organization_mappings', 'h2a_activity_deliveries',
   'h2a_item_results', 'h2a_conflicts', 'h2a_conflict_events',
   'h2a_conflict_resumes', 'h2a_execution_leases', 'h2a_daily_claims',
+  'h2a_run_checkpoints',
 ]
 const readSchema = () => readFileSync(schemaUrl, 'utf8').replace(/--[^\n]*/g, '').toLowerCase()
 const tableBody = (sql, table) => {
@@ -34,7 +35,7 @@ test('all tenant tables have UUID keys, ownership, RLS, and authenticated read-o
     assert.match(body, /company_id uuid (?:primary key|not null)/)
     assert.match(sql, new RegExp(`alter table public\\.${table} enable row level security;`))
     assert.match(sql, new RegExp(`revoke all on table public\\.${table} from public, anon, authenticated;`))
-    if (['h2a_conflict_resumes', 'h2a_execution_leases', 'h2a_daily_claims'].includes(table)) {
+    if (['h2a_conflict_resumes', 'h2a_execution_leases', 'h2a_daily_claims', 'h2a_run_checkpoints'].includes(table)) {
       assert.doesNotMatch(sql, /grant [^;]*on (?:table )?public\.h2a_conflict_resumes to authenticated;/)
       assert.doesNotMatch(sql, new RegExp(`grant [^;]*on (?:table )?public\\.${table} to authenticated;`))
       assert.doesNotMatch(sql, new RegExp(`create policy[^;]+on public\\.${table}`))
@@ -160,6 +161,14 @@ test('claims are atomic and heartbeat/release cannot alter a successor lease', (
   assert.match(finish, /status = case when p_accepted then 'dispatched' else 'pending' end/)
   assert.match(tableBody(sql, 'public.h2a_sync_runs'), /scheduler_claim_id uuid/)
   assert.match(tableBody(sql, 'public.h2a_sync_runs'), /resume_id uuid/)
+  assert.match(tableBody(sql, 'public.h2a_sync_runs'), /cancel_requested_at timestamptz/)
+  assert.match(tableBody(sql, 'public.h2a_sync_runs'), /cancel_requested_by uuid references auth\.users\(id\)/)
+  const checkpoints = tableBody(sql, 'public.h2a_run_checkpoints')
+  assert.match(checkpoints, /upper_bound timestamptz not null/)
+  assert.match(checkpoints, /page_after text/)
+  assert.match(checkpoints, /unique \(company_id, run_id, object_type\)/)
+  assert.match(checkpoints, /foreign key \(company_id, run_id\) references public\.h2a_sync_runs \(company_id, id\)/)
+  assert.match(checkpoints, /check \(\(cursor_timestamp is null\) = \(cursor_object_id is null\)\)/)
   assert.match(sql, /create unique index h2a_runs_company_scheduler_claim_uidx/)
   assert.match(sql, /create unique index h2a_runs_company_resume_uidx/)
 })

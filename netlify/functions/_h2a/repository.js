@@ -187,10 +187,9 @@ export function createH2ARepository(supabase) {
         const existing = await this.getResumeRun(companyId, resumeId)
         if (existing && !['queued', 'running', 'paused', 'partially_failed', 'failed'].includes(existing.status)) return existing
         if (existing) {
-          checked(await supabase.from('h2a_sync_runs').update({ status: 'running', started_at: existing.started_at ?? new Date().toISOString(),
+          return checked(await supabase.from('h2a_sync_runs').update({ status: 'running', started_at: existing.started_at ?? new Date().toISOString(),
             updated_at: new Date().toISOString() }).eq('company_id', companyId).eq('id', existing.id)
-            .in('status', ['queued', 'running', 'paused', 'partially_failed', 'failed']).select('id').single())
-          return existing
+            .in('status', ['queued', 'running', 'paused', 'partially_failed', 'failed']).select('*').single())
         }
         return checked(await supabase.from('h2a_sync_runs').insert({ company_id: companyId, mode: 'live', trigger: 'conflict_resolution',
           status: 'running', resume_id: resumeId, started_at: new Date().toISOString() }).select('*').single())
@@ -199,10 +198,9 @@ export function createH2ARepository(supabase) {
         const run = checked(await scoped(supabase, 'h2a_sync_runs', companyId).eq('id', runId).maybeSingle())
         if (!run || run.mode !== (mode === 'backfill' ? 'live' : mode)) throw new Error('Run is missing or belongs to another mode')
         if (!['queued', 'running', 'paused', 'partially_failed', 'failed'].includes(run.status)) throw new Error('Run is not resumable')
-        checked(await supabase.from('h2a_sync_runs').update({ status: 'running', started_at: run.started_at ?? new Date().toISOString(),
+        return checked(await supabase.from('h2a_sync_runs').update({ status: 'running', started_at: run.started_at ?? new Date().toISOString(),
           updated_at: new Date().toISOString() }).eq('company_id', companyId).eq('id', runId)
-          .in('status', ['queued', 'running', 'paused', 'partially_failed', 'failed']).select('id').single())
-        return run
+          .in('status', ['queued', 'running', 'paused', 'partially_failed', 'failed']).select('*').single())
       }
       const storedMode = mode === 'backfill' ? 'live' : mode
       return checked(await supabase.from('h2a_sync_runs').insert({ company_id: companyId, mode: storedMode,
@@ -217,6 +215,23 @@ export function createH2ARepository(supabase) {
     },
     async getCursor(companyId, objectType) {
       return boundary(checked(await scoped(supabase, 'h2a_cursors', companyId).eq('object_type', objectType).maybeSingle()))
+    },
+    async getRunCheckpoint(companyId, runId, objectType) {
+      const row = checked(await scoped(supabase, 'h2a_run_checkpoints', companyId).eq('run_id', runId)
+        .eq('object_type', objectType).maybeSingle())
+      if (!row) return null
+      return { ...(row.cursor_timestamp && row.cursor_object_id
+        ? { timestamp: row.cursor_timestamp, objectId: row.cursor_object_id } : {}),
+      upperBound: row.upper_bound, pageAfter: row.page_after ?? null, completed: row.completed === true }
+    },
+    async saveRunCheckpoint(companyId, runId, objectType, checkpoint) {
+      const timestamp = checkpoint?.timestamp ?? null
+      const objectId = checkpoint?.objectId ?? null
+      return checked(await supabase.from('h2a_run_checkpoints').upsert({ company_id: companyId, run_id: runId,
+        object_type: objectType, upper_bound: checkpoint?.upperBound, page_after: checkpoint?.pageAfter ?? null,
+        cursor_timestamp: timestamp, cursor_object_id: objectId,
+        completed: checkpoint?.completed === true, updated_at: new Date().toISOString() },
+      { onConflict: 'company_id,run_id,object_type' }).select('*').single())
     },
     async saveCursor(companyId, objectType, checkpoint) {
       return checked(await supabase.from('h2a_cursors').upsert({ company_id: companyId, object_type: objectType,

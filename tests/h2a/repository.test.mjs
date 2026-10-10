@@ -206,6 +206,60 @@ test('a terminal run cannot be revived by a delayed background resume', async ()
   }), /Run is not resumable/)
 })
 
+test('run resume returns the post-transition row so a concurrent cancellation is visible', async () => {
+  const before = { id: 'run1', company_id: 'company-1', mode: 'dry_run', status: 'paused', cancel_requested_at: null }
+  const after = { ...before, status: 'running', cancel_requested_at: '2026-10-09T20:00:00.000Z' }
+  const supabase = { rpc: async () => ({ data: true }), from: () => {
+    let updating = false
+    const query = {
+      select() { return this },
+      eq() { return this },
+      in() { return this },
+      update() { updating = true; return this },
+      maybeSingle: async () => ({ data: before, error: null }),
+      single: async () => ({ data: updating ? after : before, error: null }),
+    }
+    return query
+  } }
+  const resumed = await createH2ARepository(supabase).startRun('company-1', {
+    runId: 'run1', mode: 'dry_run', trigger: 'resume',
+  })
+  assert.equal(resumed.status, 'running')
+  assert.equal(resumed.cancel_requested_at, '2026-10-09T20:00:00.000Z')
+})
+
+test('dry-run checkpoints are tenant and run scoped and persist atomically by activity type', async () => {
+  const calls = []
+  const stored = { company_id: 'company-1', run_id: 'run-1', object_type: 'calls',
+    upper_bound: '2026-10-09T20:00:00.001Z', page_after: 'page-2',
+    cursor_timestamp: '2026-10-02T12:00:00.000Z', cursor_object_id: '50', completed: false }
+  const supabase = { rpc: async () => ({ data: true }), from(table) {
+    calls.push(['from', table])
+    return {
+      select() { calls.push(['select']); return this },
+      eq(key, value) { calls.push(['eq', key, value]); return this },
+      maybeSingle: async () => ({ data: stored, error: null }),
+      upsert(row, options) { calls.push(['upsert', row, options]); return this },
+      single: async () => ({ data: stored, error: null }),
+    }
+  } }
+  const repository = createH2ARepository(supabase)
+  assert.deepEqual(await repository.getRunCheckpoint('company-1', 'run-1', 'calls'), {
+    timestamp: '2026-10-02T12:00:00.000Z', objectId: '50',
+    upperBound: '2026-10-09T20:00:00.001Z', pageAfter: 'page-2', completed: false,
+  })
+  await repository.saveRunCheckpoint('company-1', 'run-1', 'calls', {
+    upperBound: '2026-10-09T20:00:00.001Z', pageAfter: null,
+    timestamp: '2026-10-02T12:01:00.000Z', objectId: '51', completed: true,
+  })
+  assert.ok(calls.some(call => call[0] === 'upsert' && call[1].company_id === 'company-1' &&
+    call[1].run_id === 'run-1' && call[1].object_type === 'calls' && call[1].completed === true &&
+    call[1].upper_bound === '2026-10-09T20:00:00.001Z' && call[1].page_after === null &&
+    call[2].onConflict === 'company_id,run_id,object_type'))
+  assert.ok(calls.some(call => call[0] === 'eq' && call[1] === 'company_id' && call[2] === 'company-1'))
+  assert.ok(calls.some(call => call[0] === 'eq' && call[1] === 'run_id' && call[2] === 'run-1'))
+})
+
 test('daily run claim and finish use owner-fenced, retryable service RPCs', async () => {
   const calls = []
   const repository = createH2ARepository({ from: () => { throw Error('table access unexpected') }, rpc: async (name, args) => {

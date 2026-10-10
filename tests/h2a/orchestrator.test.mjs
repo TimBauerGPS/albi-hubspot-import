@@ -85,6 +85,7 @@ test('dry run records previews and leaves every live mutation unused', async () 
     getConfig: async () => ({ state: 'dry_run', portal_id: '123', selected_start_date: '2026-10-01', preflight_status: 'valid' }),
     getMappings: async () => ({ contacts: [], organizations: [], options: [] }),
     startRun: async () => ({ id: 'run1' }), getCursor: async () => null,
+    getRunCheckpoint: async () => null, saveRunCheckpoint: async () => {},
     recordItem: async (_company, row) => { items.push(row) },
     totals: async () => ({ dry_run: items.length }), finishRun: async () => {}, heartbeatLease: async () => true,
   }
@@ -97,7 +98,7 @@ test('dry run records previews and leaves every live mutation unused', async () 
 })
 
 function liveFixture({ contactIds = ['10'], companyIds = ['20'], activities = [{ id: '50', occurredAt: '2026-10-02T12:00:00Z', objectType: 'calls', properties: { hs_timestamp: '2026-10-02T12:00:00Z' } }], albiContacts = [], albiOrganizations = [] } = {}) {
-  const events = [], items = [], durableItems = [], cursors = [], persistedRuns = []
+  const events = [], items = [], durableItems = [], cursors = [], persistedRuns = [], runCheckpoints = new Map()
   const totalsRepository = createH2ARepository({
     from(table) {
       assert.equal(table, 'h2a_item_results')
@@ -120,6 +121,8 @@ function liveFixture({ contactIds = ['10'], companyIds = ['20'], activities = [{
     claimLease: async () => true, releaseLease: async () => { events.push('release') }, heartbeatLease: async () => true,
     getConfig: async () => ({ state: 'live', portal_id: '123', selected_start_date: '2026-10-01', preflight_status: 'valid' }),
     getMappings: async () => mappings, startRun: async () => ({ id: 'run1' }), getCursor: async () => null,
+    getRunCheckpoint: async (_company, _run, type) => runCheckpoints.get(type) ?? null,
+    saveRunCheckpoint: async (_company, _run, type, checkpoint) => { runCheckpoints.set(type, structuredClone(checkpoint)); return checkpoint },
     saveCursor: async (_company, type, cursor) => { cursors.push({ type, cursor }) },
     getItemOutcomes: async (_company, _run, type, id) => items.filter(row => row.object_type === type && row.source_id === id),
     recordItem: async (companyId, row) => {
@@ -161,7 +164,7 @@ function liveFixture({ contactIds = ['10'], companyIds = ['20'], activities = [{
     createContact: async () => { events.push('create:contact'); return { id: '200' } },
     createActivity: async () => { events.push('create:activity'); return { id: '300' } },
   }
-  return { repository, hubspot, albi, events, items, durableItems, cursors, mappings, persistedRuns }
+  return { repository, hubspot, albi, events, items, durableItems, cursors, mappings, persistedRuns, runCheckpoints }
 }
 
 test('live sync creates organization before contact and persists delivery before cursor', async () => {
@@ -371,6 +374,122 @@ test('continuation dispatch follows durable paused run and lease release exactly
   assert.equal(dispatched, 1)
   assert.ok(deps.events.indexOf('finish') < deps.events.indexOf('release'))
   assert.ok(deps.events.indexOf('release') < deps.events.indexOf('dispatch'))
+})
+
+test('requested cancellation stops a resumed run before provider reads and never dispatches another continuation', async () => {
+  const transitions = []
+  let dispatched = 0
+  const repository = {
+    claimLease: async () => true,
+    releaseLease: async () => true,
+    getConfig: async () => ({ state: 'dry_run', portal_id: '123', selected_start_date: '2026-10-01', preflight_status: 'valid' }),
+    startRun: async () => ({ id: 'run-cancelled', status: 'paused', cancel_requested_at: '2026-10-09T20:00:00.000Z' }),
+    totals: async () => ({ dry_run: 12, requires_review: 3 }),
+    finishRun: async (_companyId, runId, status, totals) => {
+      transitions.push({ runId, status, totals })
+      return { id: runId, status }
+    },
+  }
+  const result = await runCompanySync({
+    repository,
+    albi: { listContacts: async () => { throw Error('Albi must not be read after cancellation') } },
+    hubspot: { listActivities: async () => { throw Error('HubSpot must not be read after cancellation') } },
+    dispatchContinuation: async () => { dispatched += 1 },
+  }, { companyId: 'c1', mode: 'dry_run', trigger: 'resume', runId: 'run-cancelled' })
+  assert.deepEqual(result, {
+    status: 'cancelled', companyId: 'c1', runId: 'run-cancelled',
+    totals: { dry_run: 12, requires_review: 3 }, newConflictCount: 0, continuation: false,
+  })
+  assert.deepEqual(transitions, [{ runId: 'run-cancelled', status: 'cancelled', totals: { dry_run: 12, requires_review: 3 } }])
+  assert.equal(dispatched, 0)
+})
+
+test('dry-run continuation resumes from a durable per-run checkpoint instead of restarting', async () => {
+  const activities = [
+    { id: '50', occurredAt: '2026-10-02T12:00:00Z', objectType: 'calls', properties: {} },
+    { id: '51', occurredAt: '2026-10-02T12:01:00Z', objectType: 'calls', properties: {} },
+  ]
+  const deps = liveFixture({ contactIds: [], companyIds: [], activities })
+  deps.repository.getConfig = async () => ({ state: 'dry_run', portal_id: '123', selected_start_date: '2026-10-01', preflight_status: 'valid' })
+  const checkpoints = new Map()
+  deps.repository.getRunCheckpoint = async (_companyId, _runId, objectType) => checkpoints.get(objectType) ?? null
+  deps.repository.saveRunCheckpoint = async (_companyId, _runId, objectType, checkpoint) => {
+    checkpoints.set(objectType, structuredClone(checkpoint))
+    return checkpoint
+  }
+  let clock = 0
+  deps.clockMs = () => clock
+  deps.now = () => new Date('2026-10-09T20:00:00.000Z')
+  const processed = []
+  deps.hubspot.getAssociations = async ({ objectType, objectIds }) => {
+    if (objectType === 'calls') processed.push(objectIds[0])
+    return []
+  }
+  const recordItem = deps.repository.recordItem
+  deps.repository.recordItem = async (companyId, row) => {
+    await recordItem(companyId, row)
+    if (row.object_type === 'calls' && row.source_id === '50') clock = 2000
+  }
+  let dispatched = 0
+  deps.dispatchContinuation = async () => { dispatched += 1 }
+
+  const first = await runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'manual', timeBudgetMs: 6000 })
+  assert.equal(first.status, 'paused')
+  assert.equal(dispatched, 1)
+  assert.deepEqual(checkpoints.get('calls'), {
+    upperBound: '2026-10-09T20:00:00.001Z', pageAfter: null,
+    timestamp: '2026-10-02T12:00:00.000Z', objectId: '50', completed: false,
+  })
+
+  clock = 0
+  const second = await runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'resume', runId: 'run1' })
+  assert.equal(second.status, 'completed')
+  assert.deepEqual(processed, ['50', '51'])
+  assert.deepEqual(checkpoints.get('calls'), {
+    upperBound: '2026-10-09T20:00:00.001Z', pageAfter: null, completed: true,
+  })
+})
+
+test('dry-run continuation persists the next HubSpot page cursor at a budget boundary', async () => {
+  const deps = liveFixture({ contactIds: [], companyIds: [], activities: [] })
+  deps.repository.getConfig = async () => ({ state: 'dry_run', portal_id: '123', selected_start_date: '2026-10-01', preflight_status: 'valid' })
+  const checkpoints = new Map()
+  deps.repository.getRunCheckpoint = async (_companyId, _runId, objectType) => checkpoints.get(objectType) ?? null
+  deps.repository.saveRunCheckpoint = async (_companyId, _runId, objectType, checkpoint) => {
+    checkpoints.set(objectType, structuredClone(checkpoint))
+    return checkpoint
+  }
+  let clock = 0
+  deps.clockMs = () => clock
+  deps.now = () => new Date('2026-10-09T20:00:00.000Z')
+  const processed = [], upperBounds = []
+  deps.hubspot.getAssociations = async ({ objectType, objectIds }) => {
+    if (objectType === 'calls') processed.push(objectIds[0])
+    return []
+  }
+  deps.hubspot.listActivities = async ({ objectType, after, occurredAtLt }) => {
+    if (objectType !== 'calls') return { records: [], after: null }
+    upperBounds.push(occurredAtLt)
+    if (!after) return { records: [{ id: '50', occurredAt: '2026-10-02T12:00:00Z', objectType: 'calls', properties: {} }], after: 'page-2' }
+    assert.equal(after, 'page-2')
+    return { records: [{ id: '51', occurredAt: '2026-10-02T12:01:00Z', objectType: 'calls', properties: {} }], after: null }
+  }
+  const recordItem = deps.repository.recordItem
+  deps.repository.recordItem = async (companyId, row) => {
+    await recordItem(companyId, row)
+    if (row.object_type === 'calls' && row.source_id === '50') clock = 2000
+  }
+  deps.dispatchContinuation = async () => {}
+
+  const first = await runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'manual', timeBudgetMs: 6000 })
+  assert.equal(first.status, 'paused')
+  assert.equal(checkpoints.get('calls')?.pageAfter, 'page-2')
+
+  clock = 0
+  const second = await runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'resume', runId: 'run1' })
+  assert.equal(second.status, 'completed')
+  assert.deepEqual(processed, ['50', '51'])
+  assert.equal(new Set(upperBounds).size, 1)
 })
 
 test('backfill divides a seeded range into Pacific day reads across spring DST', async () => {
