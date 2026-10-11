@@ -58,8 +58,8 @@ test('direct CRM emails and SMS use occurrence filters, never marketing or creat
   assert.deepEqual(f.calls[0].body.filterGroups, [{ filters: [
     { propertyName: 'hs_timestamp', operator: 'GTE', value: start },
     { propertyName: 'hs_timestamp', operator: 'LT', value: end },
-    { propertyName: 'hs_email_direction', operator: 'EQ', value: 'EMAIL' },
   ] }])
+  assert.equal(f.calls[0].body.properties.includes('hs_email_direction'), true)
   assert.equal(f.calls[0].body.after, '100')
   assert.equal(f.calls[0].body.limit, 50)
   const sms = await client.listActivities({ objectType: 'communications', occurredAtGte: start })

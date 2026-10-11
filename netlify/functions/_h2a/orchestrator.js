@@ -456,7 +456,10 @@ export async function runCompanySync(deps, input = {}) {
             ...(after ? { after } : {}), limit: sampleLimitPerType ?? 100 }), deadline)
           if (!Array.isArray(page?.records)) throw new Error('HubSpot returned an invalid activity page')
           const outcomes = []
-          const boundedRecords = sampleLimitPerType === null ? page.records : page.records.slice(0, sampleLimitPerType)
+          const eligibleRecords = sampleLimitPerType !== null && objectType === 'emails'
+            ? page.records.filter(activity => activity.properties?.hs_email_direction === 'EMAIL')
+            : page.records
+          const boundedRecords = sampleLimitPerType === null ? eligibleRecords : eligibleRecords.slice(0, sampleLimitPerType)
           for (const activity of [...boundedRecords].sort((a, b) => {
             const t = Date.parse(a.occurredAt) - Date.parse(b.occurredAt)
             return t || (BigInt(a.id) < BigInt(b.id) ? -1 : BigInt(a.id) > BigInt(b.id) ? 1 : 0)
@@ -492,6 +495,10 @@ export async function runCompanySync(deps, input = {}) {
               await repo.saveRunCheckpoint(companyId, run.id, objectType, { upperBound, pageAfter: page.after,
                 processedCount: sampleProcessedCount, completed: false })
               checkpoint = null
+            } else if (page.after && sampleProcessedCount < sampleLimitPerType) {
+              await repo.saveRunCheckpoint(companyId, run.id, objectType, { upperBound, pageAfter: page.after,
+                processedCount: sampleProcessedCount, completed: false })
+              checkpoint = null
             } else {
               await repo.saveRunCheckpoint(companyId, run.id, objectType, { upperBound, pageAfter: null,
                 processedCount: sampleProcessedCount, completed: true })
@@ -515,7 +522,7 @@ export async function runCompanySync(deps, input = {}) {
           }
           if (!(await repo.heartbeatLease(companyId, ownerToken, 900))) throw new Error('H2A lease was lost')
           if (continuation) break
-          if (sampleLimitPerType !== null) break
+          if (sampleLimitPerType !== null && sampleProcessedCount >= sampleLimitPerType) break
           if (!page.after) break
           if (seen.has(page.after)) throw new Error('HubSpot pagination repeated a cursor')
           seen.add(page.after)

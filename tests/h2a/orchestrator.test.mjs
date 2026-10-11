@@ -124,6 +124,36 @@ test('sample dry run processes at most ten earliest records per activity type an
   assert.equal(processed, 50)
 })
 
+test('sample dry run pages past inbound emails until it finds ten direct emails', async () => {
+  const deps = liveFixture({ contactIds: [], companyIds: [], activities: [] })
+  deps.repository.getConfig = async () => ({ state: 'dry_run', portal_id: '123', selected_start_date: '2026-10-01', preflight_status: 'valid' })
+  deps.repository.startRun = async () => ({ id: 'sample-run', sample_limit_per_type: 10 })
+  const emailSearches = []
+  const processed = []
+  deps.hubspot.listActivities = async ({ objectType, after }) => {
+    if (objectType !== 'emails') return { records: [], after: null }
+    emailSearches.push(after ?? null)
+    const direct = after === 'email-page-2'
+    return {
+      records: Array.from({ length: 10 }, (_, index) => ({
+        id: String((direct ? 2000 : 1000) + index),
+        occurredAt: `2026-10-02T12:${String(index).padStart(2, '0')}:00Z`,
+        objectType: 'emails',
+        properties: { hs_email_direction: direct ? 'EMAIL' : 'INCOMING_EMAIL' },
+      })),
+      after: direct ? 'email-page-3' : 'email-page-2',
+    }
+  }
+  deps.hubspot.getAssociations = async ({ objectIds }) => { processed.push(objectIds[0]); return [] }
+
+  const result = await runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'resume', runId: 'sample-run' })
+
+  assert.equal(result.status, 'completed')
+  assert.deepEqual(emailSearches, [null, 'email-page-2'])
+  assert.equal(processed.length, 10)
+  assert.equal(deps.items.some(item => item.sanitized_details?.reason === 'not_verified_direct_crm_email'), false)
+})
+
 async function assertSampleContinuation(pageChanges) {
   const deps = liveFixture({ contactIds: [], companyIds: [], activities: [] })
   deps.repository.getConfig = async () => ({ state: 'dry_run', portal_id: '123', selected_start_date: '2026-10-01', preflight_status: 'valid' })
