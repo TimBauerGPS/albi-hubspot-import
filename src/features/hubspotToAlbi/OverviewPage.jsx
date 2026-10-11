@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useOutletContext } from 'react-router-dom'
 import { getH2AOverview, runH2ASync } from '../../lib/hubspotToAlbi'
 import { mergeOverviewRefresh, overviewPollingPauseNotice, presentRunTotals } from './operations.js'
+import { presentReviewBreakdown } from './reviewBreakdown.js'
 
 const ACTIVE_STATUSES = new Set(['queued', 'running', 'paused'])
 const MAX_ACTIVE_POLLS = 12
@@ -47,6 +48,35 @@ function RunTotals({ run }) {
         </div>
       ))}
     </dl>
+  )
+}
+
+function ReviewBreakdown({ run }) {
+  const breakdown = presentReviewBreakdown(run)
+  if (!breakdown) return null
+
+  return (
+    <details className="mt-3 max-w-2xl text-xs text-gray-600">
+      <summary className="w-fit cursor-pointer rounded font-semibold text-brand-700 hover:text-brand-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2">
+        Why {breakdown.count} need review
+      </summary>
+      <div className="mt-3 space-y-3 border-l-2 border-gray-200 pl-3">
+        {breakdown.groups.map(group => (
+          <section key={group.key}>
+            <h4 className="font-semibold text-gray-900">{group.label}</h4>
+            <p className="mt-0.5 leading-5 text-gray-500">{group.description}</p>
+            <ul className="mt-1.5 space-y-1">
+              {group.items.map(item => (
+                <li key={item.key} className="flex items-start justify-between gap-4 leading-5">
+                  <span><span className="font-medium text-gray-700">{item.objectLabel}</span><span className="text-gray-500"> · {item.reasonLabel}</span></span>
+                  <span className="shrink-0 font-semibold tabular-nums text-gray-900">{item.count}</span>
+                </li>
+              ))}
+            </ul>
+          </section>
+        ))}
+      </div>
+    </details>
   )
 }
 
@@ -321,6 +351,7 @@ export default function OverviewPage() {
                     </div>
                     <p className="mt-2 text-sm font-medium text-gray-900">{dateTime(item.started_at || item.created_at)}</p>
                     <div className="mt-2"><RunTotals run={item} /></div>
+                    <ReviewBreakdown run={item} />
                     {item.errorCategory && <p className="mt-2 text-xs font-medium text-red-700">{item.errorCategory}</p>}
                   </div>
                   <p className="text-xs text-gray-500">{item.finished_at ? `Finished ${dateTime(item.finished_at)}` : 'Not finished'}</p>

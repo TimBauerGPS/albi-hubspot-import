@@ -1,6 +1,7 @@
 import { H2AAuthError, requireH2ARequest } from './_h2a/auth.js'
 
 const RUN_SELECT = 'id,mode,trigger,status,totals,sample_limit_per_type,created_at,started_at,finished_at,error_summary'
+const REVIEW_ITEM_SELECT = 'id,run_id,object_type,source_id,albi_target_type,albi_target_id,outcome,sanitized_details,created_at'
 const RUN_FIELDS = ['id', 'mode', 'trigger', 'status', 'created_at', 'started_at', 'finished_at']
 const TOTAL_FIELDS = new Set([
   'created', 'updated', 'linked', 'delivered', 'reconciled', 'skipped', 'conflict', 'failed', 'dry_run',
@@ -20,6 +21,48 @@ const ERROR_CATEGORIES = Object.freeze({
   'transient:network': 'Temporary provider problem',
   'rate_limit:operation_failed': 'Provider rate limit',
 })
+const REVIEW_OBJECT_TYPES = Object.freeze({
+  companies: 'organizations',
+  company: 'organizations',
+  organizations: 'organizations',
+  organization: 'organizations',
+  contacts: 'contacts',
+  contact: 'contacts',
+  meetings: 'meetings',
+  meeting: 'meetings',
+  calls: 'calls',
+  call: 'calls',
+  emails: 'emails',
+  email: 'emails',
+  communications: 'communications',
+  communication: 'communications',
+  notes: 'notes',
+  note: 'notes',
+})
+const ATTENTION_REASONS = new Set([
+  'missing_target',
+  'multiple_candidates',
+  'multiple_associated_organizations',
+  'missing_hubspot_contact',
+  'missing_hubspot_company',
+  'contact_type_confirmation_required',
+  'activity_type_confirmation_required',
+  'organization_type_confirmation_required',
+  'target_already_mapped',
+  'duplicate_candidates',
+  'email_phone_disagree',
+  'unsupported_phone_evidence',
+  'name_only_candidate',
+  'missing_required_name',
+  'contradictory_evidence',
+  'albi_organization_update_contract_unverified',
+  'nonblank_field_difference',
+  'albi_contact_update_contract_unverified',
+  'albi_contact_association_contract_unverified',
+  'invalid_phone_length',
+  'unsupported_international_format',
+  'extension_not_supported',
+])
 
 export class H2AOverviewError extends Error {
   constructor(statusCode, message) {
@@ -71,6 +114,47 @@ export function sanitizeOverviewRun(run) {
   return result
 }
 
+function resultIdentity(row) {
+  return JSON.stringify([row.run_id, row.object_type, row.source_id, row.albi_target_type, row.albi_target_id])
+}
+
+export function aggregateSafeReviewBreakdowns(rows) {
+  const latest = new Map()
+  for (const row of [...(rows ?? [])].sort((left, right) =>
+    Date.parse(left.created_at) - Date.parse(right.created_at) || String(left.id).localeCompare(String(right.id)))) {
+    latest.set(resultIdentity(row), row)
+  }
+
+  const grouped = new Map()
+  for (const row of latest.values()) {
+    if (row?.outcome !== 'dry_run' || row?.sanitized_details?.proposedAction !== 'review_conflict' ||
+      typeof row.run_id !== 'string') continue
+    const rawReason = row.sanitized_details?.reason
+    const kind = rawReason === 'dry_run_preview' ? 'simulation' : 'attention'
+    const reason = rawReason === 'dry_run_preview'
+      ? 'planned_record_dependency'
+      : ATTENTION_REASONS.has(rawReason) ? rawReason : 'other_review_reason'
+    const objectType = typeof row.object_type === 'string' && Object.hasOwn(REVIEW_OBJECT_TYPES, row.object_type)
+      ? REVIEW_OBJECT_TYPES[row.object_type]
+      : 'other'
+    const key = JSON.stringify([row.run_id, kind, objectType, reason])
+    const current = grouped.get(key)
+    grouped.set(key, { runId: row.run_id, kind, objectType, reason, count: (current?.count ?? 0) + 1 })
+  }
+
+  const byRun = new Map()
+  for (const { runId, ...item } of grouped.values()) {
+    const items = byRun.get(runId) ?? []
+    items.push(item)
+    byRun.set(runId, items)
+  }
+  for (const items of byRun.values()) {
+    items.sort((left, right) => left.kind.localeCompare(right.kind) ||
+      left.objectType.localeCompare(right.objectType) || left.reason.localeCompare(right.reason))
+  }
+  return byRun
+}
+
 export async function getOverview({ repository, companyId, cursor = null, limit = 25 }) {
   if (typeof companyId !== 'string' || !companyId.trim()) fail(400, 'A valid company is required.')
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) fail(400, 'Overview page size must be between 1 and 100.')
@@ -84,6 +168,12 @@ export async function getOverview({ repository, companyId, cursor = null, limit 
   ])
   const rows = Array.isArray(page?.items) ? page.items : []
   const selected = rows.slice(0, limit)
+  const sampleRunIds = selected.filter(run => run?.mode === 'dry_run' && Number.isInteger(run?.sample_limit_per_type) &&
+    run.sample_limit_per_type >= 1 && run.sample_limit_per_type <= 50 &&
+    Number.isSafeInteger(run?.totals?.requires_review) && run.totals.requires_review > 0)
+    .map(run => run.id).filter(id => typeof id === 'string')
+  const reviewItems = sampleRunIds.length > 0 ? await repository.listSampleReviewItems(companyId, sampleRunIds) : []
+  const reviewBreakdowns = aggregateSafeReviewBreakdowns(reviewItems)
   const last = selected.at(-1)
   return {
     summary: {
@@ -93,7 +183,12 @@ export async function getOverview({ repository, companyId, cursor = null, limit 
       unresolvedConflictCount: Number.isSafeInteger(unresolvedConflictCount) && unresolvedConflictCount >= 0
         ? unresolvedConflictCount : 0,
     },
-    runs: selected.map(sanitizeOverviewRun),
+    runs: selected.map(run => {
+      const sanitized = sanitizeOverviewRun(run)
+      const breakdown = reviewBreakdowns.get(run.id)
+      if (breakdown?.length) sanitized.reviewBreakdown = breakdown
+      return sanitized
+    }),
     nextCursor: (page?.hasMore === true || rows.length > limit) && last
       ? { effectiveAt: effectiveAt(last), id: last.id }
       : null,
@@ -148,6 +243,20 @@ export function createOverviewRepository(supabase) {
         .eq('company_id', companyId).eq('status', 'open')
       if (result?.error) throw result.error
       return Number.isSafeInteger(result?.count) ? result.count : 0
+    },
+    async listSampleReviewItems(companyId, runIds) {
+      if (!Array.isArray(runIds) || runIds.length === 0) return []
+      const rows = []
+      for (let start = 0; start < 100000; start += 1000) {
+        const result = await supabase.from('h2a_item_results').select(REVIEW_ITEM_SELECT)
+          .eq('company_id', companyId).in('run_id', runIds)
+          .order('id', { ascending: true }).range(start, start + 999)
+        const page = checked(result)
+        if (!Array.isArray(page)) throw new Error('Invalid review result page')
+        rows.push(...page)
+        if (page.length < 1000) return rows
+      }
+      throw new Error('Review result page limit exceeded')
     },
   }
 }

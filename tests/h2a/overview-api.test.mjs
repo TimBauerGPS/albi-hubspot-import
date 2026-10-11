@@ -51,6 +51,10 @@ function repository(overrides = {}) {
       calls.push(['countOpenConflicts', companyId])
       return 4
     },
+    async listSampleReviewItems(companyId, runIds) {
+      calls.push(['listSampleReviewItems', companyId, runIds])
+      return []
+    },
     ...overrides,
   }
 }
@@ -75,6 +79,7 @@ function recordingSupabase() {
     is(...args) { return this.operation('is', ...args) }
     in(...args) { return this.operation('in', ...args) }
     order(...args) { return this.operation('order', ...args) }
+    range(...args) { return this.operation('range', ...args) }
     limit(...args) { return this.operation('limit', ...args) }
     or(...args) { return this.operation('or', ...args) }
     maybeSingle() { return this.operation('maybeSingle') }
@@ -135,6 +140,81 @@ test('overview exposes only validated sample metadata needed to label bounded dr
     assert.equal(sanitizeOverviewRun(run({ mode: 'dry_run', sample_limit_per_type: value })).sampleLimitPerType, undefined)
   }
   assert.equal(sanitizeOverviewRun(run({ mode: 'live', sample_limit_per_type: 10 })).sampleLimitPerType, undefined)
+})
+
+test('sample dry-run review breakdown is deduplicated and exposes only fixed safe categories', async () => {
+  const sampleRunId = '00000000-0000-4000-8000-000000000009'
+  const sample = run({
+    id: sampleRunId,
+    mode: 'dry_run',
+    sample_limit_per_type: 10,
+    totals: { requires_review: 3 },
+  })
+  const items = [
+    {
+      id: '00000000-0000-4000-8000-000000000101', run_id: sampleRunId,
+      object_type: 'contacts', source_id: 'private-contact-id', albi_target_type: null, albi_target_id: null,
+      outcome: 'dry_run', sanitized_details: { proposedAction: 'review_conflict', reason: 'dry_run_preview', email: 'private@example.com' },
+      created_at: '2026-10-05T12:00:00.000Z',
+    },
+    {
+      id: '00000000-0000-4000-8000-000000000102', run_id: sampleRunId,
+      object_type: 'contacts', source_id: 'private-contact-id', albi_target_type: null, albi_target_id: null,
+      outcome: 'dry_run', sanitized_details: { proposedAction: 'create_contact', reason: 'private-replaced-reason' },
+      created_at: '2026-10-05T12:01:00.000Z',
+    },
+    {
+      id: '00000000-0000-4000-8000-000000000103', run_id: sampleRunId,
+      object_type: 'companies', source_id: 'private-company-id', albi_target_type: 'organization', albi_target_id: 'private-albi-id',
+      outcome: 'dry_run', sanitized_details: { proposedAction: 'review_conflict', reason: 'name_only_candidate', providerMessage: 'must not leak' },
+      created_at: '2026-10-05T12:02:00.000Z',
+    },
+    {
+      id: '00000000-0000-4000-8000-000000000104', run_id: sampleRunId,
+      object_type: 'secret-provider-object', source_id: 'private-source-id', albi_target_type: null, albi_target_id: null,
+      outcome: 'dry_run', sanitized_details: { proposedAction: 'review_conflict', reason: 'provider_secret_detail' },
+      created_at: '2026-10-05T12:03:00.000Z',
+    },
+    {
+      id: '00000000-0000-4000-8000-000000000105', run_id: sampleRunId,
+      object_type: 'emails', source_id: 'private-email-id', albi_target_type: null, albi_target_id: null,
+      outcome: 'dry_run', sanitized_details: { proposedAction: 'review_conflict', reason: 'dry_run_preview' },
+      created_at: '2026-10-05T12:04:00.000Z',
+    },
+    {
+      id: '00000000-0000-4000-8000-000000000106', run_id: sampleRunId,
+      object_type: 'companies', source_id: 'private-company-id', albi_target_type: 'organization', albi_target_id: 'private-albi-id',
+      outcome: 'skipped', sanitized_details: { reason: 'superseded_review' },
+      created_at: '2026-10-05T12:05:00.000Z',
+    },
+    {
+      id: '00000000-0000-4000-8000-000000000107', run_id: sampleRunId,
+      object_type: 'calls', source_id: 'private-call-id', albi_target_type: null, albi_target_id: null,
+      outcome: 'dry_run', sanitized_details: { proposedAction: 'review_conflict', reason: 'name_only_candidate' },
+      created_at: '2026-10-05T12:06:00.000Z',
+    },
+  ]
+  const repo = repository({
+    async listRuns() { return { items: [sample], hasMore: false } },
+    async listSampleReviewItems(companyId, runIds) {
+      assert.equal(companyId, 'company-1')
+      assert.deepEqual(runIds, [sampleRunId])
+      return items
+    },
+  })
+
+  const result = await getOverview({ repository: repo, companyId: 'company-1', limit: 25 })
+
+  assert.deepEqual(result.runs[0].reviewBreakdown, [
+    { kind: 'attention', objectType: 'calls', reason: 'name_only_candidate', count: 1 },
+    { kind: 'attention', objectType: 'other', reason: 'other_review_reason', count: 1 },
+    { kind: 'simulation', objectType: 'emails', reason: 'planned_record_dependency', count: 1 },
+  ])
+  const serialized = JSON.stringify(result.runs[0].reviewBreakdown)
+  for (const secret of ['private@example.com', 'private-contact-id', 'private-company-id', 'private-albi-id',
+    'providerMessage', 'must not leak', 'provider_secret_detail', 'secret-provider-object']) {
+    assert.equal(serialized.includes(secret), false)
+  }
 })
 
 test('overview uses an opaque deterministic effective-time and id cursor', async () => {
@@ -205,6 +285,24 @@ test('overview summary repository queries retain the authorized company predicat
     assert.ok(query.operations.some(item => item.method === 'eq' &&
       item.args[0] === 'company_id' && item.args[1] === 'company-1'))
   }
+})
+
+test('sample review item query is company scoped, run bounded, and selects only aggregation fields', async () => {
+  const supabase = recordingSupabase()
+  const repo = createOverviewRepository(supabase)
+  const ids = [runId, '00000000-0000-4000-8000-000000000002']
+
+  await repo.listSampleReviewItems('company-1', ids)
+
+  const query = supabase.queries.find(item => item.table === 'h2a_item_results')
+  assert.ok(query)
+  assert.deepEqual(query.operations.find(item => item.method === 'select')?.args, [
+    'id,run_id,object_type,source_id,albi_target_type,albi_target_id,outcome,sanitized_details,created_at',
+  ])
+  assert.ok(query.operations.some(item => item.method === 'eq' && item.args[0] === 'company_id' && item.args[1] === 'company-1'))
+  assert.equal(query.operations.some(item => item.method === 'eq' && item.args[0] === 'outcome'), false)
+  assert.ok(query.operations.some(item => item.method === 'in' && item.args[0] === 'run_id' && item.args[1] === ids))
+  assert.deepEqual(query.operations.find(item => item.method === 'range')?.args, [0, 999])
 })
 
 test('member reads and super-admin tenant selection use the authorization choke point', async () => {

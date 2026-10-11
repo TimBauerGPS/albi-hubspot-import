@@ -11,6 +11,7 @@ import {
   proposedFieldComparisons,
   proposedConflictFields,
 } from '../../src/features/hubspotToAlbi/operations.js'
+import { presentReviewBreakdown } from '../../src/features/hubspotToAlbi/reviewBreakdown.js'
 
 const root = new URL('../../src/features/hubspotToAlbi/', import.meta.url)
 const source = name => readFile(new URL(name, root), 'utf8')
@@ -28,6 +29,50 @@ test('overview totals use fixed dry-run and live vocabularies and reject unsafe 
     { key: 'would_create_contacts', label: 'Would create contacts', value: 4 },
     { key: 'would_deliver_activities', label: 'Would deliver activities', value: 7 },
   ])
+})
+
+test('sample dry-run review breakdown uses fixed privacy-safe labels and groups', () => {
+  assert.deepEqual(presentReviewBreakdown({
+    mode: 'dry_run',
+    sampleLimitPerType: 10,
+    totals: { requires_review: 9 },
+    reviewBreakdown: [
+      { kind: 'simulation', objectType: 'contacts', reason: 'planned_record_dependency', count: 4 },
+      { kind: 'attention', objectType: 'contacts', reason: 'name_only_candidate', count: 2 },
+      { kind: 'attention', objectType: 'contacts', reason: 'name_only_candidate', count: 1 },
+      { kind: 'not-safe', objectType: 'provider_person_123', reason: 'secret_provider_message', count: 2 },
+      { kind: 'attention', objectType: 'emails', reason: 'missing_target', count: 0 },
+    ],
+  }), {
+    count: 9,
+    groups: [
+      {
+        key: 'simulation',
+        label: 'Expected in a dry run',
+        description: 'These depend on a contact or organization that would be created first, so they are not necessarily real problems.',
+        items: [
+          { key: 'contacts:planned_record_dependency', objectLabel: 'Contacts', reasonLabel: 'Depends on a record that would be created', count: 4 },
+        ],
+      },
+      {
+        key: 'attention',
+        label: 'Needs attention',
+        description: 'These are match, data, or mapping questions to review before a live sync.',
+        items: [
+          { key: 'contacts:name_only_candidate', objectLabel: 'Contacts', reasonLabel: 'Match is based on name only', count: 3 },
+          { key: 'other:other_review_reason', objectLabel: 'Other records', reasonLabel: 'Other review reason', count: 2 },
+        ],
+      },
+    ],
+  })
+})
+
+test('review breakdown stays hidden outside populated sample dry runs', () => {
+  const breakdown = [{ kind: 'attention', objectType: 'contacts', reason: 'missing_target', count: 1 }]
+  assert.equal(presentReviewBreakdown({ mode: 'dry_run', totals: { requires_review: 1 }, reviewBreakdown: breakdown }), null)
+  assert.equal(presentReviewBreakdown({ mode: 'live', sampleLimitPerType: 10, totals: { requires_review: 1 }, reviewBreakdown: breakdown }), null)
+  assert.equal(presentReviewBreakdown({ mode: 'dry_run', sampleLimitPerType: 10, totals: { requires_review: 0 }, reviewBreakdown: breakdown }), null)
+  assert.equal(presentReviewBreakdown({ mode: 'dry_run', sampleLimitPerType: 10, totals: { requires_review: 1 }, reviewBreakdown: [] }), null)
 })
 
 test('resolution builder emits exact contracts from displayed proposed fields only', () => {
@@ -148,6 +193,10 @@ test('overview covers loading, empty, metrics, active status, run-now, and keyse
   assert.match(page, /Sample dry run/)
   assert.match(page, /Full dry run/)
   assert.match(page, /sampleLimitPerType/)
+  assert.match(page, /<details/)
+  assert.match(page, /<summary/)
+  assert.match(page, /Why \{breakdown\.count\} need review/)
+  assert.match(page, /presentReviewBreakdown/)
 })
 
 test('conflict queue exposes count, focused refresh, pagination, and member read-only mode', async () => {
