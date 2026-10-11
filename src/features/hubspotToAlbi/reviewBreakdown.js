@@ -33,23 +33,30 @@ const REASON_LABELS = Object.freeze({
   invalid_phone_length: 'Phone number has an invalid length',
   unsupported_international_format: 'Phone format is not supported',
   extension_not_supported: 'Phone extensions are not supported',
+  organization_fields_require_review: 'Related organization fields need review',
+  contact_fields_require_review: 'Related contact fields need review',
+  association_contract_unverified: 'Related contact-organization link needs review',
   other_review_reason: 'Other review reason',
 })
 
 const GROUP_COPY = Object.freeze({
+  record: {
+    label: 'Underlying records to review',
+    description: 'These contacts and organizations need a matching, data, or mapping decision.',
+  },
+  activity: {
+    label: 'Activities blocked by those records',
+    description: 'These activities are blocked by a related record or another prerequisite that needs review.',
+  },
   simulation: {
     label: 'Expected in a dry run',
     description: 'These depend on a contact or organization that would be created first, so they are not necessarily real problems.',
-  },
-  attention: {
-    label: 'Needs attention',
-    description: 'These are match, data, or mapping questions to review before a live sync.',
   },
 })
 
 function safeEntry(entry) {
   if (!Number.isSafeInteger(entry?.count) || entry.count <= 0) return null
-  const kind = entry.kind === 'simulation' ? 'simulation' : 'attention'
+  const kind = entry.kind === 'record' || entry.kind === 'simulation' ? entry.kind : 'activity'
   const objectType = Object.hasOwn(OBJECT_LABELS, entry.objectType) ? entry.objectType : 'other'
   const reason = Object.hasOwn(REASON_LABELS, entry.reason) ? entry.reason : 'other_review_reason'
   return { kind, objectType, reason, count: entry.count }
@@ -71,7 +78,7 @@ export function presentReviewBreakdown(run) {
     grouped.set(key, { ...entry, count: nextCount })
   }
 
-  const groups = ['simulation', 'attention'].flatMap(kind => {
+  const groups = ['record', 'activity', 'simulation'].flatMap(kind => {
     const items = [...grouped.values()]
       .filter(item => item.kind === kind)
       .sort((left, right) => right.count - left.count
@@ -83,7 +90,8 @@ export function presentReviewBreakdown(run) {
         reasonLabel: REASON_LABELS[item.reason],
         count: item.count,
       }))
-    return items.length > 0 ? [{ key: kind, ...GROUP_COPY[kind], items }] : []
+    const total = items.reduce((sum, item) => sum + item.count, 0)
+    return items.length > 0 ? [{ key: kind, ...GROUP_COPY[kind], total, items }] : []
   })
 
   return groups.length > 0 ? { count, groups } : null

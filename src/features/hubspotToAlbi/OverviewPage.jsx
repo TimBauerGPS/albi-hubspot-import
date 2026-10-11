@@ -63,7 +63,10 @@ function ReviewBreakdown({ run }) {
       <div className="mt-3 space-y-3 border-l-2 border-gray-200 pl-3">
         {breakdown.groups.map(group => (
           <section key={group.key}>
-            <h4 className="font-semibold text-gray-900">{group.label}</h4>
+            <h4 className="flex items-baseline gap-1.5 font-semibold text-gray-900">
+              <span>{group.label}</span>
+              <span className="text-gray-500 tabular-nums">({group.total})</span>
+            </h4>
             <p className="mt-0.5 leading-5 text-gray-500">{group.description}</p>
             <ul className="mt-1.5 space-y-1">
               {group.items.map(item => (

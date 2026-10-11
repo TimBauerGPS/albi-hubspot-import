@@ -59,6 +59,9 @@ const ATTENTION_REASONS = new Set([
   'nonblank_field_difference',
   'albi_contact_update_contract_unverified',
   'albi_contact_association_contract_unverified',
+  'organization_fields_require_review',
+  'contact_fields_require_review',
+  'association_contract_unverified',
   'invalid_phone_length',
   'unsupported_international_format',
   'extension_not_supported',
@@ -130,13 +133,15 @@ export function aggregateSafeReviewBreakdowns(rows) {
     if (row?.outcome !== 'dry_run' || row?.sanitized_details?.proposedAction !== 'review_conflict' ||
       typeof row.run_id !== 'string') continue
     const rawReason = row.sanitized_details?.reason
-    const kind = rawReason === 'dry_run_preview' ? 'simulation' : 'attention'
     const reason = rawReason === 'dry_run_preview'
       ? 'planned_record_dependency'
       : ATTENTION_REASONS.has(rawReason) ? rawReason : 'other_review_reason'
     const objectType = typeof row.object_type === 'string' && Object.hasOwn(REVIEW_OBJECT_TYPES, row.object_type)
       ? REVIEW_OBJECT_TYPES[row.object_type]
       : 'other'
+    const kind = rawReason === 'dry_run_preview'
+      ? 'simulation'
+      : objectType === 'contacts' || objectType === 'organizations' ? 'record' : 'activity'
     const key = JSON.stringify([row.run_id, kind, objectType, reason])
     const current = grouped.get(key)
     grouped.set(key, { runId: row.run_id, kind, objectType, reason, count: (current?.count ?? 0) + 1 })

@@ -148,7 +148,7 @@ test('sample dry-run review breakdown is deduplicated and exposes only fixed saf
     id: sampleRunId,
     mode: 'dry_run',
     sample_limit_per_type: 10,
-    totals: { requires_review: 3 },
+    totals: { requires_review: 7 },
   })
   const items = [
     {
@@ -193,6 +193,30 @@ test('sample dry-run review breakdown is deduplicated and exposes only fixed saf
       outcome: 'dry_run', sanitized_details: { proposedAction: 'review_conflict', reason: 'name_only_candidate' },
       created_at: '2026-10-05T12:06:00.000Z',
     },
+    {
+      id: '00000000-0000-4000-8000-000000000108', run_id: sampleRunId,
+      object_type: 'contacts', source_id: 'private-contact-id-2', albi_target_type: null, albi_target_id: null,
+      outcome: 'dry_run', sanitized_details: { proposedAction: 'review_conflict', reason: 'name_only_candidate' },
+      created_at: '2026-10-05T12:07:00.000Z',
+    },
+    {
+      id: '00000000-0000-4000-8000-000000000109', run_id: sampleRunId,
+      object_type: 'meetings', source_id: 'private-meeting-id', albi_target_type: null, albi_target_id: null,
+      outcome: 'dry_run', sanitized_details: { proposedAction: 'review_conflict', reason: 'contact_fields_require_review' },
+      created_at: '2026-10-05T12:08:00.000Z',
+    },
+    {
+      id: '00000000-0000-4000-8000-000000000110', run_id: sampleRunId,
+      object_type: 'emails', source_id: 'private-email-id-2', albi_target_type: null, albi_target_id: null,
+      outcome: 'dry_run', sanitized_details: { proposedAction: 'review_conflict', reason: 'organization_fields_require_review' },
+      created_at: '2026-10-05T12:09:00.000Z',
+    },
+    {
+      id: '00000000-0000-4000-8000-000000000111', run_id: sampleRunId,
+      object_type: 'notes', source_id: 'private-note-id', albi_target_type: null, albi_target_id: null,
+      outcome: 'dry_run', sanitized_details: { proposedAction: 'review_conflict', reason: 'association_contract_unverified' },
+      created_at: '2026-10-05T12:10:00.000Z',
+    },
   ]
   const repo = repository({
     async listRuns() { return { items: [sample], hasMore: false } },
@@ -206,10 +230,16 @@ test('sample dry-run review breakdown is deduplicated and exposes only fixed saf
   const result = await getOverview({ repository: repo, companyId: 'company-1', limit: 25 })
 
   assert.deepEqual(result.runs[0].reviewBreakdown, [
-    { kind: 'attention', objectType: 'calls', reason: 'name_only_candidate', count: 1 },
-    { kind: 'attention', objectType: 'other', reason: 'other_review_reason', count: 1 },
+    { kind: 'activity', objectType: 'calls', reason: 'name_only_candidate', count: 1 },
+    { kind: 'activity', objectType: 'emails', reason: 'organization_fields_require_review', count: 1 },
+    { kind: 'activity', objectType: 'meetings', reason: 'contact_fields_require_review', count: 1 },
+    { kind: 'activity', objectType: 'notes', reason: 'association_contract_unverified', count: 1 },
+    { kind: 'activity', objectType: 'other', reason: 'other_review_reason', count: 1 },
+    { kind: 'record', objectType: 'contacts', reason: 'name_only_candidate', count: 1 },
     { kind: 'simulation', objectType: 'emails', reason: 'planned_record_dependency', count: 1 },
   ])
+  assert.equal(result.runs[0].reviewBreakdown.reduce((sum, item) => sum + item.count, 0),
+    result.runs[0].totals.requires_review)
   const serialized = JSON.stringify(result.runs[0].reviewBreakdown)
   for (const secret of ['private@example.com', 'private-contact-id', 'private-company-id', 'private-albi-id',
     'providerMessage', 'must not leak', 'provider_secret_detail', 'secret-provider-object']) {
