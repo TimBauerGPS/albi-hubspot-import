@@ -783,10 +783,13 @@ function storedReviewRepository(deps) {
   return createH2ARepository({ rpc: async () => ({}), from(table) {
     assert.ok(['h2a_sync_runs', 'h2a_dry_run_reviews'].includes(table))
     const filters = [], orders = []
-    let rowLimit, countOnly = false
+    let rowLimit, rangeStart = 0, rangeEnd, countOnly = false, deleting = false
     function execute() {
       let rows = table === 'h2a_sync_runs' ? deps.persistedRuns : [...deps.reviewRows.values()]
       rows = rows.filter(row => filters.every(filter => filter(row)))
+      if (deleting) for (const [key, row] of deps.reviewRows) {
+        if (filters.every(filter => filter(row))) deps.reviewRows.delete(key)
+      }
       rows = [...rows].sort((left, right) => {
         for (const [key, ascending] of orders) {
           const result = String(left[key]).localeCompare(String(right[key])) * (ascending ? 1 : -1)
@@ -794,14 +797,18 @@ function storedReviewRepository(deps) {
         }
         return 0
       })
-      return { data: countOnly ? null : rows.slice(0, rowLimit), count: rows.length, error: null }
+      return { data: countOnly ? null : rows.slice(0, rowLimit).slice(rangeStart, rangeEnd), count: rows.length, error: null }
     }
     return {
       select(_fields, options) { countOnly = options?.head === true; return this },
       eq(key, value) { filters.push(row => row[key] === value); return this },
+      neq(key, value) { filters.push(row => row[key] !== value); return this },
+      in(key, values) { filters.push(row => values.includes(row[key])); return this },
       gt(key, value) { filters.push(row => Date.parse(row[key]) > Date.parse(value)); return this },
       order(key, options) { orders.push([key, options.ascending]); return this },
       limit(value) { rowLimit = value; return this },
+      range(start, end) { rangeStart = start; rangeEnd = end + 1; return this },
+      delete() { assert.equal(table, 'h2a_dry_run_reviews'); deleting = true; return this },
       maybeSingle: async () => ({ data: execute().data[0] ?? null, error: null }),
       then(resolve, reject) { return Promise.resolve(execute()).then(resolve, reject) },
     }
@@ -843,7 +850,7 @@ function reviewSampleFixture(options = {}, runOverrides = {}) {
   deps.repository.pruneSupersededDryRunReviews = async (company, keepId) => {
     prunes.push({ company, keepId })
     deps.events.push('prune')
-    for (const [key, row] of rows) if (row.run_id !== keepId && key.startsWith(`${company}:`)) rows.delete(key)
+    return storedReviewRepository(deps).pruneSupersededDryRunReviews(company, keepId)
   }
   deps.repository.getCurrentReviewSample = async (company, after) => {
     assert.equal(company, 'c1')
@@ -1000,6 +1007,49 @@ test('a missing initial date lock skips pruning without querying an undefined cu
   const result = await runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'manual' })
   assert.equal(result.status, 'completed')
   assert.equal(deps.prunes.length, 0)
+})
+
+test('older completion preserves a newer paused sample capture through its later completed resume', async () => {
+  const deps = reviewSampleFixture({ activities: [] }, { id: 'older-A' })
+  const newer = { id: 'newer-B', company_id: 'c1', mode: 'dry_run', status: 'paused',
+    sample_limit_per_type: 10, review_capture_version: 1, created_at: '2026-10-03T12:00:00Z' }
+  deps.persistedRuns.push(newer)
+  deps.reviewRows.set('c1:newer-B:123:contacts:30', { company_id: 'c1', run_id: 'newer-B',
+    portal_id: '123', object_type: 'contacts', source_id: '30', status: 'needs_review' })
+  const repository = storedReviewRepository(deps)
+  const first = await runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'manual', runId: 'older-A' })
+  assert.equal(first.status, 'completed')
+  assert.equal(await repository.countDryRunReviews('c1', 'newer-B'), 1)
+  Object.assign(deps.sampleRun, newer)
+  const second = await runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'resume', runId: 'newer-B' })
+  assert.equal(second.status, 'completed')
+  assert.equal((await repository.getCurrentReviewSample('c1', '2026-10-01T00:00:00Z')).id, 'newer-B')
+  assert.equal(await repository.countDryRunReviews('c1', 'newer-B'), 1)
+  assert.equal(await repository.hasCleanReviewSampleDryRun('c1', '2026-10-01T00:00:00Z'), false)
+})
+
+test('newer completion prunes only terminal capable sets and preserves every older resumable set', async () => {
+  const deps = reviewSampleFixture({ activities: [] }, { id: 'newest-D', created_at: '2026-10-04T12:00:00Z' })
+  const retained = ['queued', 'running', 'paused', 'partially_failed', 'failed']
+  const states = [...retained, 'completed', 'cancelled']
+  for (const status of states) {
+    const id = `old-${status}`
+    deps.persistedRuns.push({ id, company_id: 'c1', mode: 'dry_run', status,
+      sample_limit_per_type: 10, review_capture_version: 1, created_at: '2026-10-02T12:00:00Z' })
+    deps.reviewRows.set(`c1:${id}:123:contacts:30`, { company_id: 'c1', run_id: id, status: 'needs_review' })
+  }
+  deps.persistedRuns.push({ id: 'other-tenant', company_id: 'c2', mode: 'dry_run', status: 'completed',
+    sample_limit_per_type: 10, review_capture_version: 1, created_at: '2026-10-02T12:00:00Z' })
+  deps.reviewRows.set('c2:other-tenant:123:contacts:30', { company_id: 'c2', run_id: 'other-tenant' })
+  deps.persistedRuns.push({ id: 'historical', company_id: 'c1', mode: 'dry_run', status: 'completed',
+    sample_limit_per_type: 10, review_capture_version: null, created_at: '2026-10-02T12:00:00Z' })
+  deps.reviewRows.set('c1:historical:123:contacts:30', { company_id: 'c1', run_id: 'historical' })
+  const result = await runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'manual' })
+  assert.equal(result.status, 'completed')
+  assert.deepEqual([...deps.reviewRows.values()].map(row => row.run_id).sort(), [
+    'historical', 'old-failed', 'old-partially_failed', 'old-paused', 'old-queued', 'old-running', 'other-tenant',
+  ])
+  assert.deepEqual(deps.prunes, [{ company: 'c1', keepId: 'newest-D' }])
 })
 
 test('failure to durably finish a sample prevents pruning', async () => {

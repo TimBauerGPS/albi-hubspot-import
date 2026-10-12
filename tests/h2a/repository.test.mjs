@@ -19,7 +19,7 @@ function reviewRepositoryFixture(responses = []) {
       const call = { table, steps: [] }
       calls.push(call)
       const query = {}
-      for (const method of ['select', 'eq', 'neq', 'gt', 'order', 'limit', 'or', 'insert', 'update', 'delete']) {
+      for (const method of ['select', 'eq', 'neq', 'in', 'gt', 'order', 'limit', 'range', 'or', 'insert', 'update', 'delete']) {
         query[method] = (...args) => { call.steps.push([method, ...args]); return query }
       }
       const finish = () => {
@@ -309,13 +309,51 @@ test('atomic recheck rejects invalid state, actor, timestamp, and blank safe cla
   assert.equal(rpcCalls.length, 0)
 })
 
-test('superseded review pruning deletes only the selected company and excludes the newly completed run', async () => {
-  const { repository, calls } = reviewRepositoryFixture([data([{ id: 'old-review' }])])
+test('superseded review pruning selects only other terminal capable runs and deletes their explicit tenant-scoped IDs', async () => {
+  const { repository, calls } = reviewRepositoryFixture([data([{ id: 'old-completed' }, { id: 'old-cancelled' }]), data([{ id: 'old-review' }])])
   assert.deepEqual(await repository.pruneSupersededDryRunReviews('company-1', 'sample-2'), [{ id: 'old-review' }])
-  assert.deepEqual(calls[0], { table: 'h2a_dry_run_reviews', steps: [ ['delete'],
-    ['eq', 'company_id', 'company-1'], ['neq', 'run_id', 'sample-2'], ['select', 'id'] ] })
+  assert.equal(calls[0].table, 'h2a_sync_runs')
+  assert.deepEqual(equalityFilters(calls[0]), [['company_id', 'company-1'], ['mode', 'dry_run'],
+    ['sample_limit_per_type', 10], ['review_capture_version', 1]])
+  assert.deepEqual(calls[0].steps.find(step => step[0] === 'select'), ['select', 'id'])
+  assert.deepEqual(calls[0].steps.find(step => step[0] === 'in'), ['in', 'status', ['completed', 'cancelled']])
+  assert.deepEqual(calls[0].steps.find(step => step[0] === 'neq'), ['neq', 'id', 'sample-2'])
+  assert.deepEqual(calls[1], { table: 'h2a_dry_run_reviews', steps: [ ['delete'],
+    ['eq', 'company_id', 'company-1'], ['in', 'run_id', ['old-completed', 'old-cancelled']], ['select', 'id'] ] })
   await assert.rejects(() => repository.pruneSupersededDryRunReviews('company-1', ''), TypeError)
-  assert.equal(calls.length, 1)
+  assert.equal(calls.length, 2)
+})
+
+test('review pruning with no eligible terminal sets is a no-op with no delete request', async () => {
+  const { repository, calls } = reviewRepositoryFixture([data([])])
+  assert.deepEqual(await repository.pruneSupersededDryRunReviews('company-1', 'sample-2'), [])
+  assert.deepEqual(calls.map(call => call.table), ['h2a_sync_runs'])
+})
+
+test('terminal pruning discovery and deletion errors fail without widening the scope', async () => {
+  const error = { code: '08006' }
+  const lookup = reviewRepositoryFixture([{ error }])
+  await assert.rejects(() => lookup.repository.pruneSupersededDryRunReviews('company-1', 'sample-2'), caught => caught === error)
+  assert.equal(lookup.calls.length, 1)
+  assert.equal(lookup.calls[0].table, 'h2a_sync_runs')
+  const deletion = reviewRepositoryFixture([data([{ id: 'old-completed' }]), { error }])
+  await assert.rejects(() => deletion.repository.pruneSupersededDryRunReviews('company-1', 'sample-2'), caught => caught === error)
+  assert.equal(deletion.calls.length, 2)
+  assert.deepEqual(deletion.calls[1].steps.find(step => step[0] === 'in'), ['in', 'run_id', ['old-completed']])
+})
+
+test('review pruning pages terminal IDs and bounds every deletion request to one hundred IDs', async () => {
+  const ids = Array.from({ length: 1005 }, (_, i) => ({ id: `old-${String(i).padStart(4, '0')}` }))
+  const { repository, calls } = reviewRepositoryFixture([data(ids.slice(0, 1000)), data(ids.slice(1000)),
+    ...Array.from({ length: 11 }, () => data([]))])
+  assert.deepEqual(await repository.pruneSupersededDryRunReviews('company-1', 'sample-2'), [])
+  assert.deepEqual(calls.filter(call => call.table === 'h2a_sync_runs').map(call => call.steps.find(step => step[0] === 'range')),
+    [['range', 0, 999], ['range', 1000, 1999]])
+  const deletes = calls.filter(call => call.table === 'h2a_dry_run_reviews')
+  assert.deepEqual(deletes.map(call => call.steps.find(step => step[0] === 'in')[2].length),
+    [100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 5])
+  assert.deepEqual(deletes.flatMap(call => call.steps.find(step => step[0] === 'in')[2]), ids.map(row => row.id))
+  assert.ok(deletes.every(call => equalityFilters(call)[0][1] === 'company-1'))
 })
 
 test('run totals count the latest durable outcome for each source-target item', async () => {

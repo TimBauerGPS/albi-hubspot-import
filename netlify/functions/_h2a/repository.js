@@ -64,19 +64,19 @@ function checked(result) {
   return result?.data
 }
 
-function scoped(supabase, table, companyId) {
+function scoped(supabase, table, companyId, columns = '*') {
   if (typeof companyId !== 'string' || !companyId.trim()) throw new TypeError('Company ID is required')
-  return supabase.from(table).select('*').eq('company_id', companyId)
+  return supabase.from(table).select(columns).eq('company_id', companyId)
 }
 
 function boundary(row) {
   return row ? { timestamp: row.cursor_timestamp ?? row.checkpoint_timestamp, objectId: row.cursor_object_id ?? row.checkpoint_object_id } : null
 }
 
-async function readAll(supabase, table, companyId, filter = query => query) {
+async function readAll(supabase, table, companyId, filter = query => query, columns = '*') {
   const rows = []
   for (let start = 0; start < 1000000; start += 1000) {
-    const page = checked(await filter(scoped(supabase, table, companyId)).order('id', { ascending: true }).range(start, start + 999))
+    const page = checked(await filter(scoped(supabase, table, companyId, columns)).order('id', { ascending: true }).range(start, start + 999))
     if (!Array.isArray(page)) throw new Error(`Invalid ${table} page`)
     rows.push(...page)
     if (page.length < 1000) return rows
@@ -244,8 +244,23 @@ export function createH2ARepository(supabase) {
     async pruneSupersededDryRunReviews(companyId, keepRunId) {
       requireReviewIdentity(companyId)
       requireReviewIdentity(keepRunId)
-      return checked(await supabase.from('h2a_dry_run_reviews').delete().eq('company_id', companyId)
-        .neq('run_id', keepRunId).select('id'))
+      // Paused, failed, and partially failed runs may resume past already
+      // captured sources. Preserve all resumable sets regardless of their age.
+      const terminalRuns = await readAll(supabase, 'h2a_sync_runs', companyId, query => query
+        .eq('mode', 'dry_run').eq('sample_limit_per_type', SAMPLE_LIMIT_PER_TYPE).eq('review_capture_version', 1)
+        .in('status', ['completed', 'cancelled']).neq('id', keepRunId), 'id')
+      const ids = [...new Set(terminalRuns.map(run => {
+        requireReviewIdentity(run?.id)
+        return run.id
+      }))]
+      const removed = []
+      for (let start = 0; start < ids.length; start += 100) {
+        const result = checked(await supabase.from('h2a_dry_run_reviews').delete().eq('company_id', companyId)
+          .in('run_id', ids.slice(start, start + 100)).select('id'))
+        if (!Array.isArray(result)) throw new Error('Invalid review cleanup response')
+        removed.push(...result)
+      }
+      return removed
     },
     async getConflict(companyId, conflictId) {
       return checked(await scoped(supabase, 'h2a_conflicts', companyId).eq('id', conflictId).maybeSingle())
