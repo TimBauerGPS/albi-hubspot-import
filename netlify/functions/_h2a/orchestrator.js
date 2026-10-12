@@ -559,7 +559,13 @@ export async function runCompanySync(deps, input = {}) {
     if (continuation) status = 'paused'
     await repo.finishRun(companyId, run.id, status, totals)
     if (status === 'completed' && capturesReview(ctx)) {
-      try { await repo.pruneSupersededDryRunReviews(companyId, run.id) }
+      try {
+        const current = config.initial_start_locked_at
+          ? await repo.getCurrentReviewSample(companyId, config.initial_start_locked_at) : null
+        // An older continuation can finish after a newer sample. Only the
+        // current completed set may replace details, while this lease is held.
+        if (current?.id === run.id) await repo.pruneSupersededDryRunReviews(companyId, run.id)
+      }
       catch (error) { logCleanupFailure(deps, 'dry_run_review_cleanup', error) }
     }
     response = { status, companyId, runId: run.id, totals, newConflictCount: ctx.newConflictCount, continuation }

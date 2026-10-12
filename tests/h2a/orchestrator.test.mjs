@@ -779,13 +779,42 @@ test('activity payload includes a known HubSpot owner name', async () => {
   assert.match(payload.notes, /Owner: Ali Brown/)
 })
 
+function storedReviewRepository(deps) {
+  return createH2ARepository({ rpc: async () => ({}), from(table) {
+    assert.ok(['h2a_sync_runs', 'h2a_dry_run_reviews'].includes(table))
+    const filters = [], orders = []
+    let rowLimit, countOnly = false
+    function execute() {
+      let rows = table === 'h2a_sync_runs' ? deps.persistedRuns : [...deps.reviewRows.values()]
+      rows = rows.filter(row => filters.every(filter => filter(row)))
+      rows = [...rows].sort((left, right) => {
+        for (const [key, ascending] of orders) {
+          const result = String(left[key]).localeCompare(String(right[key])) * (ascending ? 1 : -1)
+          if (result) return result
+        }
+        return 0
+      })
+      return { data: countOnly ? null : rows.slice(0, rowLimit), count: rows.length, error: null }
+    }
+    return {
+      select(_fields, options) { countOnly = options?.head === true; return this },
+      eq(key, value) { filters.push(row => row[key] === value); return this },
+      gt(key, value) { filters.push(row => Date.parse(row[key]) > Date.parse(value)); return this },
+      order(key, options) { orders.push([key, options.ascending]); return this },
+      limit(value) { rowLimit = value; return this },
+      maybeSingle: async () => ({ data: execute().data[0] ?? null, error: null }),
+      then(resolve, reject) { return Promise.resolve(execute()).then(resolve, reject) },
+    }
+  } })
+}
+
 function reviewSampleFixture(options = {}, runOverrides = {}) {
   const deps = liveFixture(options)
   const captures = [], prunes = [], transitions = [], rows = new Map()
   const run = { id: 'sample-run', mode: 'dry_run', sample_limit_per_type: 10, review_capture_version: 1,
     created_at: '2026-10-02T12:00:00Z', ...runOverrides }
   deps.repository.getConfig = async () => ({ state: run.mode === 'dry_run' ? 'dry_run' : 'live', portal_id: '123',
-    selected_start_date: '2026-10-01', preflight_status: 'valid' })
+    selected_start_date: '2026-10-01', preflight_status: 'valid', initial_start_locked_at: '2026-10-01T00:00:00Z' })
   deps.repository.startRun = async () => run
   const getAssociations = deps.hubspot.getAssociations
   deps.hubspot.getAssociations = async input => {
@@ -800,7 +829,7 @@ function reviewSampleFixture(options = {}, runOverrides = {}) {
     .map(row => ({ ...row, albi_target_type: row.albi_target_type ?? null, albi_target_id: row.albi_target_id ?? null }))
   deps.repository.recordDryRunReview = async (company, row) => {
     captures.push({ company, row: structuredClone(row) })
-    rows.set([company, row.run_id, row.portal_id, row.object_type, row.source_id].join(':'), structuredClone(row))
+    rows.set([company, row.run_id, row.portal_id, row.object_type, row.source_id].join(':'), { company_id: company, ...structuredClone(row) })
     return row
   }
   deps.repository.finishRun = async (_company, id, status, totals) => {
@@ -815,6 +844,12 @@ function reviewSampleFixture(options = {}, runOverrides = {}) {
     prunes.push({ company, keepId })
     deps.events.push('prune')
     for (const [key, row] of rows) if (row.run_id !== keepId && key.startsWith(`${company}:`)) rows.delete(key)
+  }
+  deps.repository.getCurrentReviewSample = async (company, after) => {
+    assert.equal(company, 'c1')
+    assert.equal(after, '2026-10-01T00:00:00Z')
+    deps.events.push('current_sample')
+    return storedReviewRepository(deps).getCurrentReviewSample(company, after)
   }
   return Object.assign(deps, { captures, prunes, transitions, reviewRows: rows, sampleRun: run })
 }
@@ -905,7 +940,66 @@ test('sample completion is durable before old details are pruned, including zero
   assert.equal(result.status, 'completed')
   assert.deepEqual(deps.prunes, [{ company: 'c1', keepId: 'sample-run' }])
   assert.ok(deps.events.indexOf('finish:completed') < deps.events.indexOf('prune'))
+  assert.ok(deps.events.indexOf('finish:completed') < deps.events.indexOf('current_sample'))
+  assert.ok(deps.events.indexOf('current_sample') < deps.events.indexOf('prune'))
   assert.ok(deps.events.indexOf('prune') < deps.events.indexOf('release'))
+})
+
+test('an older paused or queued sample completing later preserves newer reviews and blocked readiness', async () => {
+  const olderId = '00000000-0000-4000-8000-000000000001'
+  const newerId = '00000000-0000-4000-8000-000000000002'
+  for (const status of ['paused', 'queued']) for (const sameCreatedAt of [false, true]) {
+    const deps = reviewSampleFixture({ activities: [] }, { id: olderId, status,
+      created_at: sameCreatedAt ? '2026-10-03T12:00:00Z' : '2026-10-02T12:00:00Z' })
+    deps.persistedRuns.push({ id: newerId, company_id: 'c1', mode: 'dry_run', status: 'completed',
+      sample_limit_per_type: 10, review_capture_version: 1, created_at: '2026-10-03T12:00:00Z' })
+    deps.reviewRows.set(`c1:${newerId}:123:contacts:30`, { company_id: 'c1', run_id: newerId,
+      portal_id: '123', object_type: 'contacts', source_id: '30', status: 'needs_review' })
+    const repository = storedReviewRepository(deps)
+    const after = '2026-10-01T00:00:00Z'
+    assert.equal((await repository.getCurrentReviewSample('c1', after)).id, newerId)
+    assert.equal(await repository.hasCleanReviewSampleDryRun('c1', after), false)
+    const result = await runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'resume', runId: olderId })
+    assert.equal(result.status, 'completed')
+    assert.equal(await repository.countDryRunReviews('c1', newerId), 1)
+    assert.equal((await repository.getCurrentReviewSample('c1', after)).id, newerId)
+    assert.equal(await repository.hasCleanReviewSampleDryRun('c1', after), false)
+    assert.equal(deps.prunes.length, 0)
+  }
+})
+
+test('current-sample resolution failure preserves completed result and all review rows with fixed cleanup log', async () => {
+  const deps = reviewSampleFixture({ activities: [] })
+  deps.reviewRows.set('c1:prior:123:contacts:30', { company_id: 'c1', run_id: 'prior' })
+  const logs = []
+  deps.logger = { warn: (_message, data) => logs.push(data) }
+  deps.repository.getCurrentReviewSample = async () => { throw { category: 'private-category', code: 'private-key', message: 'private-body' } }
+  const result = await runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'manual' })
+  assert.equal(result.status, 'completed')
+  assert.equal(deps.reviewRows.size, 1)
+  assert.equal(deps.prunes.length, 0)
+  assert.deepEqual(deps.transitions.map(row => row.status), ['completed'])
+  assert.deepEqual(logs, [{ phase: 'dry_run_review_cleanup', reason: 'error:operation_failed' }])
+})
+
+test('a finishing sample outside the current-sample cutoff cannot prune review data', async () => {
+  const deps = reviewSampleFixture({ activities: [] }, { created_at: '2026-09-30T12:00:00Z' })
+  deps.reviewRows.set('c1:prior:123:contacts:30', { company_id: 'c1', run_id: 'prior' })
+  const result = await runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'resume', runId: 'sample-run' })
+  assert.equal(result.status, 'completed')
+  assert.equal(deps.prunes.length, 0)
+  assert.equal(deps.reviewRows.size, 1)
+})
+
+test('a missing initial date lock skips pruning without querying an undefined cutoff', async () => {
+  const deps = reviewSampleFixture({ activities: [] })
+  const config = await deps.repository.getConfig()
+  delete config.initial_start_locked_at
+  deps.repository.getConfig = async () => config
+  deps.repository.getCurrentReviewSample = async () => { throw Error('undefined cutoff queried') }
+  const result = await runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'manual' })
+  assert.equal(result.status, 'completed')
+  assert.equal(deps.prunes.length, 0)
 })
 
 test('failure to durably finish a sample prevents pruning', async () => {
