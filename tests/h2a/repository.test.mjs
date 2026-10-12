@@ -2,6 +2,291 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createH2ARepository } from '../../netlify/functions/_h2a/repository.js'
 
+const REVIEW_ID = '00000000-0000-4000-8000-000000000001'
+const ACTOR_ID = '00000000-0000-4000-8000-000000000002'
+const REVIEW_TIME = '2026-10-12T12:00:00.123456Z'
+const reviewRow = { id: REVIEW_ID, company_id: 'company-1', run_id: 'sample-2', portal_id: '123',
+  object_type: 'contacts', source_id: '42', reason: 'name_only_candidate', conflict_type: 'contact_match',
+  status: 'needs_review', updated_at: REVIEW_TIME }
+
+// The external query boundary is doubled; validation, payloads, filters, and result mapping are real.
+function reviewRepositoryFixture(responses = []) {
+  const calls = []
+  const rpcCalls = []
+  const queryResponses = [...responses]
+  const repository = createH2ARepository({
+    from(table) {
+      const call = { table, steps: [] }
+      calls.push(call)
+      const query = {}
+      for (const method of ['select', 'eq', 'neq', 'gt', 'order', 'limit', 'or', 'insert', 'update', 'delete']) {
+        query[method] = (...args) => { call.steps.push([method, ...args]); return query }
+      }
+      const finish = () => {
+        assert.ok(queryResponses.length, `Unexpected query to ${table}`)
+        return queryResponses.shift()
+      }
+      query.single = async () => finish()
+      query.maybeSingle = async () => finish()
+      query.then = (resolve, reject) => Promise.resolve().then(finish).then(resolve, reject)
+      return query
+    },
+    async rpc(name, args) {
+      rpcCalls.push({ name, args })
+      assert.ok(queryResponses.length, 'Unexpected RPC')
+      return queryResponses.shift()
+    },
+  })
+  return { repository, calls, rpcCalls }
+}
+const data = value => ({ data: value, error: null })
+const equalityFilters = call => call.steps.filter(step => step[0] === 'eq').map(step => step.slice(1))
+
+test('full dry-run readiness selects a fresh completed version-one bounded sample and counts all rows', async () => {
+  const { repository, calls } = reviewRepositoryFixture([data({ id: 'sample-2', review_capture_version: 1 }), { count: 0, error: null }])
+  assert.equal(await repository.hasCleanReviewSampleDryRun('company-1', '2026-10-01T00:00:00Z'), true)
+  assert.deepEqual(equalityFilters(calls[0]), [['company_id', 'company-1'], ['mode', 'dry_run'],
+    ['status', 'completed'], ['sample_limit_per_type', 10], ['review_capture_version', 1]])
+  assert.ok(calls[0].steps.some(step => step[0] === 'gt' && step[1] === 'created_at' && step[2] === '2026-10-01T00:00:00Z'))
+  assert.deepEqual(calls[0].steps.filter(step => step[0] === 'order'), [
+    ['order', 'created_at', { ascending: false }], ['order', 'id', { ascending: false }],
+  ])
+  assert.deepEqual(calls[0].steps.find(step => step[0] === 'limit'), ['limit', 1])
+  assert.deepEqual(equalityFilters(calls[1]), [['company_id', 'company-1'], ['run_id', 'sample-2']])
+  assert.deepEqual(calls[1].steps[0], ['select', 'id', { count: 'exact', head: true }])
+})
+
+test('cleared and no-longer-in-scope rows still block their old sample from unlocking full history', async () => {
+  const { repository, calls } = reviewRepositoryFixture([data({ id: 'sample-1', review_capture_version: 1 }), { count: 3, error: null }])
+  assert.equal(await repository.hasCleanReviewSampleDryRun('company-1', '2026-10-01T00:00:00Z'), false)
+  assert.equal(equalityFilters(calls[1]).some(([key]) => key === 'status'), false)
+})
+
+test('missing and historical samples never satisfy clean review readiness', async () => {
+  for (const run of [null, { id: 'old-sample', review_capture_version: null }]) {
+    const { repository, calls } = reviewRepositoryFixture([data(run)])
+    assert.equal(await repository.hasCleanReviewSampleDryRun('company-1', '2026-10-01T00:00:00Z'), false)
+    assert.equal(calls.length, 1)
+  }
+})
+
+test('review counts fail closed on errors and malformed counts and allow only fixed status filters', async () => {
+  for (const count of [null, undefined, -1, 1.5, '0']) {
+    const { repository } = reviewRepositoryFixture([{ count, error: null }])
+    await assert.rejects(() => repository.countDryRunReviews('company-1', 'sample-2'), /Invalid review count/)
+  }
+  const failure = { code: '08006' }
+  const { repository } = reviewRepositoryFixture([{ error: failure }])
+  await assert.rejects(() => repository.countDryRunReviews('company-1', 'sample-2'), error => error === failure)
+  const filtered = reviewRepositoryFixture([{ count: 2, error: null }])
+  assert.equal(await filtered.repository.countDryRunReviews('company-1', 'sample-2', 'cleared'), 2)
+  assert.deepEqual(equalityFilters(filtered.calls[0]), [['company_id', 'company-1'], ['run_id', 'sample-2'], ['status', 'cleared']])
+  await assert.rejects(() => filtered.repository.countDryRunReviews('company-1', 'sample-2', 'anything'), /Invalid review status/)
+})
+
+test('review list binds company and server-selected run, validates filters, and emits newest-first keyset pagination', async () => {
+  const second = { ...reviewRow, id: ACTOR_ID }
+  const { repository, calls } = reviewRepositoryFixture([data([reviewRow, second])])
+  const result = await repository.listDryRunReviews('company-1', 'sample-2', { limit: 1,
+    before: { createdAt: '2026-10-12T12:00:00.000Z', id: REVIEW_ID },
+    status: 'needs_review', objectType: 'contacts', reason: 'name_only_candidate' })
+  assert.deepEqual(result, { items: [reviewRow], hasMore: true })
+  assert.deepEqual(equalityFilters(calls[0]), [['company_id', 'company-1'], ['run_id', 'sample-2'],
+    ['status', 'needs_review'], ['object_type', 'contacts'], ['reason', 'name_only_candidate']])
+  assert.deepEqual(calls[0].steps.filter(step => step[0] === 'order'), [
+    ['order', 'created_at', { ascending: false }], ['order', 'id', { ascending: false }],
+  ])
+  assert.deepEqual(calls[0].steps.find(step => step[0] === 'limit'), ['limit', 2])
+  assert.deepEqual(calls[0].steps.find(step => step[0] === 'or'), ['or',
+    `created_at.lt.2026-10-12T12:00:00.000Z,and(created_at.eq.2026-10-12T12:00:00.000Z,id.lt.${REVIEW_ID})`])
+})
+
+test('review list rejects unsupported filters and injectable decoded boundaries before querying', async () => {
+  const { repository, calls } = reviewRepositoryFixture()
+  for (const options of [{ status: 'open' }, { objectType: 'emails' }, { reason: 'secret' }, { limit: 0 }, { limit: 101 },
+    { limit: 2.5 }, { before: { createdAt: '2026-10-12T12:00:00Z),id.gt.any', id: REVIEW_ID } },
+    { before: { createdAt: '2026-10-12T12:00:00Z', id: `${REVIEW_ID},id.gt.any` } }]) {
+    await assert.rejects(() => repository.listDryRunReviews('company-1', 'sample-2', options), TypeError)
+  }
+  assert.equal(calls.length, 0)
+})
+
+test('review detail and audit reads verify the review under company, run, and review identity', async () => {
+  const { repository, calls } = reviewRepositoryFixture([data(reviewRow), data(reviewRow), data([{ id: 'event-1' }])])
+  assert.deepEqual(await repository.getDryRunReview('company-1', 'sample-2', REVIEW_ID), reviewRow)
+  assert.deepEqual(await repository.listDryRunReviewEvents('company-1', 'sample-2', REVIEW_ID), [{ id: 'event-1' }])
+  for (const call of calls.slice(0, 2)) {
+    assert.deepEqual(equalityFilters(call), [['company_id', 'company-1'], ['run_id', 'sample-2'], ['id', REVIEW_ID]])
+  }
+  assert.deepEqual(equalityFilters(calls[2]), [['company_id', 'company-1'], ['review_id', REVIEW_ID]])
+  assert.deepEqual(calls[2].steps.filter(step => step[0] === 'order'), [
+    ['order', 'created_at', { ascending: true }], ['order', 'id', { ascending: true }],
+  ])
+  const missing = reviewRepositoryFixture([data(null)])
+  assert.deepEqual(await missing.repository.listDryRunReviewEvents('company-1', 'other-run', REVIEW_ID), [])
+  assert.equal(missing.calls.length, 1)
+})
+
+test('capture builds a positive-allowlist payload and records one fixed captured event after initial insertion', async () => {
+  const { repository, calls } = reviewRepositoryFixture([data(reviewRow), data(reviewRow), data({ id: 'event-1' })])
+  const captured = await repository.recordDryRunReview('company-1', { ...reviewRow, company_id: 'other-company',
+    status: 'cleared', recheck_outcome: 'safe_to_link', apiKey: 'secret',
+    source_snapshot: { id: '42', email: 'a@example.com', notes: 'body', apiKey: 'secret' },
+    candidate_snapshots: Array.from({ length: 11 }, (_, i) => ({ id: String(i), email: `a${i}@example.com`, apiKey: 'secret' })),
+    match_evidence: { evidence: ['email', 'authorization'], apiKey: 'secret' },
+    proposed_changes: { updates: { city: 'Town', notes: 'body' }, authorization: 'secret' },
+  })
+  assert.equal(captured.id, REVIEW_ID)
+  const inserted = calls[0].steps.find(step => step[0] === 'insert')[1]
+  assert.deepEqual(Object.keys(inserted).sort(), ['candidate_snapshots', 'company_id', 'conflict_type', 'match_evidence',
+    'object_type', 'portal_id', 'proposed_changes', 'reason', 'run_id', 'source_id', 'source_snapshot', 'status'].sort())
+  assert.equal(inserted.company_id, 'company-1')
+  assert.equal(inserted.status, 'needs_review')
+  assert.equal(inserted.candidate_snapshots.length, 10)
+  assert.deepEqual(inserted.source_snapshot, { id: '42', email: 'a@example.com' })
+  assert.deepEqual(inserted.match_evidence, { evidence: ['email'] })
+  assert.deepEqual(inserted.proposed_changes, { updates: { city: 'Town' }, conflicts: {}, unchanged: [] })
+  assert.equal(JSON.stringify(inserted).includes('secret'), false)
+  const event = calls[2].steps.find(step => step[0] === 'insert')[1]
+  assert.equal(event.company_id, 'company-1')
+  assert.equal(event.review_id, REVIEW_ID)
+  assert.equal(event.event_type, 'captured')
+  assert.equal(event.reason, 'name_only_candidate')
+  assert.equal(event.actor_id, null)
+  assert.deepEqual(event.sanitized_details, {})
+})
+
+test('unique capture replay updates the same tenant/run/source identity without another captured event', async () => {
+  const { repository, calls } = reviewRepositoryFixture([{ error: { code: '23505' } }, data(reviewRow), data(reviewRow)])
+  assert.deepEqual(await repository.recordDryRunReview('company-1', reviewRow), reviewRow)
+  assert.deepEqual(equalityFilters(calls[1]), [['company_id', 'company-1'], ['run_id', 'sample-2'],
+    ['portal_id', '123'], ['object_type', 'contacts'], ['source_id', '42']])
+  assert.deepEqual(equalityFilters(calls[2]), [['company_id', 'company-1'], ['run_id', 'sample-2'],
+    ['portal_id', '123'], ['object_type', 'contacts'], ['source_id', '42'], ['id', REVIEW_ID]])
+  assert.equal(calls.some(call => call.table === 'h2a_dry_run_review_events'), false)
+})
+
+test('failed captured-event insertion deletes only the just-inserted tenant/run/review and fails safely', async () => {
+  for (const cleanup of [data(null), { error: { message: 'cleanup provider secret' } }]) {
+    const { repository, calls } = reviewRepositoryFixture([data(reviewRow), data(reviewRow),
+      { error: { code: '08006', message: 'event provider secret' } }, cleanup])
+    await assert.rejects(() => repository.recordDryRunReview('company-1', reviewRow),
+      error => error.message === 'Review capture event was not recorded')
+    assert.deepEqual(calls[3], { table: 'h2a_dry_run_reviews', steps: [ ['delete'],
+      ['eq', 'company_id', 'company-1'], ['eq', 'run_id', 'sample-2'], ['eq', 'id', REVIEW_ID] ] })
+  }
+})
+
+test('unique violation without a matching source identity is rejected without updating or recording an event', async () => {
+  const failure = { code: '23505' }
+  const { repository, calls } = reviewRepositoryFixture([{ error: failure }, data(null)])
+  await assert.rejects(() => repository.recordDryRunReview('company-1', reviewRow), error => error === failure)
+  assert.equal(calls.length, 2)
+})
+
+test('capture rejects unsupported classifications and identities and propagates nonunique database errors', async () => {
+  const { repository, calls } = reviewRepositoryFixture()
+  for (const patch of [{ object_type: 'calls' }, { reason: 'secret' }, { conflict_type: '' }, { run_id: '' }, { portal_id: '' }, { source_id: '' }]) {
+    await assert.rejects(() => repository.recordDryRunReview('company-1', { ...reviewRow, ...patch }), TypeError)
+  }
+  assert.equal(calls.length, 0)
+  const error = { code: '08006', message: 'database unavailable' }
+  const failed = reviewRepositoryFixture([{ error }])
+  await assert.rejects(() => failed.repository.recordDryRunReview('company-1', reviewRow), value => value === error)
+  assert.equal(failed.calls.length, 1)
+})
+
+test('audit insertion accepts fixed events, requires actors for rechecks, and sanitizes failure details', async () => {
+  const { repository, calls } = reviewRepositoryFixture([data(reviewRow), data({ id: 'event-1' })])
+  await repository.appendDryRunReviewEvent('company-1', 'sample-2', REVIEW_ID, { eventType: 'recheck_failed',
+    reason: 'transient:timeout', actorId: ACTOR_ID, now: REVIEW_TIME,
+    details: { category: 'transient', code: 'timeout', message: 'provider secret', authorization: 'secret' } })
+  assert.deepEqual(equalityFilters(calls[0]), [['company_id', 'company-1'], ['run_id', 'sample-2'], ['id', REVIEW_ID]])
+  assert.deepEqual(calls[1].steps.find(step => step[0] === 'insert')[1], { company_id: 'company-1', review_id: REVIEW_ID,
+    actor_id: ACTOR_ID, event_type: 'recheck_failed', reason: 'transient:timeout',
+    sanitized_details: { category: 'transient', code: 'timeout' }, created_at: REVIEW_TIME })
+  const invalid = reviewRepositoryFixture()
+  for (const input of [{ eventType: 'delete' }, { eventType: 'recheck_started', actorId: null },
+    { eventType: 'recheck_started', actorId: 'user-1' }, { eventType: 'captured', reason: 'secret' }]) {
+    await assert.rejects(() => invalid.repository.appendDryRunReviewEvent('company-1', 'sample-2', REVIEW_ID, input), TypeError)
+  }
+  assert.equal(invalid.calls.length, 0)
+  const missing = reviewRepositoryFixture([data(null)])
+  assert.equal(await missing.repository.appendDryRunReviewEvent('company-1', 'other-run', REVIEW_ID,
+    { eventType: 'recheck_started', actorId: ACTOR_ID }), null)
+  assert.equal(missing.calls.length, 1)
+})
+
+const recheckInput = { runId: 'sample-2', reviewId: REVIEW_ID, expectedUpdatedAt: REVIEW_TIME,
+  actorId: ACTOR_ID, status: 'cleared', outcome: 'safe_to_link', reason: 'name_only_candidate', conflictType: 'contact_match',
+  sourceSnapshot: { id: '42', email: 'a@example.com', apiKey: 'secret' },
+  candidateSnapshots: [{ id: '7', email: 'a@example.com', notes: 'body' }], matchEvidence: ['email', 'secret'],
+  proposedChanges: {}, eventType: 'cleared', eventDetails: { outcome: 'safe_to_link', message: 'secret' }, now: '2026-10-12T12:00:01.000Z' }
+
+test('atomic recheck forwards the exact CAS timestamp and tenant with allowlisted evidence only', async () => {
+  const { repository, rpcCalls } = reviewRepositoryFixture([data(reviewRow), data({ review: { ...reviewRow, status: 'cleared' } })])
+  const result = await repository.applyDryRunRecheck('company-1', recheckInput)
+  assert.equal(result.review.status, 'cleared')
+  assert.deepEqual(rpcCalls, [{ name: 'h2a_apply_dry_run_recheck', args: {
+    p_company_id: 'company-1', p_review_id: REVIEW_ID, p_expected_updated_at: REVIEW_TIME, p_actor_id: ACTOR_ID,
+    p_status: 'cleared', p_recheck_outcome: 'safe_to_link', p_reason: 'name_only_candidate', p_conflict_type: 'contact_match',
+    p_source_snapshot: { id: '42', email: 'a@example.com' }, p_candidate_snapshots: [{ id: '7', email: 'a@example.com' }],
+    p_match_evidence: { evidence: ['email'] }, p_proposed_changes: { updates: {}, conflicts: {}, unchanged: [] },
+    p_event_type: 'cleared', p_event_details: { outcome: 'safe_to_link' }, p_now: '2026-10-12T12:00:01.000Z',
+  } }])
+})
+
+test('atomic recheck derives snapshot type from the scoped stored row rather than a caller object type', async () => {
+  const organization = { ...reviewRow, object_type: 'companies' }
+  const { repository, calls, rpcCalls } = reviewRepositoryFixture([data(organization), data({ review: organization })])
+  await repository.applyDryRunRecheck('company-1', { ...recheckInput, objectType: 'contacts',
+    sourceSnapshot: { id: '42', name: 'Allied', firstName: 'forbidden contact field' },
+    candidateSnapshots: [{ id: '7', name: 'Allied', firstName: 'forbidden contact field' }],
+    proposedChanges: { updates: { name: 'Allied', firstName: 'forbidden contact field' } } })
+  assert.deepEqual(equalityFilters(calls[0]), [['company_id', 'company-1'], ['run_id', 'sample-2'], ['id', REVIEW_ID]])
+  assert.deepEqual(rpcCalls[0].args.p_source_snapshot, { id: '42', name: 'Allied' })
+  assert.deepEqual(rpcCalls[0].args.p_candidate_snapshots, [{ id: '7', name: 'Allied' }])
+  assert.deepEqual(rpcCalls[0].args.p_proposed_changes, { updates: { name: 'Allied' }, conflicts: {}, unchanged: [] })
+})
+
+test('a malformed count refuses full dry-run readiness rather than reporting a clean sample', async () => {
+  const { repository } = reviewRepositoryFixture([data({ id: 'sample-2', review_capture_version: 1 }), { count: null, error: null }])
+  await assert.rejects(() => repository.hasCleanReviewSampleDryRun('company-1', '2026-10-01T00:00:00Z'), /Invalid review count/)
+})
+
+test('atomic recheck exposes only stable RPC errors and rejects malformed responses', async () => {
+  for (const error of ['not_found', 'stale', 'superseded', 'invalid_recheck']) {
+    const { repository } = reviewRepositoryFixture([data(reviewRow), data({ error, message: 'secret' })])
+    assert.deepEqual(await repository.applyDryRunRecheck('company-1', recheckInput), { error })
+  }
+  for (const result of [null, {}, { error: 'secret' }, { review: null }]) {
+    const { repository } = reviewRepositoryFixture([data(reviewRow), data(result)])
+    await assert.rejects(() => repository.applyDryRunRecheck('company-1', recheckInput), /Invalid review recheck response/)
+  }
+  const missing = reviewRepositoryFixture([data(null)])
+  assert.deepEqual(await missing.repository.applyDryRunRecheck('company-1', recheckInput), { error: 'not_found' })
+  assert.equal(missing.rpcCalls.length, 0)
+})
+
+test('atomic recheck rejects invalid state, actor, timestamp, and blank safe classification before RPC', async () => {
+  const { repository, calls, rpcCalls } = reviewRepositoryFixture()
+  for (const patch of [{ status: 'open' }, { outcome: 'write' }, { eventType: 'captured' }, { actorId: null },
+    { expectedUpdatedAt: null }, { expectedUpdatedAt: 'invalid' }, { now: null }, { conflictType: '' }, { runId: '' }]) {
+    await assert.rejects(() => repository.applyDryRunRecheck('company-1', { ...recheckInput, ...patch }), TypeError)
+  }
+  assert.equal(calls.length, 0)
+  assert.equal(rpcCalls.length, 0)
+})
+
+test('superseded review pruning deletes only the selected company and excludes the newly completed run', async () => {
+  const { repository, calls } = reviewRepositoryFixture([data([{ id: 'old-review' }])])
+  assert.deepEqual(await repository.pruneSupersededDryRunReviews('company-1', 'sample-2'), [{ id: 'old-review' }])
+  assert.deepEqual(calls[0], { table: 'h2a_dry_run_reviews', steps: [ ['delete'],
+    ['eq', 'company_id', 'company-1'], ['neq', 'run_id', 'sample-2'], ['select', 'id'] ] })
+  await assert.rejects(() => repository.pruneSupersededDryRunReviews('company-1', ''), TypeError)
+  assert.equal(calls.length, 1)
+})
+
 test('run totals count the latest durable outcome for each source-target item', async () => {
   const rows = [
     { id: 'a', object_type: 'calls', source_id: '1', albi_target_type: 'contact', albi_target_id: '7', outcome: 'failed', created_at: '2026-10-01T00:00:00Z' },

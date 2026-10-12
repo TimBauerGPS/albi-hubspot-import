@@ -1,7 +1,63 @@
 import { randomUUID } from 'node:crypto'
 import { DRY_RUN_PROPOSED_ACTION_TOTALS, DRY_RUN_REVIEW_TOTAL_FIELDS, SAMPLE_LIMIT_PER_TYPE } from './constants.js'
+import { assertReviewClassification, projectReviewEvent, REVIEW_REASONS, safeReviewCandidates,
+  safeReviewChanges, safeReviewEvidence, safeReviewSnapshot } from './review.js'
 
 const BASE_RUN_TOTAL_FIELDS = ['created', 'updated', 'linked', 'delivered', 'reconciled', 'skipped', 'conflict', 'failed', 'dry_run']
+const REVIEW_RUN_COLUMNS = 'id,company_id,mode,status,sample_limit_per_type,review_capture_version,created_at,finished_at'
+const REVIEW_COLUMNS = 'id,company_id,run_id,portal_id,object_type,source_id,reason,conflict_type,source_snapshot,candidate_snapshots,match_evidence,proposed_changes,status,recheck_outcome,last_rechecked_at,last_rechecked_by,created_at,updated_at'
+const REVIEW_EVENT_COLUMNS = 'id,company_id,review_id,actor_id,event_type,reason,sanitized_details,created_at'
+const REVIEW_STATUSES = new Set(['needs_review', 'cleared', 'no_longer_in_scope'])
+const REVIEW_OBJECT_TYPES = new Set(['contacts', 'companies'])
+const REVIEW_EVENT_TYPES = new Set(['captured', 'recheck_started', 'still_needs_review', 'cleared', 'no_longer_in_scope', 'recheck_failed'])
+const RECHECK_ERRORS = new Set(['not_found', 'stale', 'superseded', 'invalid_recheck'])
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const TIMESTAMP_SHAPE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/
+
+function requireReviewIdentity(value) {
+  if (typeof value !== 'string' || !value.trim()) throw new TypeError('Review identity is required')
+}
+
+function requireReviewTimestamp(value) {
+  if (typeof value !== 'string' || !TIMESTAMP_SHAPE.test(value) || !Number.isFinite(Date.parse(value))) {
+    throw new TypeError('Invalid review timestamp')
+  }
+}
+
+function requireReviewValue(value, allowed, label) {
+  if (!allowed.has(value)) throw new TypeError(`Invalid review ${label}`)
+}
+
+function reviewQuery(supabase, companyId, runId) {
+  requireReviewIdentity(companyId)
+  requireReviewIdentity(runId)
+  return supabase.from('h2a_dry_run_reviews').select(REVIEW_COLUMNS)
+    .eq('company_id', companyId).eq('run_id', runId)
+}
+
+function reviewSourceIdentity(query, row) {
+  return query.eq('portal_id', row.portal_id).eq('object_type', row.object_type).eq('source_id', row.source_id)
+}
+
+function reviewEvidencePayload(input, objectType) {
+  return {
+    source_snapshot: safeReviewSnapshot(input.source_snapshot, objectType),
+    candidate_snapshots: safeReviewCandidates(input.candidate_snapshots, objectType),
+    match_evidence: { evidence: safeReviewEvidence(input.match_evidence) },
+    proposed_changes: safeReviewChanges(input.proposed_changes, objectType),
+  }
+}
+
+function reviewEventPayload(companyId, reviewId, { eventType, reason = null, actorId = null, details = {}, now = new Date().toISOString() }) {
+  requireReviewValue(eventType, REVIEW_EVENT_TYPES, 'event type')
+  if (reason !== null) requireReviewValue(reason, REVIEW_REASONS, 'reason')
+  if ((eventType !== 'captured' || actorId !== null) && (typeof actorId !== 'string' || !UUID_SHAPE.test(actorId))) {
+    throw new TypeError('Invalid review actor')
+  }
+  requireReviewTimestamp(now)
+  return { company_id: companyId, review_id: reviewId, actor_id: actorId, event_type: eventType, reason,
+    sanitized_details: projectReviewEvent({ sanitized_details: details }).details, created_at: now }
+}
 
 function checked(result) {
   if (result?.error) throw result.error
@@ -54,6 +110,140 @@ export function aggregateRunTotals(rows, mode) {
 export function createH2ARepository(supabase) {
   if (!supabase?.from || !supabase?.rpc) throw new TypeError('A server-side Supabase client is required')
   return {
+    // runId arguments are resolved by the server; HTTP handlers must never accept them from browsers.
+    async getCurrentReviewSample(companyId, after) {
+      requireReviewIdentity(companyId)
+      requireReviewTimestamp(after)
+      return checked(await supabase.from('h2a_sync_runs').select(REVIEW_RUN_COLUMNS).eq('company_id', companyId)
+        .eq('mode', 'dry_run').eq('status', 'completed').eq('sample_limit_per_type', SAMPLE_LIMIT_PER_TYPE)
+        .eq('review_capture_version', 1).gt('created_at', after)
+        .order('created_at', { ascending: false }).order('id', { ascending: false }).limit(1).maybeSingle())
+    },
+    async countDryRunReviews(companyId, runId, status = null) {
+      requireReviewIdentity(companyId)
+      requireReviewIdentity(runId)
+      if (status !== null) requireReviewValue(status, REVIEW_STATUSES, 'status')
+      let query = supabase.from('h2a_dry_run_reviews').select('id', { count: 'exact', head: true })
+        .eq('company_id', companyId).eq('run_id', runId)
+      if (status !== null) query = query.eq('status', status)
+      const result = await query
+      if (result?.error) throw result.error
+      if (!Number.isSafeInteger(result?.count) || result.count < 0) throw new Error('Invalid review count')
+      return result.count
+    },
+    async hasCleanReviewSampleDryRun(companyId, after) {
+      const run = await this.getCurrentReviewSample(companyId, after)
+      if (run?.review_capture_version !== 1) return false
+      // Count all captured rows. Individual rechecks cannot unlock their original sample.
+      return await this.countDryRunReviews(companyId, run.id) === 0
+    },
+    async listDryRunReviews(companyId, runId, { limit = 25, before = null, status = null, objectType = null, reason = null } = {}) {
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new TypeError('Invalid review page size')
+      if (status !== null) requireReviewValue(status, REVIEW_STATUSES, 'status')
+      if (objectType !== null) requireReviewValue(objectType, REVIEW_OBJECT_TYPES, 'object type')
+      if (reason !== null) requireReviewValue(reason, REVIEW_REASONS, 'reason')
+      if (before !== null) {
+        requireReviewTimestamp(before.createdAt)
+        if (typeof before.id !== 'string' || !UUID_SHAPE.test(before.id)) throw new TypeError('Invalid review cursor')
+      }
+      let query = reviewQuery(supabase, companyId, runId)
+      if (status !== null) query = query.eq('status', status)
+      if (objectType !== null) query = query.eq('object_type', objectType)
+      if (reason !== null) query = query.eq('reason', reason)
+      if (before !== null) query = query.or(`created_at.lt.${before.createdAt},and(created_at.eq.${before.createdAt},id.lt.${before.id})`)
+      const rows = checked(await query.order('created_at', { ascending: false }).order('id', { ascending: false }).limit(limit + 1))
+      if (!Array.isArray(rows)) throw new Error('Invalid review page')
+      return { items: rows.slice(0, limit), hasMore: rows.length > limit }
+    },
+    async getDryRunReview(companyId, runId, reviewId) {
+      requireReviewIdentity(reviewId)
+      return checked(await reviewQuery(supabase, companyId, runId).eq('id', reviewId).maybeSingle())
+    },
+    async listDryRunReviewEvents(companyId, runId, reviewId) {
+      if (!await this.getDryRunReview(companyId, runId, reviewId)) return []
+      return checked(await supabase.from('h2a_dry_run_review_events').select(REVIEW_EVENT_COLUMNS)
+        .eq('company_id', companyId).eq('review_id', reviewId)
+        .order('created_at', { ascending: true }).order('id', { ascending: true }))
+    },
+    async appendDryRunReviewEvent(companyId, runId, reviewId, input) {
+      const payload = reviewEventPayload(companyId, reviewId, input)
+      if (!await this.getDryRunReview(companyId, runId, reviewId)) return null
+      return checked(await supabase.from('h2a_dry_run_review_events').insert(payload).select(REVIEW_EVENT_COLUMNS).single())
+    },
+    async recordDryRunReview(companyId, input) {
+      for (const value of [companyId, input.run_id, input.portal_id, input.source_id]) requireReviewIdentity(value)
+      requireReviewValue(input.object_type, REVIEW_OBJECT_TYPES, 'object type')
+      assertReviewClassification(input.reason, input.conflict_type)
+      const payload = { company_id: companyId, run_id: input.run_id, portal_id: input.portal_id,
+        object_type: input.object_type, source_id: input.source_id, reason: input.reason, conflict_type: input.conflict_type,
+        ...reviewEvidencePayload(input, input.object_type), status: 'needs_review' }
+      const inserted = await supabase.from('h2a_dry_run_reviews').insert(payload).select(REVIEW_COLUMNS).single()
+      if (inserted?.error) {
+        if (inserted.error.code !== '23505') throw inserted.error
+        const existing = checked(await reviewSourceIdentity(reviewQuery(supabase, companyId, input.run_id), payload).maybeSingle())
+        if (!existing) throw inserted.error
+        return checked(await reviewSourceIdentity(supabase.from('h2a_dry_run_reviews').update(payload)
+          .eq('company_id', companyId).eq('run_id', input.run_id), payload).eq('id', existing.id).select(REVIEW_COLUMNS).single())
+      }
+      const review = checked(inserted)
+      if (!review?.id) throw new Error('Invalid review capture response')
+      try {
+        const event = await this.appendDryRunReviewEvent(companyId, input.run_id, review.id,
+          { eventType: 'captured', reason: payload.reason })
+        if (!event) throw new Error('Review capture event was not recorded')
+      } catch {
+        // Remove only this call's insertion so a retry can insert the row and audit together.
+        // An uncertain event response is safe: parent deletion also cascades any inserted event.
+        try {
+          checked(await supabase.from('h2a_dry_run_reviews').delete().eq('company_id', companyId)
+            .eq('run_id', input.run_id).eq('id', review.id))
+        } catch { /* The capture must still fail if compensation is unavailable. */ }
+        throw new Error('Review capture event was not recorded')
+      }
+      return review
+    },
+    async applyDryRunRecheck(companyId, input) {
+      requireReviewIdentity(companyId)
+      requireReviewIdentity(input.runId)
+      requireReviewIdentity(input.reviewId)
+      requireReviewTimestamp(input.expectedUpdatedAt)
+      requireReviewTimestamp(input.now)
+      assertReviewClassification(input.reason, input.conflictType)
+      const terminal = {
+        still_needs_review: ['needs_review', 'still_needs_review'],
+        safe_to_link: ['cleared', 'cleared'], safe_to_create: ['cleared', 'cleared'],
+        source_missing: ['no_longer_in_scope', 'no_longer_in_scope'],
+      }
+      if (!Object.hasOwn(terminal, input.outcome) || terminal[input.outcome][0] !== input.status || terminal[input.outcome][1] !== input.eventType) {
+        throw new TypeError('Invalid review recheck state')
+      }
+      const event = reviewEventPayload(companyId, input.reviewId, { eventType: input.eventType, reason: input.reason,
+        actorId: input.actorId, details: input.eventDetails, now: input.now })
+      const review = await this.getDryRunReview(companyId, input.runId, input.reviewId)
+      if (!review) return { error: 'not_found' }
+      requireReviewValue(review.object_type, REVIEW_OBJECT_TYPES, 'object type')
+      const evidence = reviewEvidencePayload({ source_snapshot: input.sourceSnapshot, candidate_snapshots: input.candidateSnapshots,
+        match_evidence: input.matchEvidence, proposed_changes: input.proposedChanges }, review.object_type)
+      const result = checked(await supabase.rpc('h2a_apply_dry_run_recheck', {
+        p_company_id: companyId, p_review_id: input.reviewId, p_expected_updated_at: input.expectedUpdatedAt,
+        p_actor_id: input.actorId, p_status: input.status, p_recheck_outcome: input.outcome,
+        p_reason: input.reason, p_conflict_type: input.conflictType, p_source_snapshot: evidence.source_snapshot,
+        p_candidate_snapshots: evidence.candidate_snapshots, p_match_evidence: evidence.match_evidence,
+        p_proposed_changes: evidence.proposed_changes, p_event_type: input.eventType,
+        p_event_details: event.sanitized_details, p_now: input.now,
+      }))
+      if (RECHECK_ERRORS.has(result?.error)) return { error: result.error }
+      if (!result || result.error || !result.review || typeof result.review !== 'object' || Array.isArray(result.review)) {
+        throw new Error('Invalid review recheck response')
+      }
+      return { review: result.review }
+    },
+    async pruneSupersededDryRunReviews(companyId, keepRunId) {
+      requireReviewIdentity(companyId)
+      requireReviewIdentity(keepRunId)
+      return checked(await supabase.from('h2a_dry_run_reviews').delete().eq('company_id', companyId)
+        .neq('run_id', keepRunId).select('id'))
+    },
     async getConflict(companyId, conflictId) {
       return checked(await scoped(supabase, 'h2a_conflicts', companyId).eq('id', conflictId).maybeSingle())
     },
