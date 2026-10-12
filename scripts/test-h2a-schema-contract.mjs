@@ -5,6 +5,7 @@ import { test } from 'node:test'
 // Static deployment contract only: this does not replace PostgreSQL role/concurrency tests.
 const schemaUrl = new URL('../supabase/h2a-schema.sql', import.meta.url)
 const sampleMigrationUrl = new URL('../supabase/h2a-dry-run-samples.sql', import.meta.url)
+const reviewMigrationUrl = new URL('../supabase/h2a-dry-run-review-workflow.sql', import.meta.url)
 const requiredTables = [
   'h2a_company_config', 'h2a_option_mappings', 'h2a_sync_runs',
   'h2a_cursors', 'h2a_backfill_windows', 'h2a_contact_mappings',
@@ -12,9 +13,12 @@ const requiredTables = [
   'h2a_item_results', 'h2a_conflicts', 'h2a_conflict_events',
   'h2a_conflict_resumes', 'h2a_execution_leases', 'h2a_daily_claims',
   'h2a_run_checkpoints',
+  'h2a_dry_run_reviews', 'h2a_dry_run_review_events',
 ]
+const serviceOnlyTables = ['h2a_dry_run_reviews', 'h2a_dry_run_review_events']
 const readSchema = () => readFileSync(schemaUrl, 'utf8').replace(/--[^\n]*/g, '').toLowerCase()
 const readSampleMigration = () => readFileSync(sampleMigrationUrl, 'utf8').replace(/--[^\n]*/g, '').toLowerCase()
+const readReviewMigration = () => readFileSync(reviewMigrationUrl, 'utf8').replace(/--[^\n]*/g, '').toLowerCase()
 const tableBody = (sql, table) => {
   const body = sql.match(new RegExp(`create table ${table.replace('.', '\\.')} \\(([\\s\\S]*?)\\n\\);`))?.[1]
   assert.ok(body, `${table} must exist`)
@@ -36,6 +40,12 @@ test('all tenant tables have UUID keys, ownership, RLS, and authenticated read-o
     assert.match(body, /\buuid primary key/)
     assert.match(body, /company_id uuid (?:primary key|not null)/)
     assert.match(sql, new RegExp(`alter table public\\.${table} enable row level security;`))
+    if (serviceOnlyTables.includes(table)) {
+      assert.match(sql, new RegExp(`revoke all on table public\\.${table} from public, anon, authenticated, service_role;`))
+      assert.doesNotMatch(sql, new RegExp(`grant [^;]*on (?:table )?public\\.${table} to authenticated;`))
+      assert.doesNotMatch(sql, new RegExp(`create policy[^;]+on public\\.${table}`))
+      continue
+    }
     assert.match(sql, new RegExp(`revoke all on table public\\.${table} from public, anon, authenticated;`))
     if (['h2a_conflict_resumes', 'h2a_execution_leases', 'h2a_daily_claims', 'h2a_run_checkpoints'].includes(table)) {
       assert.doesNotMatch(sql, /grant [^;]*on (?:table )?public\.h2a_conflict_resumes to authenticated;/)
@@ -59,6 +69,70 @@ test('all tenant tables have UUID keys, ownership, RLS, and authenticated read-o
     assert.match(policy, new RegExp(`company_id = ${table}\\.company_id`))
   }
   assert.doesNotMatch(sql, /create policy[^;]+for (?:all|insert|update|delete)/)
+})
+
+test('dry-run review storage is tenant-safe, bounded, service-only, and CAS-updated', () => {
+  const sql = readSchema()
+  const reviews = tableBody(sql, 'public.h2a_dry_run_reviews')
+  const events = tableBody(sql, 'public.h2a_dry_run_review_events')
+  const migration = readReviewMigration()
+
+  assert.match(tableBody(sql, 'public.h2a_sync_runs'), /review_capture_version smallint/)
+  assert.match(tableBody(sql, 'public.h2a_sync_runs'), /review_capture_version smallint check \(review_capture_version is null or \(\s*mode = 'dry_run' and sample_limit_per_type is not null and sample_limit_per_type = 10 and review_capture_version = 1/)
+  assert.match(reviews, /object_type text not null check \(object_type in \('contacts', 'companies'\)\)/)
+  assert.match(reviews, /unique \(company_id, id\)/)
+  assert.match(reviews, /unique \(company_id, run_id, portal_id, object_type, source_id\)/)
+  assert.match(reviews, /foreign key \(company_id, run_id\) references public\.h2a_sync_runs \(company_id, id\)/)
+  assert.match(reviews, /jsonb_typeof\(candidate_snapshots\) = 'array' and jsonb_array_length\(candidate_snapshots\) <= 10/)
+  assert.match(events, /foreign key \(company_id, review_id\) references public\.h2a_dry_run_reviews \(company_id, id\) on delete cascade/)
+  for (const source of [sql, migration]) {
+    for (const table of serviceOnlyTables) {
+      assert.match(source, new RegExp(`alter table public\\.${table} enable row level security;`))
+      assert.match(source, new RegExp(`revoke all on table public\\.${table} from public, anon, authenticated, service_role;`))
+      assert.doesNotMatch(source, new RegExp(`grant [^;]*public\\.${table} to authenticated`))
+      assert.doesNotMatch(source, new RegExp(`create policy[^;]+public\\.${table}`))
+    }
+    assert.match(source, /grant select, insert, update, delete on table public\.h2a_dry_run_reviews to service_role;/)
+    assert.match(source, /grant select, insert on table public\.h2a_dry_run_review_events to service_role;/)
+    assert.doesNotMatch(source, /grant [^;]*(?:update|delete)[^;]*public\.h2a_dry_run_review_events/)
+    assert.doesNotMatch(source, /before update or delete on public\.h2a_dry_run_review_events/)
+  }
+  const rpc = functionBody(sql, 'h2a_apply_dry_run_recheck')
+  assert.match(rpc, /where r\.company_id = p_company_id and r\.id = p_review_id[\s\S]*for update/)
+  assert.match(rpc, /review_capture_version = 1[\s\S]*v_current_run_id is distinct from v_review\.run_id[\s\S]*'superseded'/)
+  assert.match(rpc, /v_review\.updated_at is distinct from p_expected_updated_at/)
+  for (const parameter of ['company_id', 'review_id', 'expected_updated_at', 'actor_id', 'status', 'recheck_outcome',
+    'reason', 'conflict_type', 'source_snapshot', 'candidate_snapshots', 'match_evidence', 'proposed_changes', 'event_type', 'event_details', 'now']) {
+    assert.match(rpc, new RegExp(`p_${parameter} is null`))
+  }
+  assert.ok(rpc.indexOf('p_expected_updated_at is null') < rpc.indexOf('v_review.updated_at is distinct from'), 'missing CAS timestamps must be rejected first')
+  assert.match(rpc, /length\(pg_catalog\.btrim\(p_reason\)\) = 0/)
+  assert.match(rpc, /length\(pg_catalog\.btrim\(p_conflict_type\)\) = 0/)
+  assert.match(rpc, /insert into public\.h2a_dry_run_review_events/)
+  assert.match(migration, /add column if not exists review_capture_version smallint/)
+  assert.match(migration, /drop constraint if exists h2a_sync_runs_review_capture_version_check/)
+  assert.match(migration, /add constraint h2a_sync_runs_review_capture_version_check[\s\S]*not valid;/)
+  assert.match(migration, /check \(review_capture_version is null or \(\s*mode = 'dry_run' and sample_limit_per_type is not null and sample_limit_per_type = 10 and review_capture_version = 1/)
+  assert.match(migration, /validate constraint h2a_sync_runs_review_capture_version_check/)
+  for (const table of serviceOnlyTables) {
+    assert.match(migration, new RegExp(`create table if not exists public\\.${table}`))
+  }
+  for (const name of ['h2a_dry_reviews_company_run_status_idx', 'h2a_dry_reviews_company_run_reason_idx',
+    'h2a_dry_reviews_last_rechecked_by_idx', 'h2a_dry_review_events_company_review_idx']) {
+    assert.match(sql, new RegExp(`create index ${name}`))
+    assert.match(migration, new RegExp(`create index if not exists ${name}`))
+  }
+})
+
+test('dry-run recheck RPC uses invoker privileges with service-only execution and a pinned search path', () => {
+  for (const sql of [readSchema(), readReviewMigration()]) {
+    const definition = sql.match(/create (?:or replace )?function public\.h2a_apply_dry_run_recheck\(([\s\S]*?)as \$\$/)?.[1]
+    assert.ok(definition)
+    assert.match(definition, /security invoker set search_path = ''/)
+    assert.doesNotMatch(definition, /security definer/)
+    assert.match(sql, /revoke execute on function public\.h2a_apply_dry_run_recheck\([^;]+\) from public, anon, authenticated;/)
+    assert.match(sql, /grant execute on function public\.h2a_apply_dry_run_recheck\([^;]+\) to service_role;/)
+  }
 })
 
 test('private credentials accept complete encrypted envelopes and have no browser grants', () => {
