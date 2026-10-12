@@ -135,7 +135,10 @@ export function createH2ARepository(supabase) {
       const run = await this.getCurrentReviewSample(companyId, after)
       if (run?.review_capture_version !== 1) return false
       // Count all captured rows. Individual rechecks cannot unlock their original sample.
-      return await this.countDryRunReviews(companyId, run.id) === 0
+      if (await this.countDryRunReviews(companyId, run.id) !== 0) return false
+      // A replacement may have completed and pruned this run between selection and counting.
+      const current = await this.getCurrentReviewSample(companyId, after)
+      return current?.id === run.id && current?.review_capture_version === 1
     },
     async listDryRunReviews(companyId, runId, { limit = 25, before = null, status = null, objectType = null, reason = null } = {}) {
       if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new TypeError('Invalid review page size')

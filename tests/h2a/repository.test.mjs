@@ -43,7 +43,8 @@ const data = value => ({ data: value, error: null })
 const equalityFilters = call => call.steps.filter(step => step[0] === 'eq').map(step => step.slice(1))
 
 test('full dry-run readiness selects a fresh completed version-one bounded sample and counts all rows', async () => {
-  const { repository, calls } = reviewRepositoryFixture([data({ id: 'sample-2', review_capture_version: 1 }), { count: 0, error: null }])
+  const { repository, calls } = reviewRepositoryFixture([data({ id: 'sample-2', review_capture_version: 1 }),
+    { count: 0, error: null }, data({ id: 'sample-2', review_capture_version: 1 })])
   assert.equal(await repository.hasCleanReviewSampleDryRun('company-1', '2026-10-01T00:00:00Z'), true)
   assert.deepEqual(equalityFilters(calls[0]), [['company_id', 'company-1'], ['mode', 'dry_run'],
     ['status', 'completed'], ['sample_limit_per_type', 10], ['review_capture_version', 1]])
@@ -54,12 +55,42 @@ test('full dry-run readiness selects a fresh completed version-one bounded sampl
   assert.deepEqual(calls[0].steps.find(step => step[0] === 'limit'), ['limit', 1])
   assert.deepEqual(equalityFilters(calls[1]), [['company_id', 'company-1'], ['run_id', 'sample-2']])
   assert.deepEqual(calls[1].steps[0], ['select', 'id', { count: 'exact', head: true }])
+  assert.deepEqual(calls[2], calls[0])
+})
+
+test('replacement completion and pruning cannot turn the former sample into clean readiness', async () => {
+  // A had review rows. B completes with its own review rows and prunes A before A's count.
+  const { repository, calls } = reviewRepositoryFixture([data({ id: 'sample-A', review_capture_version: 1 }),
+    { count: 0, error: null }, data({ id: 'sample-B', review_capture_version: 1 })])
+  assert.equal(await repository.hasCleanReviewSampleDryRun('company-1', '2026-10-01T00:00:00Z'), false)
+  assert.deepEqual(equalityFilters(calls[1]), [['company_id', 'company-1'], ['run_id', 'sample-A']])
+  assert.deepEqual(calls[2], calls[0])
+})
+
+test('zero-row readiness requires the same version-one sample to remain current', async () => {
+  for (const current of [null, { id: 'sample-2', review_capture_version: null }]) {
+    const { repository } = reviewRepositoryFixture([data({ id: 'sample-2', review_capture_version: 1 }),
+      { count: 0, error: null }, data(current)])
+    assert.equal(await repository.hasCleanReviewSampleDryRun('company-1', '2026-10-01T00:00:00Z'), false)
+  }
+})
+
+test('readiness remains fail-closed on both count and current-sample revalidation query failures', async () => {
+  const failure = { code: '08006' }
+  for (const responses of [
+    [data({ id: 'sample-2', review_capture_version: 1 }), { error: failure }],
+    [data({ id: 'sample-2', review_capture_version: 1 }), { count: 0, error: null }, { error: failure }],
+  ]) {
+    const { repository } = reviewRepositoryFixture(responses)
+    await assert.rejects(() => repository.hasCleanReviewSampleDryRun('company-1', '2026-10-01T00:00:00Z'), error => error === failure)
+  }
 })
 
 test('cleared and no-longer-in-scope rows still block their old sample from unlocking full history', async () => {
   const { repository, calls } = reviewRepositoryFixture([data({ id: 'sample-1', review_capture_version: 1 }), { count: 3, error: null }])
   assert.equal(await repository.hasCleanReviewSampleDryRun('company-1', '2026-10-01T00:00:00Z'), false)
   assert.equal(equalityFilters(calls[1]).some(([key]) => key === 'status'), false)
+  assert.equal(calls.length, 2)
 })
 
 test('missing and historical samples never satisfy clean review readiness', async () => {
