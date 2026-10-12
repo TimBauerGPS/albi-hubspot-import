@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { recheckDryRunReview } from '../../netlify/functions/_h2a/reviewService.js'
+import * as reviewService from '../../netlify/functions/_h2a/reviewService.js'
 
 const reviewId = '00000000-0000-4000-8000-000000000001'
 const actorId = '00000000-0000-4000-8000-000000000002'
@@ -35,6 +36,39 @@ function fixture({ objectType = 'contacts', source, contacts = [], organizations
   }
   return { deps: { repository, hubspotRead, albiRead, now: () => new Date('2026-10-12T12:00:00Z'), sleep: async () => {} }, row, calls, events, applied }
 }
+
+test('recheck repository adapter exposes only frozen diagnostic capabilities without accessing mutation or credential getters', async () => {
+  const f = fixture({ source: null })
+  const repository = f.deps.repository
+  for (const name of ['getCredentials', 'deliveryStore', 'recordItem', 'saveRunCheckpoint', 'queueRun', 'finishRunTotals']) {
+    Object.defineProperty(repository, name, { enumerable: true, get() { throw Error(`Forbidden capability getter: ${name}`) } })
+  }
+  const adapter = reviewService.createReviewRepositoryCapabilities(repository)
+  assert.deepEqual(Object.keys(adapter).sort(), [
+    'getConfig', 'getLatestCompletedSampleDryRun', 'getCurrentReviewSample', 'getDryRunReview',
+    'getMappings', 'appendDryRunReviewEvent', 'applyDryRunRecheck',
+  ].sort())
+  assert.equal(Object.isFrozen(adapter), true)
+  for (const name of ['saveCursor', 'saveMapping', 'recordConflict', 'deliveryStore', 'recordItem', 'finishRun',
+    'getCredentials', 'saveRunCheckpoint', 'queueRun', 'finishRunTotals', 'countDryRunReviews', 'hasCleanReviewSampleDryRun']) {
+    assert.equal(name in adapter, false)
+  }
+  assert.throws(() => { adapter.saveMapping = () => {} }, TypeError)
+  await recheckDryRunReview({ ...f.deps, repository: adapter }, input)
+  assert.equal(f.applied[0][1].outcome, 'source_missing')
+})
+
+test('recheck repository adapter preserves required repository receiver binding', async () => {
+  const f = fixture()
+  const repository = f.deps.repository
+  repository.getConfig = async function (companyId) {
+    assert.equal(this, repository)
+    assert.equal(companyId, 'tenant-1')
+    return { portal_id: '123', initial_start_locked_at: '2026-10-01T00:00:00Z' }
+  }
+  const adapter = reviewService.createReviewRepositoryCapabilities(repository)
+  await adapter.getConfig('tenant-1')
+})
 
 test('safe exact contact link clears only diagnostic state and preserves original nonblank classification', async () => {
   const f = fixture({ contacts: [{ id: '20', firstName: 'A', lastName: 'Person', email: 'a@example.com', apiKey: 'secret' }] })

@@ -22,6 +22,20 @@ const fixedFailure = error => ({ category: CATEGORIES.has(error?.category) ? err
   code: CODES.has(error?.code) ? error.code : 'operation_failed' })
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
+// Recheck receives only reads and diagnostic writes. Select methods explicitly
+// so credential, sync mutation, and delivery getters are never accessed.
+export function createReviewRepositoryCapabilities(repository) {
+  return Object.freeze({
+    getConfig: repository.getConfig.bind(repository),
+    getLatestCompletedSampleDryRun: repository.getLatestCompletedSampleDryRun.bind(repository),
+    getCurrentReviewSample: repository.getCurrentReviewSample.bind(repository),
+    getDryRunReview: repository.getDryRunReview.bind(repository),
+    getMappings: repository.getMappings.bind(repository),
+    appendDryRunReviewEvent: repository.appendDryRunReviewEvent.bind(repository),
+    applyDryRunRecheck: repository.applyDryRunRecheck.bind(repository),
+  })
+}
+
 async function requireCurrentSample(repository, companyId, sample, after) {
   const latest = await repository.getLatestCompletedSampleDryRun(companyId, after)
   if (latest?.id !== sample.id || latest.review_capture_version !== 1) fail(409, MESSAGES.superseded)

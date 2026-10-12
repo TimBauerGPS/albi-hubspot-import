@@ -21,6 +21,7 @@ function fixture() {
     getDryRunReview: async (...args) => { calls.push(['detail', ...args]); return args[2] === reviewId ? row : null },
     listDryRunReviewEvents: async (...args) => { calls.push(['events', ...args]); return [{ event_type: 'recheck_failed', sanitized_details: { category: 'auth', code: 'operation_failed', message: 'secret' } }] },
     appendDryRunReviewEvent: async () => ({ id: 'event' }),
+    getMappings: async () => ({ contacts: [], organizations: [], options: [] }),
     applyDryRunRecheck: async () => ({ review: { ...row, status: 'no_longer_in_scope', recheck_outcome: 'source_missing' } }),
   }
   const options = { repository, requireRequest: async (_event, auth) => { calls.push(['auth', auth]); return { companyId: 'authorized-company', userId: '00000000-0000-4000-8000-000000000002' } },
