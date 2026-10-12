@@ -403,12 +403,41 @@ test('queueRun persists the bounded sample limit only on the durable run row', a
   } }
 
   const result = await createH2ARepository(supabase).queueRun('company-1', {
-    mode: 'dry_run', trigger: 'manual', requestedBy: 'user-1', sampleLimitPerType: 10,
+    mode: 'dry_run', trigger: 'manual', requestedBy: 'user-1', sampleLimitPerType: 10, reviewCaptureVersion: 1,
   })
 
   assert.equal(result.sample_limit_per_type, 10)
+  assert.equal(result.review_capture_version, 1)
   assert.equal(inserted.company_id, 'company-1')
   assert.equal(Object.hasOwn(inserted, 'dryRunScope'), false)
+})
+
+test('queueRun rejects capture markers outside the exact bounded version-one dry run before database access', async () => {
+  const repository = createH2ARepository({ rpc: async () => ({}), from() { throw Error('database touched') } })
+  for (const input of [
+    { mode: 'live', sampleLimitPerType: 10, reviewCaptureVersion: 1 },
+    { mode: 'backfill', sampleLimitPerType: 10, reviewCaptureVersion: 1 },
+    { mode: 'dry_run', sampleLimitPerType: null, reviewCaptureVersion: 1 },
+    { mode: 'dry_run', sampleLimitPerType: 9, reviewCaptureVersion: 1 },
+    { mode: 'dry_run', sampleLimitPerType: 10, reviewCaptureVersion: 2 },
+    { mode: 'dry_run', sampleLimitPerType: 10, reviewCaptureVersion: '1' },
+    { mode: 'dry_run', sampleLimitPerType: 10, reviewCaptureVersion: 0 },
+  ]) await assert.rejects(() => repository.queueRun('company-1', { trigger: 'manual', ...input }), TypeError)
+})
+
+test('queueRun omits a capture marker for historical samples, full dry runs, and live runs', async () => {
+  const rows = []
+  const repository = createH2ARepository({ rpc: async () => ({}), from() { return {
+    insert(row) { rows.push(row); return this }, select() { return this },
+    single: async () => ({ data: rows.at(-1), error: null }),
+  } } })
+  for (const input of [
+    { mode: 'dry_run', sampleLimitPerType: 10 },
+    { mode: 'dry_run', sampleLimitPerType: null, reviewCaptureVersion: null },
+    { mode: 'live', reviewCaptureVersion: null },
+  ]) await repository.queueRun('company-1', { trigger: 'manual', ...input })
+  assert.equal(rows.length, 3)
+  assert.ok(rows.every(row => !Object.hasOwn(row, 'review_capture_version')))
 })
 
 test('completed sample prerequisite is tenant scoped and newer than the locked start-date decision', async () => {

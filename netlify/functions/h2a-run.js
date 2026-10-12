@@ -112,7 +112,8 @@ export function createRunHandler(options = {}, { background = false } = {}) {
         }
         if (await repository.getActiveLease(companyId)) return reply(200, { status: 'already_running', companyId })
         const run = await repository.queueRun(companyId, { mode: body.mode, trigger: 'manual', requestedBy: auth.userId,
-          sampleLimitPerType: body.dryRunScope === 'sample' ? SAMPLE_LIMIT_PER_TYPE : null })
+          sampleLimitPerType: body.dryRunScope === 'sample' ? SAMPLE_LIMIT_PER_TYPE : null,
+          reviewCaptureVersion: body.dryRunScope === 'sample' ? 1 : null })
         try { await dispatchBackground({ companyId, mode: body.mode, trigger: 'resume', runId: run.id }, options) }
         catch (error) { await repository.markQueueFailed(companyId, run.id); throw error }
         return reply(202, { status: 'queued', companyId, runId: run.id })

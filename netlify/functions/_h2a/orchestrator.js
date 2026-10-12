@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto'
-import { HUBSPOT_ACTIVITY_TYPES } from './constants.js'
+import { HUBSPOT_ACTIVITY_TYPES, SAMPLE_LIMIT_PER_TYPE } from './constants.js'
 import { pacificBusinessDate, pacificStartOfDate } from './time.js'
 import { advanceCheckpoint, compareBoundary, planBackfillWindows, readStartWithOverlap } from './checkpoints.js'
-import { decideContactMatch, decideOrganizationMatch } from './match.js'
+import { evaluateContactReview, evaluateOrganizationReview, safeReviewSnapshot, safeReviewCandidates,
+  safeReviewEvidence, safeReviewChanges } from './review.js'
 import { resolveActivityTargets, buildAlbiActivity } from './activity.js'
 import { resolveActivityType, resolveContactType } from './options.js'
 import { reserveDelivery, completeDelivery } from './deliveries.js'
@@ -14,6 +15,11 @@ const idOf = record => text(record?.id)
 const nowIso = deps => (deps.now?.() ?? new Date()).toISOString()
 const clockMs = deps => (deps.clockMs ?? Date.now)()
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+class ReviewCaptureError extends Error {
+  constructor() { super('H2A sample review capture failed') }
+}
+const capturesReview = ctx => ctx?.mode === 'dry_run' && ctx.sampleLimitPerType === SAMPLE_LIMIT_PER_TYPE &&
+  ctx.reviewCaptureVersion === 1
 const ERROR_CATEGORIES = new Set(['auth', 'permission', 'validation', 'permanent', 'transient', 'rate_limit'])
 const ERROR_CODES = new Set(['pagination_loop', 'malformed_response', 'application_error', 'unsupported_contract', 'timeout', 'network'])
 const WRAPPER_SCOPES = new Set([
@@ -73,7 +79,25 @@ function mappingFor(mappings, portalId, sourceId) {
 }
 
 function option(mappings, kind) {
-  return mappings.find(row => row.mapping_kind === kind && row.source_key === 'default' && row.confirmed_at)?.albi_id ?? null
+  const resolved = resolveContactType({ mappings: mappings.filter(row => row.mapping_kind === kind && row.source_key === 'default')
+    .map(row => ({ ...row, mapping_kind: 'default_contact_type' })) })
+  return resolved.action === 'resolved' ? resolved.contactTypeId : null
+}
+
+function reviewMappings(mappings, portalId, sourceId) {
+  // The evaluator's existing-mapping lookup uses source ID; do not let another
+  // portal's same-numbered source act as this source's mapping.
+  return mappings.filter(row => row.portal_id === portalId || row.hubspot_id !== sourceId)
+}
+
+function actionTarget(evaluation, candidates, mapping, targetKey) {
+  if (evaluation.reason === 'existing_mapping' && mapping?.[targetKey]) return text(mapping[targetKey])
+  // Evaluator IDs are diagnostic strings capped at 500 characters. Recover the
+  // full action ID from the original index, and fail closed on prefix collisions.
+  const matches = candidates.filter(candidate => evaluation.targetId?.length === 500
+    ? idOf(candidate).slice(0, 500) === evaluation.targetId : idOf(candidate) === evaluation.targetId)
+  if (matches.length !== 1) throw new Error('H2A evaluation target is unavailable')
+  return idOf(matches[0])
 }
 
 async function recordOnce(repo, companyId, runId, row) {
@@ -87,6 +111,22 @@ async function recordOnce(repo, companyId, runId, row) {
 
 async function conflict(deps, ctx, data) {
   const { companyId, runId, portalId, activity } = ctx
+  if (capturesReview(ctx) && ['contacts', 'companies'].includes(data.objectType)) {
+    const identity = JSON.stringify([portalId, data.objectType, data.sourceId])
+    if (!ctx.capturedReviewIdentities.has(identity)) {
+      try {
+        await deps.repository.recordDryRunReview(companyId, {
+          run_id: runId, portal_id: portalId, object_type: data.objectType, source_id: data.sourceId,
+          reason: data.reason, conflict_type: data.type,
+          source_snapshot: safeReviewSnapshot(data.source ?? { id: data.sourceId }, data.objectType),
+          candidate_snapshots: safeReviewCandidates(data.candidates ?? [], data.objectType),
+          match_evidence: { evidence: safeReviewEvidence(data.evidence) },
+          proposed_changes: safeReviewChanges(data.proposedChanges, data.objectType),
+        })
+      } catch { throw new ReviewCaptureError() }
+      ctx.capturedReviewIdentities.add(identity)
+    }
+  }
   if (ctx.mode !== 'dry_run') {
     const persisted = await deps.repository.recordConflict(companyId, {
       portal_id: portalId, object_type: data.objectType, source_id: data.sourceId,
@@ -108,51 +148,38 @@ async function conflict(deps, ctx, data) {
 async function resolveOrganization(deps, ctx, source) {
   const sourceId = idOf(source)
   const { companyId, portalId, mappings, indexes, runId } = ctx
-  const decision = decideOrganizationMatch({ source, sourceId, candidates: indexes.organizations,
-    existingMapping: mappingFor(mappings.organizations, portalId, sourceId), mappings: mappings.organizations })
-  if (decision.action === 'conflict') {
-    await conflict(deps, ctx, { objectType: 'companies', sourceId, type: 'organization_match', source, ...decision })
-    return { id: sourceId, action: 'conflict', reason: decision.reason }
+  const evaluation = evaluateOrganizationReview({ source, candidates: indexes.organizations,
+    mappings: reviewMappings(mappings.organizations, portalId, sourceId), optionMappings: mappings.options })
+  if (evaluation.outcome === 'needs_review') {
+    await conflict(deps, ctx, { objectType: 'companies', sourceId, type: evaluation.conflictType, source, ...evaluation })
+    return { id: sourceId, action: 'conflict', outcome: evaluation.outcome,
+      reason: evaluation.conflictType === 'organization_fields' ? 'organization_fields_require_review' : evaluation.reason }
   }
-  if (decision.action === 'link') {
-    if (Object.keys(decision.proposedChanges.updates).length || Object.keys(decision.proposedChanges.conflicts).length) {
-      // Generic Albi update is unsupported until its contract is verified.
-      await conflict(deps, ctx, { objectType: 'companies', sourceId, type: 'organization_fields',
-        reason: Object.keys(decision.proposedChanges.updates).length ? 'albi_organization_update_contract_unverified' : 'nonblank_field_difference',
-        proposedChanges: decision.proposedChanges, source,
-        candidates: indexes.organizations.filter(candidate => idOf(candidate) === decision.targetId) })
-      return { id: sourceId, action: 'conflict', reason: 'organization_fields_require_review' }
-    }
+  if (evaluation.outcome === 'safe_to_link') {
+    const targetId = actionTarget(evaluation, indexes.organizations,
+      mappingFor(mappings.organizations, portalId, sourceId), 'albi_organization_id')
     if (ctx.mode !== 'dry_run' && !mappingFor(mappings.organizations, portalId, sourceId)) {
       const saved = await deps.repository.saveMapping(companyId, 'organization', { portal_id: portalId, hubspot_id: sourceId,
-        albi_organization_id: decision.targetId, match_method: 'automatic' })
+        albi_organization_id: targetId, match_method: 'automatic' })
       mappings.organizations.push(saved)
     }
     await recordOnce(deps.repository, companyId, runId, { portal_id: portalId, object_type: 'companies', source_id: sourceId,
-      albi_target_type: 'organization', albi_target_id: decision.targetId,
-      outcome: ctx.mode === 'dry_run' ? 'dry_run' : 'linked', sanitized_details: { reason: decision.reason,
+      albi_target_type: 'organization', albi_target_id: targetId,
+      outcome: ctx.mode === 'dry_run' ? 'dry_run' : 'linked', sanitized_details: { reason: evaluation.reason,
         ...(ctx.mode === 'dry_run' ? { proposedAction: 'link_organization' } : {}) } })
-    const candidate = indexes.organizations.find(item => idOf(item) === decision.targetId)
+    const candidate = indexes.organizations.find(item => idOf(item) === targetId)
     const types = candidate?.organizationTypeIds ?? []
-    return { id: sourceId, action: 'link', targetId: decision.targetId,
+    return { id: sourceId, action: 'link', outcome: 'safe_to_link', targetId,
       organizationTypeId: types.length === 1 ? String(types[0]) : null }
   }
   const orgTypeId = option(mappings.options, 'default_organization_type')
-  if (!orgTypeId) {
-    await conflict(deps, ctx, { objectType: 'companies', sourceId, type: 'configuration', reason: 'organization_type_confirmation_required' })
-    return { id: sourceId, action: 'conflict', reason: 'organization_type_confirmation_required' }
-  }
   if (ctx.mode === 'dry_run') {
     await recordOnce(deps.repository, companyId, runId, { portal_id: portalId, object_type: 'companies', source_id: sourceId,
       outcome: 'dry_run', sanitized_details: { proposedAction: 'create_organization', organizationTypeId: String(orgTypeId) } })
-    return { id: sourceId, action: 'conflict', reason: 'dry_run_preview', organizationTypeId: String(orgTypeId) }
+    return { id: sourceId, action: 'conflict', outcome: 'safe_to_create', reason: 'dry_run_preview', organizationTypeId: String(orgTypeId) }
   }
   const fields = sourceFields(source)
   const phone = text(fields.phone) ? normalizePhone(fields.phone) : null
-  if (phone?.conflictReason) {
-    await conflict(deps, ctx, { objectType: 'companies', sourceId, type: 'organization_phone', reason: phone.conflictReason })
-    return { id: sourceId, action: 'conflict', reason: phone.conflictReason }
-  }
   const created = await deps.albi.createOrganization({ name: text(fields.name), organizationTypeIds: [orgTypeId],
     ...(phone ? { phoneNumber: phone.writable } : {}) })
   const targetId = idOf(created)
@@ -164,61 +191,44 @@ async function resolveOrganization(deps, ctx, source) {
     organizationTypeIds: [String(orgTypeId)] })
   await recordOnce(deps.repository, companyId, runId, { portal_id: portalId, object_type: 'companies', source_id: sourceId,
     albi_target_type: 'organization', albi_target_id: targetId, outcome: 'created', sanitized_details: {} })
-  return { id: sourceId, action: 'link', targetId, organizationTypeId: String(orgTypeId) }
+  return { id: sourceId, action: 'link', outcome: 'safe_to_link', targetId, organizationTypeId: String(orgTypeId) }
 }
 
-async function resolveContact(deps, ctx, source, organization) {
+async function resolveContact(deps, ctx, source, organization, associatedCompanyIds = []) {
   const sourceId = idOf(source)
   const { companyId, portalId, mappings, indexes, runId } = ctx
-  const decision = decideContactMatch({ source, sourceId, candidates: indexes.contacts,
-    existingMapping: mappingFor(mappings.contacts, portalId, sourceId), mappings: mappings.contacts })
-  if (decision.action === 'conflict') {
-    await conflict(deps, ctx, { objectType: 'contacts', sourceId, type: 'contact_match', source, ...decision })
-    return { id: sourceId, action: 'conflict', reason: decision.reason }
+  const evaluation = evaluateContactReview({ source, candidates: indexes.contacts,
+    mappings: reviewMappings(mappings.contacts, portalId, sourceId), optionMappings: mappings.options,
+    associatedCompanyIds, organization })
+  if (evaluation.outcome === 'needs_review') {
+    await conflict(deps, ctx, { objectType: 'contacts', sourceId, type: evaluation.conflictType, source, ...evaluation })
+    return { id: sourceId, action: 'conflict', reason: evaluation.conflictType === 'contact_fields'
+      ? 'contact_fields_require_review' : evaluation.reason === 'albi_contact_association_contract_unverified'
+        ? 'association_contract_unverified' : evaluation.reason }
   }
-  if (decision.action === 'link') {
-    const proposed = decision.proposedChanges
-    if (Object.keys(proposed.updates).length || Object.keys(proposed.conflicts).length) {
-      await conflict(deps, ctx, { objectType: 'contacts', sourceId, type: 'contact_fields',
-        reason: Object.keys(proposed.updates).length ? 'albi_contact_update_contract_unverified' : 'nonblank_field_difference',
-        proposedChanges: proposed, source,
-        candidates: indexes.contacts.filter(candidate => idOf(candidate) === decision.targetId) })
-      return { id: sourceId, action: 'conflict', reason: 'contact_fields_require_review' }
-    }
-    const target = indexes.contacts.find(candidate => idOf(candidate) === decision.targetId)
-    if (organization?.action === 'link' && target && text(target.organizationId) !== text(organization.targetId)) {
-      await conflict(deps, ctx, { objectType: 'contacts', sourceId, type: 'association', reason: 'albi_contact_association_contract_unverified' })
-      return { id: sourceId, action: 'conflict', reason: 'association_contract_unverified' }
-    }
+  if (evaluation.outcome === 'safe_to_link') {
+    const targetId = actionTarget(evaluation, indexes.contacts,
+      mappingFor(mappings.contacts, portalId, sourceId), 'albi_contact_id')
     if (ctx.mode !== 'dry_run' && !mappingFor(mappings.contacts, portalId, sourceId)) {
       const saved = await deps.repository.saveMapping(companyId, 'contact', { portal_id: portalId, hubspot_id: sourceId,
-        albi_contact_id: decision.targetId, match_method: 'automatic' })
+        albi_contact_id: targetId, match_method: 'automatic' })
       mappings.contacts.push(saved)
     }
     await recordOnce(deps.repository, companyId, runId, { portal_id: portalId, object_type: 'contacts', source_id: sourceId,
-      albi_target_type: 'contact', albi_target_id: decision.targetId,
-      outcome: ctx.mode === 'dry_run' ? 'dry_run' : 'linked', sanitized_details: { reason: decision.reason,
+      albi_target_type: 'contact', albi_target_id: targetId,
+      outcome: ctx.mode === 'dry_run' ? 'dry_run' : 'linked', sanitized_details: { reason: evaluation.reason,
         ...(ctx.mode === 'dry_run' ? { proposedAction: 'link_contact' } : {}) } })
-    return { id: sourceId, action: 'link', targetId: decision.targetId }
+    return { id: sourceId, action: 'link', targetId }
   }
   const fields = sourceFields(source)
   const type = resolveContactType({ mappings: mappings.options,
     inheritFromOrganization: true, organizationTypeId: organization?.organizationTypeId })
-  if (type.action !== 'resolved') {
-    await conflict(deps, ctx, { objectType: 'contacts', sourceId, type: 'configuration', reason: type.reason })
-    return { id: sourceId, action: 'conflict', reason: type.reason }
-  }
-  if (organization && organization.action !== 'link' && ctx.mode !== 'dry_run') return { id: sourceId, action: 'conflict', reason: 'organization_unresolved' }
   if (ctx.mode === 'dry_run') {
     await recordOnce(deps.repository, companyId, runId, { portal_id: portalId, object_type: 'contacts', source_id: sourceId,
       outcome: 'dry_run', sanitized_details: { proposedAction: 'create_contact', contactTypeId: type.contactTypeId } })
     return { id: sourceId, action: 'conflict', reason: 'dry_run_preview' }
   }
   const phone = text(fields.phone) ? normalizePhone(fields.phone) : null
-  if (phone?.conflictReason) {
-    await conflict(deps, ctx, { objectType: 'contacts', sourceId, type: 'contact_phone', reason: phone.conflictReason })
-    return { id: sourceId, action: 'conflict', reason: phone.conflictReason }
-  }
   const created = await deps.albi.createContact({ firstName: text(fields.firstname), lastName: text(fields.lastname),
     contactTypeIds: [type.contactTypeId], ...(organization?.targetId ? { organizationId: organization.targetId } : {}),
     ...(text(fields.email) ? { email: text(fields.email) } : {}), ...(phone ? { phoneNumber: phone.writable } : {}) })
@@ -267,9 +277,18 @@ async function processActivity(deps, ctx, activity, deadline) {
   for (const source of companies) {
     try { organizationBySourceId.set(idOf(source), await resolveOrganization(deps, ctx, source)) }
     catch (error) {
+      if (error instanceof ReviewCaptureError) throw error
       await recordOnce(deps.repository, companyId, runId, { portal_id: portalId, object_type: 'companies', source_id: idOf(source),
         outcome: 'failed', sanitized_details: safeFailure(error) })
       organizationBySourceId.set(idOf(source), { id: idOf(source), action: 'conflict', reason: safeError(error) })
+    }
+  }
+  if (capturesReview(ctx)) {
+    for (const id of allCompanyIds) {
+      if (!companies.some(source => idOf(source) === id)) {
+        await conflict(deps, ctx, { objectType: 'companies', sourceId: id,
+          type: 'missing_source', reason: 'missing_hubspot_company' })
+      }
     }
   }
   const organizations = companyIds.map(id => organizationBySourceId.get(id) ?? { id, action: 'conflict', reason: 'missing_hubspot_company' })
@@ -284,16 +303,12 @@ async function processActivity(deps, ctx, activity, deadline) {
     try {
       const linkedIds = contactCompanyLinks.find(row => row.fromId === id)?.toIds ?? []
       const associatedIds = linkedIds.length ? linkedIds : companyIds
-      if (associatedIds.length > 1) {
-        await conflict(deps, ctx, { objectType: 'contacts', sourceId: id, type: 'association', reason: 'multiple_associated_organizations' })
-        contactsResolved.push({ id, action: 'conflict', reason: 'multiple_associated_organizations' })
-        continue
-      }
       const organization = associatedIds.length === 1
         ? organizationBySourceId.get(associatedIds[0]) ?? { id: associatedIds[0], action: 'conflict', reason: 'missing_hubspot_company' }
         : null
-      contactsResolved.push(await resolveContact(deps, ctx, source, organization))
+      contactsResolved.push(await resolveContact(deps, ctx, source, organization, associatedIds))
     } catch (error) {
+      if (error instanceof ReviewCaptureError) throw error
       await recordOnce(deps.repository, companyId, runId, { portal_id: portalId, object_type: 'contacts', source_id: idOf(source),
         outcome: 'failed', sanitized_details: safeFailure(error) })
       contactsResolved.push({ id: idOf(source), action: 'conflict', reason: safeError(error) })
@@ -397,7 +412,9 @@ export async function runCompanySync(deps, input = {}) {
     let owners = []
     try { owners = deps.hubspot.listOwners ? await retryRead(deps, () => deps.hubspot.listOwners(), deadline) : [] }
     catch { /* Owner names are optional metadata; activity sync remains eligible. */ }
-    ctx = { companyId, runId: run.id, portalId: config.portal_id, mode, mappings, indexes,
+    ctx = { companyId, runId: run.id, portalId: config.portal_id, mode, mappings, indexes, sampleLimitPerType,
+      reviewCaptureVersion: run.mode === 'dry_run' ? run.review_capture_version : null,
+      capturedReviewIdentities: new Set(),
       owners: new Map(owners.map(owner => [String(owner.id), owner])), activity: null, newConflictCount: 0 }
     if (input.resumeId) {
       const intent = await repo.getConflictResume(companyId, input.resumeId)
@@ -477,6 +494,7 @@ export async function runCompanySync(deps, input = {}) {
               const resolved = await processActivity(deps, ctx, activity, deadline)
               outcomes.push({ ...itemBoundary, resolved })
             } catch (error) {
+              if (capturesReview(ctx) || error instanceof ReviewCaptureError) throw error
               await recordOnce(repo, companyId, run.id, { portal_id: config.portal_id, object_type: objectType,
                 source_id: String(activity.id), outcome: mode === 'dry_run' ? 'dry_run' : 'failed',
                 sanitized_details: { reason: safeError(error),
@@ -540,6 +558,10 @@ export async function runCompanySync(deps, input = {}) {
     if (totals.failed || totals.conflict) status = 'partially_failed'
     if (continuation) status = 'paused'
     await repo.finishRun(companyId, run.id, status, totals)
+    if (status === 'completed' && capturesReview(ctx)) {
+      try { await repo.pruneSupersededDryRunReviews(companyId, run.id) }
+      catch (error) { logCleanupFailure(deps, 'dry_run_review_cleanup', error) }
+    }
     response = { status, companyId, runId: run.id, totals, newConflictCount: ctx.newConflictCount, continuation }
     if (continuation) continuationPayload = { companyId, mode, trigger: 'resume', runId: run.id }
   } catch (error) {

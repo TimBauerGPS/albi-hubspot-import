@@ -5,6 +5,7 @@ import { ApiError } from '../../netlify/functions/_h2a/http.js'
 import { createH2ARepository } from '../../netlify/functions/_h2a/repository.js'
 import { createSettingsHandler } from '../../netlify/functions/h2a-settings.js'
 import { presentDryRunTotals } from '../../src/features/hubspotToAlbi/dryRunTotals.js'
+import { evaluateContactReview, evaluateOrganizationReview } from '../../netlify/functions/_h2a/review.js'
 
 test('lease collision returns stable already-running result without provider access', async () => {
   const result = await runCompanySync({ repository: { claimLease: async () => false }, hubspot: { listActivities: () => { throw Error('provider touched') } } },
@@ -776,4 +777,341 @@ test('activity payload includes a known HubSpot owner name', async () => {
   deps.albi.createActivity = async value => { payload = value; return { id: '300' } }
   await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
   assert.match(payload.notes, /Owner: Ali Brown/)
+})
+
+function reviewSampleFixture(options = {}, runOverrides = {}) {
+  const deps = liveFixture(options)
+  const captures = [], prunes = [], transitions = [], rows = new Map()
+  const run = { id: 'sample-run', mode: 'dry_run', sample_limit_per_type: 10, review_capture_version: 1,
+    created_at: '2026-10-02T12:00:00Z', ...runOverrides }
+  deps.repository.getConfig = async () => ({ state: run.mode === 'dry_run' ? 'dry_run' : 'live', portal_id: '123',
+    selected_start_date: '2026-10-01', preflight_status: 'valid' })
+  deps.repository.startRun = async () => run
+  const getAssociations = deps.hubspot.getAssociations
+  deps.hubspot.getAssociations = async input => {
+    const associations = await getAssociations(input)
+    return input.objectType === 'contacts'
+      ? input.objectIds.map(fromId => ({ fromId, toObjectType: 'companies',
+        toIds: associations.find(row => row.toObjectType === 'companies')?.toIds ?? [] }))
+      : associations
+  }
+  deps.repository.getItemOutcomes = async (_company, id, type, sourceId) => deps.items
+    .filter(row => row.run_id === id && row.object_type === type && row.source_id === sourceId)
+    .map(row => ({ ...row, albi_target_type: row.albi_target_type ?? null, albi_target_id: row.albi_target_id ?? null }))
+  deps.repository.recordDryRunReview = async (company, row) => {
+    captures.push({ company, row: structuredClone(row) })
+    rows.set([company, row.run_id, row.portal_id, row.object_type, row.source_id].join(':'), structuredClone(row))
+    return row
+  }
+  deps.repository.finishRun = async (_company, id, status, totals) => {
+    transitions.push({ id, status, totals })
+    const stored = { ...run, status, totals, company_id: 'c1' }
+    const index = deps.persistedRuns.findIndex(item => item.id === id)
+    if (index === -1) deps.persistedRuns.push(stored)
+    else deps.persistedRuns[index] = stored
+    deps.events.push(`finish:${status}`)
+  }
+  deps.repository.pruneSupersededDryRunReviews = async (company, keepId) => {
+    prunes.push({ company, keepId })
+    deps.events.push('prune')
+    for (const [key, row] of rows) if (row.run_id !== keepId && key.startsWith(`${company}:`)) rows.delete(key)
+  }
+  return Object.assign(deps, { captures, prunes, transitions, reviewRows: rows, sampleRun: run })
+}
+
+const twoReviewActivities = [
+  { id: '50', objectType: 'calls', occurredAt: '2026-10-02T12:00:00Z', properties: { hs_call_body: 'private activity body' } },
+  { id: '51', objectType: 'calls', occurredAt: '2026-10-02T12:01:00Z', properties: { hs_call_body: 'another private body' } },
+]
+
+test('version-one sample captures one sanitized contact and organization despite repeated activity encounters', async () => {
+  const deps = reviewSampleFixture({ activities: twoReviewActivities,
+    albiContacts: [{ id: '200', firstName: 'First10', lastName: 'Last10', notes: 'private candidate notes', apiKey: 'private-key' }],
+    albiOrganizations: [{ id: '100', name: 'Company20', notes: 'private notes', authorization: 'private-token' }],
+  })
+  const getContacts = deps.hubspot.getContacts, getCompanies = deps.hubspot.getCompanies
+  deps.hubspot.getContacts = async ids => (await getContacts(ids)).map(row => ({ ...row,
+    properties: { ...row.properties, hs_note_body: 'private source body', authorization: 'private-token' } }))
+  deps.hubspot.getCompanies = async ids => (await getCompanies(ids)).map(row => ({ ...row,
+    properties: { ...row.properties, apiKey: 'private-key', arbitrary: { notes: 'private' } } }))
+  const result = await runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'resume', runId: 'sample-run' })
+  assert.equal(result.status, 'completed')
+  assert.equal(deps.captures.length, 2)
+  assert.deepEqual(deps.captures.map(({ company, row }) => [company, row.run_id, row.portal_id, row.object_type, row.source_id]), [
+    ['c1', 'sample-run', '123', 'companies', '20'], ['c1', 'sample-run', '123', 'contacts', '10'],
+  ])
+  assert.ok(deps.captures.every(({ row }) => row.reason === 'name_only_candidate'))
+  assert.equal(deps.captures[1].row.source_snapshot.email, '10@example.com')
+  assert.deepEqual(deps.captures[1].row.candidate_snapshots, [{ id: '200', firstName: 'First10', lastName: 'Last10' }])
+  assert.deepEqual(deps.captures[1].row.match_evidence, { evidence: [] })
+  assert.doesNotMatch(JSON.stringify(deps.captures), /private|notes|authorization|apiKey|hs_call_body|hs_note_body/)
+  assert.equal(deps.reviewRows.size, 2)
+  assert.ok(deps.items.some(row => row.object_type === 'calls' && row.sanitized_details.proposedAction === 'review_conflict'))
+  assert.equal(deps.items.filter(row => ['contacts', 'companies'].includes(row.object_type)).length, 2)
+  assert.ok(!deps.events.some(event => /mapping:|create:|conflict:/.test(event)))
+  assert.equal(deps.cursors.length, 0)
+})
+
+test('activity-only sample findings never persist detailed activity content', async () => {
+  const deps = reviewSampleFixture({ contactIds: [], companyIds: [], activities: twoReviewActivities })
+  const result = await runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'manual' })
+  assert.equal(result.status, 'completed')
+  assert.equal(deps.captures.length, 0)
+  assert.deepEqual(deps.prunes, [{ company: 'c1', keepId: 'sample-run' }])
+  assert.ok(deps.items.some(row => row.object_type === 'calls' && row.sanitized_details.proposedAction === 'review_conflict'))
+})
+
+test('capture eligibility comes exclusively from persisted dry-run mode, exact sample limit and version', async () => {
+  for (const runOverrides of [
+    { sample_limit_per_type: null }, { sample_limit_per_type: 9 }, { review_capture_version: null },
+    { review_capture_version: undefined }, { review_capture_version: 2 }, { review_capture_version: '1' },
+    { mode: undefined }, { mode: 'live', sample_limit_per_type: null },
+  ]) {
+    const deps = reviewSampleFixture({ companyIds: [], albiContacts: [{ id: '200', firstName: 'First10', lastName: 'Last10' }] }, runOverrides)
+    const mode = runOverrides.mode === 'live' ? 'live' : 'dry_run'
+    await runCompanySync(deps, { companyId: 'c1', mode, trigger: 'manual', sampleLimitPerType: 10, reviewCaptureVersion: 1 })
+    assert.equal(deps.captures.length, 0)
+    assert.equal(deps.prunes.length, 0)
+  }
+})
+
+for (const objectType of ['contacts', 'companies']) test(`${objectType} capture failure fails the sample before checkpoint or publication`, async () => {
+  const deps = reviewSampleFixture({ companyIds: objectType === 'companies' ? ['20'] : [],
+    albiContacts: [{ id: '200', firstName: 'First10', lastName: 'Last10' }],
+    albiOrganizations: [{ id: '100', name: 'Company20' }],
+  })
+  deps.repository.recordDryRunReview = async (_company, row) => {
+    assert.equal(row.object_type, objectType)
+    throw Error('private capture database details')
+  }
+  await assert.rejects(() => runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'manual' }))
+  assert.deepEqual(deps.transitions.map(row => row.status), ['failed'])
+  assert.equal(deps.prunes.length, 0)
+  assert.equal(deps.runCheckpoints.has('calls'), false)
+  assert.ok(!deps.items.some(row => row.sanitized_details.proposedAction === 'review_conflict'))
+})
+
+test('review-capable sample provider read failure cannot publish an empty clean set', async () => {
+  const deps = reviewSampleFixture()
+  deps.hubspot.getAssociations = async () => { throw new ApiError('auth', { code: 'application_error' }) }
+  await assert.rejects(() => runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'manual' }))
+  assert.deepEqual(deps.transitions.map(row => row.status), ['failed'])
+  assert.equal(deps.prunes.length, 0)
+})
+
+test('sample completion is durable before old details are pruned, including zero-review samples', async () => {
+  const deps = reviewSampleFixture({ activities: [] })
+  const result = await runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'manual' })
+  assert.equal(result.status, 'completed')
+  assert.deepEqual(deps.prunes, [{ company: 'c1', keepId: 'sample-run' }])
+  assert.ok(deps.events.indexOf('finish:completed') < deps.events.indexOf('prune'))
+  assert.ok(deps.events.indexOf('prune') < deps.events.indexOf('release'))
+})
+
+test('failure to durably finish a sample prevents pruning', async () => {
+  const deps = reviewSampleFixture({ activities: [] })
+  const finishRun = deps.repository.finishRun
+  deps.repository.finishRun = async (...args) => {
+    if (args[2] === 'completed') throw Error('database unavailable')
+    return finishRun(...args)
+  }
+  await assert.rejects(() => runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'manual' }))
+  assert.equal(deps.prunes.length, 0)
+  assert.deepEqual(deps.transitions.map(row => row.status), ['failed'])
+})
+
+test('prune failures log fixed sanitized cleanup data and preserve successful completed results', async () => {
+  const deps = reviewSampleFixture({ activities: [] })
+  const logs = []
+  deps.logger = { warn: (_message, data) => logs.push(data) }
+  deps.repository.pruneSupersededDryRunReviews = async () => { throw { category: 'private-category', code: 'private-token', message: 'private body' } }
+  const result = await runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'manual' })
+  assert.equal(result.status, 'completed')
+  assert.deepEqual(deps.transitions.map(row => row.status), ['completed'])
+  assert.deepEqual(logs, [{ phase: 'dry_run_review_cleanup', reason: 'error:operation_failed' }])
+})
+
+test('failed, partial, paused and cancelled samples never prune old details', async () => {
+  for (const state of ['failed', 'partially_failed', 'paused', 'cancelled']) {
+    const deps = reviewSampleFixture({ activities: [] }, state === 'cancelled' ? { cancel_requested_at: '2026-10-02T12:00:00Z' } : {})
+    if (state === 'failed') deps.repository.getMappings = async () => { throw Error('read failed') }
+    if (state === 'partially_failed') deps.repository.totals = async () => ({ failed: 1 })
+    if (state === 'paused') deps.clockMs = (() => { let calls = 0; return () => calls++ ? 2000 : 0 })()
+    if (state === 'failed') await assert.rejects(() => runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'manual' }))
+    else assert.equal((await runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'manual', timeBudgetMs: 6000 })).status, state)
+    assert.equal(deps.prunes.length, 0)
+    assert.deepEqual(deps.transitions.map(row => row.status), [state])
+  }
+})
+
+test('continuation reuses source identity while a later failed sample leaves the prior completed set current', async () => {
+  const deps = reviewSampleFixture({ companyIds: [], activities: twoReviewActivities,
+    albiContacts: [{ id: '200', firstName: 'First10', lastName: 'Last10' }],
+  })
+  let clock = 0
+  deps.clockMs = () => clock
+  const recordItem = deps.repository.recordItem
+  deps.repository.recordItem = async (...args) => { await recordItem(...args); if (args[1].object_type === 'calls') clock = 2000 }
+  const first = await runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'manual', timeBudgetMs: 6000 })
+  assert.equal(first.status, 'paused')
+  assert.equal(deps.prunes.length, 0)
+  clock = 0
+  deps.repository.recordItem = recordItem
+  const second = await runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'resume', runId: 'sample-run' })
+  assert.equal(second.status, 'completed')
+  assert.equal(deps.reviewRows.size, 1)
+  assert.equal(deps.captures.length, 2)
+  assert.deepEqual(deps.captures.map(({ row }) => [row.run_id, row.portal_id, row.object_type, row.source_id]), [
+    ['sample-run', '123', 'contacts', '10'], ['sample-run', '123', 'contacts', '10'],
+  ])
+  const completed = structuredClone(deps.persistedRuns[0])
+  deps.sampleRun.id = 'later-failed-sample'
+  deps.sampleRun.created_at = '2026-10-03T12:00:00Z'
+  deps.runCheckpoints.clear()
+  deps.repository.recordDryRunReview = async () => { throw Error('later capture failed') }
+  await assert.rejects(() => runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'manual' }))
+  assert.deepEqual(deps.persistedRuns[0], completed)
+  assert.equal(deps.persistedRuns[1].status, 'failed')
+  assert.deepEqual(deps.prunes, [{ company: 'c1', keepId: 'sample-run' }])
+  assert.equal([...deps.reviewRows.values()][0].run_id, 'sample-run')
+  // Use the real current-sample query against persisted run states, not a fixture selector.
+  const repository = createH2ARepository({ rpc: async () => ({}), from() { const filters = []; return {
+    select() { return this }, eq(key, value) { filters.push(row => row[key] === value); return this },
+    gt(key, value) { filters.push(row => row[key] > value); return this }, order() { return this }, limit() { return this },
+    maybeSingle: async () => ({ data: [...deps.persistedRuns].reverse().find(row => filters.every(filter => filter(row))) ?? null, error: null }),
+  } } })
+  assert.equal((await repository.getCurrentReviewSample('c1', '2026-10-01T00:00:00Z')).id, 'sample-run')
+})
+
+test('sample phone and unresolved-organization decisions agree with shared recheck evaluators', async () => {
+  for (const objectType of ['contacts', 'companies']) {
+    const deps = reviewSampleFixture({ companyIds: objectType === 'companies' ? ['20'] : [] })
+    const source = objectType === 'contacts'
+      ? { id: '10', properties: { firstname: 'New', lastname: 'Person', phone: '+442079460123' } }
+      : { id: '20', properties: { name: 'New Organization', phone: '+442079460123' } }
+    if (objectType === 'contacts') deps.hubspot.getContacts = async () => [source]
+    else deps.hubspot.getCompanies = async () => [source]
+    await runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'manual' })
+    const evaluation = objectType === 'contacts'
+      ? evaluateContactReview({ source, optionMappings: deps.mappings.options })
+      : evaluateOrganizationReview({ source, optionMappings: deps.mappings.options })
+    const captured = deps.captures.find(({ row }) => row.object_type === objectType)?.row
+    assert.equal(captured?.reason, 'unsupported_international_format')
+    assert.equal(captured.reason, evaluation.reason)
+    assert.equal(captured.conflict_type, evaluation.conflictType)
+    if (objectType === 'companies') assert.equal(deps.captures.find(({ row }) => row.object_type === 'contacts').row.reason, 'organization_unresolved')
+  }
+})
+
+test('diagnostic candidates are bounded while live mapping and dry-link actions retain original long IDs', async () => {
+  for (const mode of ['live', 'dry_run']) {
+    const contactId = 'c'.repeat(520), organizationId = 'o'.repeat(520)
+    const deps = reviewSampleFixture({
+      albiContacts: [{ id: contactId, firstName: 'First10', lastName: 'Last10', email: '10@example.com', organizationId }],
+      albiOrganizations: [{ id: organizationId, name: 'Company20', phoneNumber: '415-555-0123', organizationTypeIds: ['2'] }],
+    }, { mode, sample_limit_per_type: mode === 'dry_run' ? 10 : null, review_capture_version: mode === 'dry_run' ? 1 : null })
+    const saved = []
+    deps.repository.saveMapping = async (_company, kind, row) => { saved.push({ kind, row }); return row }
+    const result = await runCompanySync(deps, { companyId: 'c1', mode, trigger: 'manual' })
+    assert.equal(result.status, 'completed')
+    assert.equal(deps.items.find(row => row.object_type === 'contacts').albi_target_id, contactId)
+    assert.equal(deps.items.find(row => row.object_type === 'companies').albi_target_id, organizationId)
+    assert.equal(deps.items.find(row => row.object_type === 'calls').albi_target_id, contactId)
+    if (mode === 'live') {
+      assert.equal(saved.find(item => item.kind === 'contact').row.albi_contact_id, contactId)
+      assert.equal(saved.find(item => item.kind === 'organization').row.albi_organization_id, organizationId)
+    } else assert.equal(saved.length, 0)
+  }
+  const deps = reviewSampleFixture({ companyIds: [], albiContacts: Array.from({ length: 15 }, (_, i) => ({
+    id: `candidate-${i}-${'x'.repeat(520)}`, firstName: 'First10', lastName: 'Last10', email: '10@example.com',
+  })) })
+  await runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'manual' })
+  assert.equal(deps.captures[0].row.candidate_snapshots.length, 10)
+  assert.ok(deps.captures[0].row.candidate_snapshots.every(row => row.id.length === 500))
+})
+
+test('colliding capped target prefixes fail closed instead of linking or publishing a clean sample', async () => {
+  for (const mode of ['live', 'dry_run']) for (const suffix of ['b', '']) {
+    const prefix = 'x'.repeat(500)
+    const deps = reviewSampleFixture({ companyIds: [], albiContacts: [
+      { id: `${prefix}a`, firstName: 'First10', lastName: 'Last10', email: '10@example.com' },
+      { id: `${prefix}${suffix}`, firstName: 'Other', lastName: 'Person', email: 'other@example.com' },
+    ] }, { mode, sample_limit_per_type: mode === 'dry_run' ? 10 : null, review_capture_version: mode === 'dry_run' ? 1 : null })
+    const result = await runCompanySync(deps, { companyId: 'c1', mode, trigger: 'manual' })
+    assert.equal(result.status, 'partially_failed')
+    assert.equal(deps.prunes.length, 0)
+    assert.ok(deps.items.some(row => row.object_type === 'contacts' && row.outcome === 'failed'))
+    assert.ok(!deps.items.some(row => row.albi_target_id === prefix))
+    assert.ok(!deps.events.some(event => /mapping:|create:/.test(event)))
+  }
+})
+
+test('safe creates use the same boolean-confirmed original organization type accepted by evaluation', async () => {
+  const deps = liveFixture()
+  deps.mappings.options = deps.mappings.options.map(row => row.mapping_kind === 'default_organization_type'
+    ? { mapping_kind: row.mapping_kind, source_key: 'default', albi_id: '2', confirmed: true } : row)
+  let organizationPayload
+  deps.albi.createOrganization = async payload => { organizationPayload = payload; return { id: '100' } }
+  const result = await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
+  assert.equal(result.status, 'completed')
+  assert.deepEqual(organizationPayload.organizationTypeIds, ['2'])
+})
+
+test('sample missing HubSpot organization captures its underlying identity even without contacts', async () => {
+  const deps = reviewSampleFixture({ contactIds: [], companyIds: ['20'] })
+  deps.hubspot.getCompanies = async () => []
+  const result = await runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'manual' })
+  assert.equal(result.status, 'completed')
+  assert.equal(deps.captures.length, 1)
+  assert.deepEqual(deps.captures[0], { company: 'c1', row: {
+    run_id: 'sample-run', portal_id: '123', object_type: 'companies', source_id: '20',
+    reason: 'missing_hubspot_company', conflict_type: 'missing_source', source_snapshot: { id: '20' },
+    candidate_snapshots: [], match_evidence: { evidence: [] }, proposed_changes: { updates: {}, conflicts: {}, unchanged: [] },
+  } })
+})
+
+test('failed HubSpot company reads never become missing-company diagnostic rows', async () => {
+  const deps = reviewSampleFixture({ contactIds: [], companyIds: ['20'] })
+  deps.hubspot.getCompanies = async () => { throw new ApiError('permission', { code: 'application_error' }) }
+  await assert.rejects(() => runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'manual' }))
+  assert.equal(deps.captures.length, 0)
+  assert.equal(deps.prunes.length, 0)
+  assert.deepEqual(deps.transitions.map(row => row.status), ['failed'])
+})
+
+test('sample missing contact and association ambiguity retain full source identity for correction', async () => {
+  const missing = reviewSampleFixture({ companyIds: [] })
+  missing.hubspot.getContacts = async () => []
+  await runCompanySync(missing, { companyId: 'c1', mode: 'dry_run', trigger: 'manual' })
+  assert.equal(missing.captures[0].row.reason, 'missing_hubspot_contact')
+  assert.deepEqual(missing.captures[0].row.source_snapshot, { id: '10' })
+  const ambiguous = reviewSampleFixture({ companyIds: ['20', '21'] })
+  await runCompanySync(ambiguous, { companyId: 'c1', mode: 'dry_run', trigger: 'manual' })
+  assert.equal(ambiguous.captures.length, 1)
+  assert.equal(ambiguous.captures[0].row.reason, 'multiple_associated_organizations')
+  assert.equal(ambiguous.captures[0].row.source_snapshot.email, '10@example.com')
+})
+
+test('existing mapped long targets remain full IDs even when absent from the provider index', async () => {
+  for (const mode of ['live', 'dry_run']) {
+    const contactId = 'c'.repeat(520), organizationId = 'o'.repeat(520)
+    const deps = reviewSampleFixture({}, { mode, sample_limit_per_type: mode === 'dry_run' ? 10 : null,
+      review_capture_version: mode === 'dry_run' ? 1 : null })
+    deps.mappings.contacts.push({ portal_id: '123', hubspot_id: '10', albi_contact_id: contactId })
+    deps.mappings.organizations.push({ portal_id: '123', hubspot_id: '20', albi_organization_id: organizationId })
+    deps.repository.saveMapping = async () => { throw Error('existing mapping overwritten') }
+    const result = await runCompanySync(deps, { companyId: 'c1', mode, trigger: 'manual' })
+    assert.equal(result.status, 'completed')
+    assert.equal(deps.items.find(row => row.object_type === 'contacts').albi_target_id, contactId)
+    assert.equal(deps.items.find(row => row.object_type === 'companies').albi_target_id, organizationId)
+    assert.equal(deps.items.find(row => row.object_type === 'calls').albi_target_id, contactId)
+  }
+})
+
+test('a different portal mapping with the same source ID does not change safe current-portal linking', async () => {
+  const deps = liveFixture({ companyIds: [], albiContacts: [{ id: '200', firstName: 'First10', lastName: 'Last10', email: '10@example.com' }] })
+  deps.mappings.contacts.push({ portal_id: '999', hubspot_id: '10', albi_contact_id: 'other-portal-target' })
+  const result = await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
+  assert.equal(result.status, 'completed')
+  assert.equal(deps.items.find(row => row.object_type === 'contacts').albi_target_id, '200')
 })

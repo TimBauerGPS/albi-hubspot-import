@@ -36,7 +36,7 @@ test('manual sample dry run persists the server-owned ten-per-type limit and dis
   }) })
 
   assert.equal(result.statusCode, 202)
-  assert.deepEqual(queued, [{ mode: 'dry_run', trigger: 'manual', requestedBy: 'u1', sampleLimitPerType: 10 }])
+  assert.deepEqual(queued, [{ mode: 'dry_run', trigger: 'manual', requestedBy: 'u1', sampleLimitPerType: 10, reviewCaptureVersion: 1 }])
   assert.deepEqual(dispatched, [{ companyId: 'c1', mode: 'dry_run', trigger: 'resume', runId: 'sample-run' }])
 })
 
@@ -85,7 +85,7 @@ test('full dry run requires a completed tenant sample after the initial start da
     ['c1', '2026-10-01T00:00:00.000Z'],
     ['c1', '2026-10-01T00:00:00.000Z'],
   ])
-  assert.deepEqual(queued, [{ mode: 'dry_run', trigger: 'manual', requestedBy: 'u1', sampleLimitPerType: null }])
+  assert.deepEqual(queued, [{ mode: 'dry_run', trigger: 'manual', requestedBy: 'u1', sampleLimitPerType: null, reviewCaptureVersion: null }])
 })
 
 test('dry-run scope is restricted to manual dry runs and fixed supported values', async () => {
