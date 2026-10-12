@@ -42,6 +42,17 @@ function reviewRepositoryFixture(responses = []) {
 const data = value => ({ data: value, error: null })
 const equalityFilters = call => call.steps.filter(step => step[0] === 'eq').map(step => step.slice(1))
 
+test('latest completed bounded sample includes historical metadata but repeats tenant cutoff and deterministic ordering', async () => {
+  const run = { id: 'historical', review_capture_version: null }
+  const { repository, calls } = reviewRepositoryFixture([data(run)])
+  assert.deepEqual(await repository.getLatestCompletedSampleDryRun('company-1', '2026-10-01T00:00:00Z'), run)
+  assert.deepEqual(calls[0].steps[0], ['select', 'id,created_at,finished_at,review_capture_version,sample_limit_per_type,status'])
+  assert.deepEqual(equalityFilters(calls[0]), [['company_id', 'company-1'], ['mode', 'dry_run'], ['status', 'completed'], ['sample_limit_per_type', 10]])
+  assert.deepEqual(calls[0].steps.filter(step => step[0] === 'gt'), [['gt', 'created_at', '2026-10-01T00:00:00Z']])
+  assert.deepEqual(calls[0].steps.filter(step => step[0] === 'order'), [['order', 'created_at', { ascending: false }], ['order', 'id', { ascending: false }]])
+  assert.deepEqual(calls[0].steps.find(step => step[0] === 'limit'), ['limit', 1])
+})
+
 test('full dry-run readiness selects a fresh completed version-one bounded sample and counts all rows', async () => {
   const { repository, calls } = reviewRepositoryFixture([data({ id: 'sample-2', review_capture_version: 1 }),
     { count: 0, error: null }, data({ id: 'sample-2', review_capture_version: 1 })])

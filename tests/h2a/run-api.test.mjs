@@ -3,6 +3,44 @@ import assert from 'node:assert/strict'
 import { createRunHandler } from '../../netlify/functions/h2a-run.js'
 import { H2AAuthError } from '../../netlify/functions/_h2a/auth.js'
 import { runCompanySync } from '../../netlify/functions/_h2a/orchestrator.js'
+import { createH2AProviderClients } from '../../netlify/functions/_h2a/providerClients.js'
+import { encryptSecret } from '../../netlify/functions/_h2a/crypto.js'
+
+test('shared provider factory decrypts only selected tenant credentials and supplies working scoped readers', async () => {
+  const keyring = { activeVersion: 1, keys: { 1: Buffer.alloc(32, 7) } }
+  const envelope = secret => { const { keyVersion, ...value } = encryptSecret(secret, keyring); return { ...value, key_version: keyVersion } }
+  const calls = []
+  const clients = await createH2AProviderClients({ companyId: 'tenant-1', keyring,
+    repository: { getCredentials: async company => { assert.equal(company, 'tenant-1'); return { hubspot_envelope: envelope('hubspot-token'), albi_envelope: envelope('albi-key') } } },
+    fetch: async (url, options) => { calls.push([url, options.headers]); return new Response(JSON.stringify(url.includes('hubapi') ? { portalId: '123' } : { data: [{ companyId: 'trusted-company', name: 'Allied' }] }), { status: 200 }) },
+  })
+  assert.equal((await clients.hubspot.getAccountInfo()).portalId, '123')
+  assert.equal((await clients.albi.verifyCredentials()).company.id, 'trusted-company')
+  assert.equal(calls[0][1].Authorization, 'Bearer hubspot-token')
+  assert.equal(calls[1][1]['X-API-Key'], 'albi-key')
+  await assert.rejects(createH2AProviderClients({ companyId: 'tenant-1', repository: { getCredentials: async () => null }, keyring }), /H2A credentials are missing/)
+})
+
+test('background runs retain injected provider clients without reading stored credentials', async () => {
+  const hubspot = {}, albi = {}
+  const handler = createRunHandler({ requireRequest: async () => ({ companyId: 'tenant-1' }),
+    repository: { getCredentials: async () => { throw Error('must not read credentials') } },
+    makeClients: async company => { assert.equal(company, 'tenant-1'); return { hubspot, albi } },
+    runSync: async deps => { assert.equal(deps.hubspot, hubspot); assert.equal(deps.albi, albi); return { status: 'completed' } },
+  }, { background: true })
+  assert.equal((await handler({ httpMethod: 'POST', body: JSON.stringify({ companyId: 'tenant-1', mode: 'live' }) })).statusCode, 200)
+})
+
+test('background runs without injection use the shared tenant credential factory', async () => {
+  const keyring = { activeVersion: 1, keys: { 1: Buffer.alloc(32, 7) } }
+  const envelope = secret => { const { keyVersion, ...value } = encryptSecret(secret, keyring); return { ...value, key_version: keyVersion } }
+  const handler = createRunHandler({ requireRequest: async () => ({ companyId: 'tenant-1' }), keyring,
+    repository: { getCredentials: async company => { assert.equal(company, 'tenant-1'); return { hubspot_envelope: envelope('hubspot-token'), albi_envelope: envelope('albi-key') } } },
+    fetch: async (_url, options) => { assert.equal(options.headers.Authorization, 'Bearer hubspot-token'); return new Response(JSON.stringify({ portalId: '123' }), { status: 200 }) },
+    runSync: async deps => { assert.equal((await deps.hubspot.getAccountInfo()).portalId, '123'); return { status: 'completed' } },
+  }, { background: true })
+  assert.equal((await handler({ httpMethod: 'POST', body: JSON.stringify({ companyId: 'tenant-1', mode: 'live' }) })).statusCode, 200)
+})
 
 test('manual run authorizes selected company and queues without invoking providers', async () => {
   const calls = []

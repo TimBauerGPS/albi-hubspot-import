@@ -99,7 +99,7 @@ test('dry-run review storage is tenant-safe, bounded, service-only, and CAS-upda
   }
   const rpc = functionBody(sql, 'h2a_apply_dry_run_recheck')
   assert.match(rpc, /where r\.company_id = p_company_id and r\.id = p_review_id[\s\S]*for update/)
-  assert.match(rpc, /review_capture_version = 1[\s\S]*v_current_run_id is distinct from v_review\.run_id[\s\S]*'superseded'/)
+  assert.match(rpc, /v_current_run_id is distinct from v_review\.run_id[\s\S]*'superseded'/)
   assert.match(rpc, /v_review\.updated_at is distinct from p_expected_updated_at/)
   for (const parameter of ['company_id', 'review_id', 'expected_updated_at', 'actor_id', 'status', 'recheck_outcome',
     'reason', 'conflict_type', 'source_snapshot', 'candidate_snapshots', 'match_evidence', 'proposed_changes', 'event_type', 'event_details', 'now']) {
@@ -121,6 +121,21 @@ test('dry-run review storage is tenant-safe, bounded, service-only, and CAS-upda
     'h2a_dry_reviews_last_rechecked_by_idx', 'h2a_dry_review_events_company_review_idx']) {
     assert.match(sql, new RegExp(`create index ${name}`))
     assert.match(migration, new RegExp(`create index if not exists ${name}`))
+  }
+})
+
+test('recheck RPC rejects a newer completed historical bounded sample as superseded under the review lock', () => {
+  for (const sql of [readSchema(), readReviewMigration()]) {
+    const rpc = functionBody(sql.replace('create or replace function public.h2a_apply_dry_run_recheck', 'create function public.h2a_apply_dry_run_recheck'), 'h2a_apply_dry_run_recheck')
+    const selection = rpc.match(/select r\.id[^;]+from public\.h2a_sync_runs[^;]+;/)?.[0]
+    assert.ok(selection)
+    assert.match(selection, /select r\.id, r\.review_capture_version into v_current_run_id, v_current_review_version/)
+    assert.match(selection, /r\.company_id = p_company_id[\s\S]*r\.mode = 'dry_run'[\s\S]*r\.status = 'completed'[\s\S]*r\.sample_limit_per_type = 10/)
+    assert.doesNotMatch(selection, /and r\.review_capture_version = 1/)
+    assert.match(selection, /order by r\.created_at desc, r\.id desc\s+limit 1/)
+    assert.match(rpc, /if v_current_run_id is distinct from v_review\.run_id\s+or v_current_review_version is distinct from 1 then\s+return pg_catalog\.jsonb_build_object\('error', 'superseded'\)/)
+    assert.ok(rpc.indexOf('for update;') < rpc.indexOf(selection))
+    assert.ok(rpc.indexOf("'superseded'") < rpc.indexOf('update public.h2a_dry_run_reviews set'))
   }
 })
 

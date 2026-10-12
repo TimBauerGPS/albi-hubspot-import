@@ -559,6 +559,7 @@ create function public.h2a_apply_dry_run_recheck(
 declare
   v_review public.h2a_dry_run_reviews%rowtype;
   v_current_run_id uuid;
+  v_current_review_version smallint;
 begin
   -- Fail closed before locks or mutations, including NULL CAS timestamps.
   if p_company_id is null or p_review_id is null
@@ -585,16 +586,16 @@ begin
     where r.company_id = p_company_id and r.id = p_review_id
     for update;
   if not found then return pg_catalog.jsonb_build_object('error', 'not_found'); end if;
-  select r.id into v_current_run_id
+  select r.id, r.review_capture_version into v_current_run_id, v_current_review_version
     from public.h2a_sync_runs r
     where r.company_id = p_company_id
       and r.mode = 'dry_run'
       and r.status = 'completed'
       and r.sample_limit_per_type = 10
-      and r.review_capture_version = 1
     order by r.created_at desc, r.id desc
     limit 1;
-  if v_current_run_id is distinct from v_review.run_id then
+  if v_current_run_id is distinct from v_review.run_id
+    or v_current_review_version is distinct from 1 then
     return pg_catalog.jsonb_build_object('error', 'superseded');
   end if;
   if v_review.updated_at is distinct from p_expected_updated_at then

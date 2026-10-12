@@ -111,6 +111,14 @@ export function createH2ARepository(supabase) {
   if (!supabase?.from || !supabase?.rpc) throw new TypeError('A server-side Supabase client is required')
   return {
     // runId arguments are resolved by the server; HTTP handlers must never accept them from browsers.
+    async getLatestCompletedSampleDryRun(companyId, after) {
+      requireReviewIdentity(companyId)
+      requireReviewTimestamp(after)
+      return checked(await supabase.from('h2a_sync_runs')
+        .select('id,created_at,finished_at,review_capture_version,sample_limit_per_type,status').eq('company_id', companyId)
+        .eq('mode', 'dry_run').eq('status', 'completed').eq('sample_limit_per_type', SAMPLE_LIMIT_PER_TYPE)
+        .gt('created_at', after).order('created_at', { ascending: false }).order('id', { ascending: false }).limit(1).maybeSingle())
+    },
     async getCurrentReviewSample(companyId, after) {
       requireReviewIdentity(companyId)
       requireReviewTimestamp(after)

@@ -1,9 +1,7 @@
 import { requireH2ARequest, H2AAuthError } from './_h2a/auth.js'
 import { createH2ARepository } from './_h2a/repository.js'
 import { runCompanySync } from './_h2a/orchestrator.js'
-import { decryptSecret, loadCredentialKeyring } from './_h2a/crypto.js'
-import { HubSpotClient } from './_h2a/hubspotClient.js'
-import { AlbiClient } from './_h2a/albiClient.js'
+import { createH2AProviderClients } from './_h2a/providerClients.js'
 import { notifyRunExceptions } from './_h2a/notifications.js'
 import { pacificStartOfDate } from './_h2a/time.js'
 import { SAMPLE_LIMIT_PER_TYPE } from './_h2a/constants.js'
@@ -17,7 +15,6 @@ const reply = (statusCode, body) => ({ statusCode, headers: { 'Content-Type': 'a
   'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Internal-Cron-Secret',
   'Access-Control-Allow-Methods': 'POST, OPTIONS' }, body: JSON.stringify(body) })
 const fail = (statusCode, message) => { throw new H2AAuthError(statusCode, message) }
-const fromRpc = ({ key_version, ...envelope }) => ({ ...envelope, keyVersion: key_version })
 
 async function notifyAfterRun(options, auth, companyId, result) {
   if (!auth.supabase || !result?.status || ['already_running', 'already_accepted'].includes(result.status)) return
@@ -67,13 +64,7 @@ async function dispatchBackground(payload, options) {
 
 async function clientsFor(companyId, repository, options) {
   if (options.makeClients) return options.makeClients(companyId)
-  const credentials = await repository.getCredentials(companyId)
-  if (!credentials?.hubspot_envelope || !credentials?.albi_envelope) throw new Error('H2A credentials are missing')
-  const keyring = options.keyring ?? loadCredentialKeyring(options.env ?? process.env)
-  const hubspotToken = decryptSecret(fromRpc(credentials.hubspot_envelope), keyring)
-  const albiApiKey = decryptSecret(fromRpc(credentials.albi_envelope), keyring)
-  return { hubspot: new HubSpotClient({ token: hubspotToken, fetch: options.fetch }),
-    albi: new AlbiClient({ apiKey: albiApiKey, fetch: options.fetch }) }
+  return createH2AProviderClients({ companyId, repository, keyring: options.keyring, env: options.env, fetch: options.fetch })
 }
 
 export function createRunHandler(options = {}, { background = false } = {}) {
