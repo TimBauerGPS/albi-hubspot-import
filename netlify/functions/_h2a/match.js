@@ -245,6 +245,37 @@ function contactMatches(source, candidates) {
   return { byEmail, byPhone, unsupportedPhone, phoneResults }
 }
 
+function contactReviewCandidates(source, candidates) {
+  const { byEmail, byPhone, unsupportedPhone } = contactMatches(source, candidates)
+  const related = [...byEmail, ...byPhone, ...unsupportedPhone]
+  return related.length ? related : nameMatches(source, candidates)
+}
+
+function organizationReviewCandidates(source, candidates) {
+  const related = candidates.filter(candidate => {
+    const evidence = orgEvidence(source, candidate)
+    return evidence.includes('domain') || (evidence.includes('name') &&
+      (evidence.includes('phone') || evidence.includes('address')))
+  })
+  if (related.length) return related
+  const name = normalizeName(rawValue(propertiesOf(source), ['name', 'companyName']))
+  return name ? candidates.filter(candidate =>
+    normalizeName(rawValue(propertiesOf(candidate), ['name', 'companyName'])) === name) : []
+}
+
+// Diagnostics only: selection never participates in the match decision.
+export function selectReviewCandidates(input = {}, decision = {}, entityType = 'contact') {
+  const candidates = [...(input.candidates ?? input.albiCandidates ?? [])]
+  const target = decision.targetId == null ? [] : candidates.filter(item => idOf(item) === String(decision.targetId))
+  const related = entityType === 'organization'
+    ? organizationReviewCandidates(sourceOf(input, 'organization'), candidates)
+    : contactReviewCandidates(sourceOf(input, 'contact'), candidates)
+  return [...new Map([...target, ...related].map(item => [idOf(item), item])).values()]
+    .filter(item => idOf(item))
+    .sort((left, right) => idOf(left).localeCompare(idOf(right)))
+    .slice(0, 10)
+}
+
 function matchDecisionConflict(sourceId, targetId, input) {
   return ownershipConflict(sourceId, targetId, input.mappings ?? input.existingMappings ?? [])
 }

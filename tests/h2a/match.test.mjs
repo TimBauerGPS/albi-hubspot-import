@@ -5,10 +5,36 @@ import {
   decideContactMatch,
   decideFieldChanges,
   decideOrganizationMatch,
+  selectReviewCandidates,
 } from '../../netlify/functions/_h2a/match.js'
 
 const contact = (id, fields) => ({ id, ...fields })
 const org = (id, fields) => ({ id, ...fields })
+
+test('review candidates retain identity evidence without unrelated name matches or changing decisions', () => {
+  const input = { source: { firstname: 'A', lastname: 'Person', email: 'a@example.com', phone: '5551112222' },
+    candidates: [contact('z', { email: 'a@example.com' }), contact('a', { phoneNumber: '5551112222' }),
+      contact('irrelevant', { firstName: 'A', lastName: 'Person' })] }
+  const before = decideContactMatch(input)
+  assert.deepEqual(selectReviewCandidates(input, before).map(item => item.id), ['a', 'z'])
+  assert.deepEqual(decideContactMatch(input), before)
+})
+
+test('review candidates fall back to normalized names, sort IDs and cap at ten', () => {
+  const candidates = Array.from({ length: 12 }, (_, i) => contact(String(i).padStart(2, '0'), { firstName: 'Á', lastName: 'Person' })).reverse()
+  const input = { sourceContact: { firstName: 'a', lastName: 'person' }, albiCandidates: [...candidates, { firstName: 'a', lastName: 'person' }] }
+  assert.deepEqual(selectReviewCandidates(input, decideContactMatch(input)).map(item => item.id),
+    ['00', '01', '02', '03', '04', '05', '06', '07', '08', '09'])
+  assert.equal(candidates[0].id, '11')
+})
+
+test('review candidates include the mapped target and deduplicate relevant organization evidence', () => {
+  const input = { source: { name: 'Allied', domain: 'allied.example', phone: '5551112222' },
+    candidates: [org('z', { domain: 'allied.example' }), org('a', { name: 'Allied', phoneNumber: '5551112222' }), org('unrelated', { name: 'Other' })] }
+  assert.deepEqual(selectReviewCandidates(input, decideOrganizationMatch(input), 'organization').map(item => item.id), ['a', 'z'])
+  assert.deepEqual(selectReviewCandidates({ source: {}, candidates: [{ id: 'mapped' }, { id: 'other' }] }, { targetId: 'mapped' }).map(item => item.id), ['mapped'])
+  assert.deepEqual(selectReviewCandidates({ source: { name: 'ÁLLIED' }, candidates: [org('name', { name: 'allied' })] }, {}, 'organization').map(item => item.id), ['name'])
+})
 
 test('links one exact normalized contact email', () => {
   const result = decideContactMatch({
