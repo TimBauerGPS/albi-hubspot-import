@@ -11,6 +11,7 @@ const SAFE_SERVER_MESSAGES = Object.freeze({
   'A completed dry run is required before live activation.': 'A completed dry run is required before live activation.',
   'A conflict ID is required.': 'A conflict ID is required.',
   'A conflict resolution is required.': 'A conflict resolution is required.',
+  'A company must be selected.': 'A company must be selected.',
   'A settings action is required.': 'A settings action is required.',
   'A single company selector is required.': 'A single company selector is required.',
   'A valid company is required.': 'A valid company is required.',
@@ -34,6 +35,8 @@ const SAFE_SERVER_MESSAGES = Object.freeze({
   'Invalid option mapping source.': 'Invalid option mapping source.',
   'Invalid option mapping.': 'Invalid option mapping.',
   'Invalid request body.': 'Invalid request body.',
+  'Invalid sample review cursor.': 'Invalid sample review cursor.',
+  'Invalid sample review request.': 'Invalid sample review request.',
   'Invalid sync mode.': 'Invalid sync mode.',
   'Linking requires an explicit target ID.': 'Linking requires an explicit target ID.',
   'Many-to-one approval must be boolean.': 'Many-to-one approval must be boolean.',
@@ -63,10 +66,24 @@ const SAFE_SERVER_MESSAGES = Object.freeze({
   'Unsupported conflict resolution fields.': 'Unsupported conflict resolution fields.',
   'Unsupported query parameters.': 'Unsupported query parameters.',
   'Unsupported request fields.': 'Unsupported request fields.',
+  'Unsupported sample review filters.': 'Unsupported sample review filters.',
   'Unsupported settings action.': 'Unsupported settings action.',
   'Unsupported settings fields.': 'Unsupported settings fields.',
   'Use request_earlier_backfill for an earlier date.': 'Use request_earlier_backfill for an earlier date.',
   'Valid credentials, successful preflight, and confirmed option mappings are required.': 'Valid credentials, successful preflight, and confirmed option mappings are required.',
+  'Administrator access is required.': 'Administrator access is required.',
+  'Authentication required.': 'Authentication required.',
+  'Company not found.': 'Company not found.',
+  'Invalid authentication token.': 'Invalid authentication token.',
+  'Run a new sample to create detailed review data.': 'Run a new sample to create detailed review data.',
+  'Sample review item not found.': 'Sample review item not found.',
+  'Sample review page size must be between 1 and 100.': 'Sample review page size must be between 1 and 100.',
+  'This sample review changed. Refresh it before rechecking.': 'This sample review changed. Refresh it before rechecking.',
+  'This sample review is no longer current. Refresh before rechecking.': 'This sample review is no longer current. Refresh before rechecking.',
+  'Unable to load sample reviews.': 'Unable to load sample reviews.',
+  'Unable to recheck this sample review.': 'Unable to recheck this sample review.',
+  'You are not authorized to access H2A.': 'You are not authorized to access H2A.',
+  'You are not authorized to access the requested company.': 'You are not authorized to access the requested company.',
 })
 const SAFE_STATUS_MESSAGES = Object.freeze({
   400: 'HubSpot to Albi request could not be completed.',
@@ -186,6 +203,25 @@ export function getH2AConflicts(session, companyId, { cursor, limit, signal } = 
 
 export function getH2AConflict(session, companyId, conflictId, { signal } = {}) {
   return request(session, 'h2a-conflicts', { companyId, query: { conflictId }, signal })
+}
+
+const SAMPLE_REVIEW_FILTERS = new Set(['limit', 'cursor', 'status', 'objectType', 'reason'])
+
+export function getH2ADryRunReviews(session, companyId, filters = {}) {
+  const { signal, ...values } = filters ?? {}
+  const query = Object.fromEntries(Object.entries(values).filter(([key]) => SAMPLE_REVIEW_FILTERS.has(key)))
+  return request(session, 'h2a-dry-run-reviews', { companyId, query, signal })
+}
+
+export function getH2ADryRunReview(session, companyId, reviewId, { signal } = {}) {
+  return request(session, 'h2a-dry-run-reviews', { companyId, query: { reviewId }, signal })
+}
+
+export function recheckH2ADryRunReview(session, companyId, input = {}, { signal } = {}) {
+  return request(session, 'h2a-dry-run-reviews', {
+    method: 'POST', companyId,
+    body: { reviewId: input?.reviewId, expectedUpdatedAt: input?.expectedUpdatedAt }, signal,
+  })
 }
 
 export function resolveH2AConflict(session, companyId, resolution, { signal } = {}) {

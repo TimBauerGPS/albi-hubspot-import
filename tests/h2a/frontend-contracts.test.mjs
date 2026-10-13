@@ -99,6 +99,76 @@ test('client sends an explicit bounded sample scope without exposing a record-co
   assert.equal(call.options.body.includes('limit'), false)
 })
 
+test('sample review client allowlists list filters and sends exact detail and recheck shapes', async () => {
+  const { getH2ADryRunReviews, getH2ADryRunReview, recheckH2ADryRunReview } = await import('../../src/lib/hubspotToAlbi.js')
+  const signal = new AbortController().signal
+  const calls = await captureRequests(async () => {
+    await getH2ADryRunReviews(session, 'company-1', {
+      limit: 25, status: 'needs_review', objectType: 'contacts', reason: 'name_only_candidate',
+      signal, unknown: 'must-not-serialize', companyId: 'attacker-company',
+    })
+    await getH2ADryRunReview(session, 'company-1', '00000000-0000-4000-8000-000000000001', { signal })
+    await recheckH2ADryRunReview(session, 'company-1', {
+      reviewId: '00000000-0000-4000-8000-000000000001',
+      expectedUpdatedAt: '2026-10-12T12:00:00.000Z',
+      unexpected: 'must-not-send', companyId: 'attacker-company',
+    }, { signal })
+  })
+
+  assert.equal(calls.length, 3)
+  assert.equal(calls[0].url, '/.netlify/functions/h2a-dry-run-reviews?companyId=company-1&limit=25&status=needs_review&objectType=contacts&reason=name_only_candidate')
+  assert.equal(calls[1].url, '/.netlify/functions/h2a-dry-run-reviews?companyId=company-1&reviewId=00000000-0000-4000-8000-000000000001')
+  for (const call of calls) {
+    assert.equal(call.options.headers.Authorization, 'Bearer supabase-session-token')
+    assert.equal(call.options.signal, signal)
+  }
+  assert.deepEqual(JSON.parse(calls[2].options.body), {
+    companyId: 'company-1', reviewId: '00000000-0000-4000-8000-000000000001',
+    expectedUpdatedAt: '2026-10-12T12:00:00.000Z',
+  })
+})
+
+test('sample review server errors are fixed-copy allowlisted and unknown text stays generic', async () => {
+  const { getH2ADryRunReviews } = await import('../../src/lib/hubspotToAlbi.js')
+  const safeEndpointErrors = [
+    'Invalid sample review cursor.',
+    'Invalid sample review request.',
+    'Sample review page size must be between 1 and 100.',
+    'Unsupported sample review filters.',
+    'Sample review item not found.',
+    'This sample review changed. Refresh it before rechecking.',
+    'This sample review is no longer current. Refresh before rechecking.',
+    'Run a new sample to create detailed review data.',
+    'Unable to recheck this sample review.',
+    'Unable to load sample reviews.',
+    'Authentication required.',
+    'Invalid authentication token.',
+    'Administrator access is required.',
+    'You are not authorized to access H2A.',
+    'You are not authorized to access the requested company.',
+    'A company must be selected.',
+    'Company not found.',
+  ]
+  const originalFetch = globalThis.fetch
+  const responses = [
+    ...safeEndpointErrors.map(error => response({ error }, { status: error === 'Company not found.' || error === 'Sample review item not found.' ? 404 : 400 })),
+    response({ error: 'database secret details' }, { status: 400 }),
+    response({ error: 'provider secret details' }, { status: 500 }),
+  ]
+  globalThis.fetch = async () => responses.shift()
+  try {
+    for (const message of safeEndpointErrors) {
+      await assert.rejects(() => getH2ADryRunReviews(session, 'company-1'), error => error.message === message)
+    }
+    await assert.rejects(() => getH2ADryRunReviews(session, 'company-1'), error =>
+      error.message === 'HubSpot to Albi request could not be completed.')
+    await assert.rejects(() => getH2ADryRunReviews(session, 'company-1'), error =>
+      error.message === 'HubSpot to Albi is temporarily unavailable. Try again.')
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
 test('client exposes actionable fixed endpoint errors and keeps unknown text generic', async () => {
   const { getH2ASettings } = await import('../../src/lib/hubspotToAlbi.js')
   const originalFetch = globalThis.fetch
