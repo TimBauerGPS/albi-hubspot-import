@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-13
 
-**Status:** Draft for written review
+**Status:** Approved
 
 **Application:** `albi-hubspot-import`
 
