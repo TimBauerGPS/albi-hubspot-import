@@ -252,8 +252,8 @@ export function buildReviewResolutionPlan(input) {
       // The service must select this current contact through tenant-scoped matching/mappings.
       const albi = requireRecord(input.albi, type)
       positiveId(albi.id)
-      const current = fieldValue(albi, ['organizationId', 'organization_id'], false)
-      if (current !== null && current !== '') positiveId(current)
+      const current = fieldValue(albi, ['organizationId', 'organization_id'])
+      if (current !== '') positiveId(current)
       if (current !== organization.targetId) result.manualTasks.push(manualTask(type, albi.id,
         [{ field: 'organizationId', value: organization.targetId }], organization.targetId))
     }

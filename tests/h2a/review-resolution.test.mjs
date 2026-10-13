@@ -187,6 +187,31 @@ test('organization choice rejects missing, archived, mismatched or unresolved cu
   ]) { const input = organizationInput(); change(input); assert.throws(() => plan(input), TypeError) }
 })
 
+test('organization choice rejects absent organization evidence on a current Albi contact', () => {
+  for (const properties of [undefined, {}]) {
+    const input = organizationInput()
+    input.albi = { id: '2590478', ...(properties ? { properties } : {}) }
+    input.associatedCompanyIds = ['98']; input.decision.addHubSpotAssociation = true
+    assert.throws(() => plan(input), TypeError)
+  }
+})
+
+test('organization choice retains deliberate reassociation tasks for explicitly blank organization evidence', () => {
+  for (const alias of ['organizationId', 'organization_id']) {
+    for (const value of [null, '']) {
+      const input = organizationInput()
+      input.albi = { id: '2590478', [alias]: value }
+      const result = plan(input)
+      assert.equal(result.providerOperation, null)
+      assert.deepEqual(result.manualTasks, [{ provider: 'albi', objectType: 'contacts', targetId: '2590478',
+        url: 'https://app.albiware.com/Relationships/Contact/2590478',
+        organizationUrl: 'https://app.albiware.com/Relationships/Organization/635650',
+        fields: [{ field: 'organizationId', value: '635650' }] }])
+      assert.equal(result.verification.successStatus, 'waiting_on_albi')
+    }
+  }
+})
+
 test('association review without identity candidates can use a server-selected current Albi contact', () => {
   const input = organizationInput(); input.review.candidateSnapshots = []; input.albi.organizationId = '100'
   assert.deepEqual(plan(input).manualTasks[0].fields, [{ field: 'organizationId', value: '635650' }])
