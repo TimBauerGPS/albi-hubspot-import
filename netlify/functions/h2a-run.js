@@ -98,8 +98,8 @@ export function createRunHandler(options = {}, { background = false } = {}) {
         }
         if (body.mode === 'dry_run' && body.dryRunScope === 'full' &&
           (!config.initial_start_locked_at ||
-            !await repository.hasCompletedSampleDryRun(companyId, config.initial_start_locked_at))) {
-          fail(409, 'Complete a sample dry run before running the full dry run.')
+            !await repository.hasCleanReviewSampleDryRun(companyId, config.initial_start_locked_at))) {
+          fail(409, 'Run a fresh sample with no underlying review items before running the full dry run.')
         }
         if (await repository.getActiveLease(companyId)) return reply(200, { status: 'already_running', companyId })
         const run = await repository.queueRun(companyId, { mode: body.mode, trigger: 'manual', requestedBy: auth.userId,

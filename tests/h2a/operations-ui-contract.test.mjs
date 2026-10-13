@@ -12,6 +12,7 @@ import {
   proposedConflictFields,
 } from '../../src/features/hubspotToAlbi/operations.js'
 import { presentReviewBreakdown } from '../../src/features/hubspotToAlbi/reviewBreakdown.js'
+import { renderWorkflowPage } from './ui-render-fixture.mjs'
 
 const root = new URL('../../src/features/hubspotToAlbi/', import.meta.url)
 const source = name => readFile(new URL(name, root), 'utf8')
@@ -214,6 +215,38 @@ test('overview covers loading, empty, metrics, active status, run-now, and keyse
   assert.match(page, /Why \{breakdown\.count\} need review/)
   assert.match(page, /\{group\.total\}/)
   assert.match(page, /presentReviewBreakdown/)
+})
+
+const overviewBindings = { presentRunTotals, presentReviewBreakdown, mergeOverviewRefresh, overviewPollingPauseNotice }
+test('rendered Overview links only current completed review-capable samples and preserves historical breakdowns', async () => {
+  for (const [version, status, link] of [[1, 'completed', true], [null, 'completed', false], [1, 'failed', false]]) {
+    const run = { id: 'sample', mode: 'dry_run', status, sampleLimitPerType: 10, reviewCaptureVersion: version,
+      totals: { requires_review: 3 }, reviewBreakdown: [{ kind: 'record', objectType: 'contacts', reason: 'name_only_candidate', count: 3 }] }
+    const html = await renderWorkflowPage('OverviewPage', { summary: { completedSampleRun: status === 'completed' ? run : null }, runs: [run] }, overviewBindings)
+    assert.equal(html.includes('href="/hubspot-to-albi/sample-review"'), link)
+    assert.match(html, /Why 3 need review/)
+    if (status === 'completed' && !version) assert.match(html, /Run a new sample to create detailed review data/)
+  }
+})
+
+test('rendered Overview displays failed newer attempt and retains prior completed set even off the current page', async () => {
+  const completed = { id: 'prior-completed', mode: 'dry_run', status: 'completed', sampleLimitPerType: 10, reviewCaptureVersion: 1 }
+  const failed = { id: 'new-failed', mode: 'dry_run', status: 'failed', sampleLimitPerType: 10, reviewCaptureVersion: 1 }
+  const data = { summary: { latestSampleRun: failed, completedSampleRun: completed }, runs: [failed] }
+  const html = await renderWorkflowPage('OverviewPage', data, overviewBindings)
+  assert.match(html, /Newer sample failed/)
+  assert.match(html, /prior completed sample/i)
+  assert.match(html, /href="\/hubspot-to-albi\/sample-review"/)
+  assert.match(html, /Review underlying records/)
+  const member = await renderWorkflowPage('OverviewPage', data, overviewBindings, { isAdmin: false })
+  assert.doesNotMatch(member, /href="\/hubspot-to-albi\/sample-review"/)
+})
+
+test('superseded review-capable history rows cannot link to a different current review set', async () => {
+  const prior = { id: 'prior', mode: 'dry_run', status: 'completed', sampleLimitPerType: 10, reviewCaptureVersion: 1 }
+  const current = { ...prior, id: 'current' }
+  const html = await renderWorkflowPage('OverviewPage', { summary: { completedSampleRun: current }, runs: [prior] }, overviewBindings)
+  assert.doesNotMatch(html, /href="\/hubspot-to-albi\/sample-review"/)
 })
 
 test('conflict queue exposes count, focused refresh, pagination, and member read-only mode', async () => {

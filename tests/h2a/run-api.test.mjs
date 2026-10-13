@@ -5,6 +5,7 @@ import { H2AAuthError } from '../../netlify/functions/_h2a/auth.js'
 import { runCompanySync } from '../../netlify/functions/_h2a/orchestrator.js'
 import { createH2AProviderClients } from '../../netlify/functions/_h2a/providerClients.js'
 import { encryptSecret } from '../../netlify/functions/_h2a/crypto.js'
+import { createH2ARepository } from '../../netlify/functions/_h2a/repository.js'
 
 test('shared provider factory decrypts only selected tenant credentials and supplies working scoped readers', async () => {
   const keyring = { activeVersion: 1, keys: { 1: Buffer.alloc(32, 7) } }
@@ -96,7 +97,7 @@ test('manual dry runs require an explicit sample or full scope', async () => {
   assert.equal(queued, 0)
 })
 
-test('full dry run requires a completed tenant sample after the initial start date was locked', async () => {
+test('full dry run requires a fresh clean tenant sample after the initial start date was locked', async () => {
   const queued = []
   const checks = []
   const makeHandler = completed => createRunHandler({
@@ -104,7 +105,8 @@ test('full dry run requires a completed tenant sample after the initial start da
     repository: {
       getConfig: async () => ({ state: 'dry_run', preflight_status: 'valid', portal_id: '123',
         initial_start_locked_at: '2026-10-01T00:00:00.000Z' }),
-      hasCompletedSampleDryRun: async (companyId, after) => { checks.push([companyId, after]); return completed },
+      hasCleanReviewSampleDryRun: async (companyId, after) => { checks.push([companyId, after]); return completed },
+      hasCompletedSampleDryRun: async () => { throw Error('Legacy gate must not be used') },
       getActiveLease: async () => null,
       queueRun: async (_companyId, input) => { queued.push(input); return { id: 'full-run' } },
     },
@@ -114,7 +116,7 @@ test('full dry run requires a completed tenant sample after the initial start da
 
   const rejected = await makeHandler(false)({ httpMethod: 'POST', body })
   assert.equal(rejected.statusCode, 409)
-  assert.equal(JSON.parse(rejected.body).error, 'Complete a sample dry run before running the full dry run.')
+  assert.equal(JSON.parse(rejected.body).error, 'Run a fresh sample with no underlying review items before running the full dry run.')
   assert.equal(queued.length, 0)
 
   const accepted = await makeHandler(true)({ httpMethod: 'POST', body })
@@ -125,6 +127,47 @@ test('full dry run requires a completed tenant sample after the initial start da
   ])
   assert.deepEqual(queued, [{ mode: 'dry_run', trigger: 'manual', requestedBy: 'u1', sampleLimitPerType: null, reviewCaptureVersion: null }])
 })
+
+for (const [label, samples, statuses, expected] of [
+  ['no completed sample', [], [], 409],
+  ['historical sample', [{ review_capture_version: null }], [], 409],
+  ['newer historical sample after an older clean version-one sample', [{}, { review_capture_version: null, created_at: '2026-10-03T00:00:00Z' }], [], 409],
+  ['failed version-one sample without a completed sample', [{ status: 'failed' }], [], 409],
+  ['open review rows', [{}], ['needs_review'], 409],
+  ['all rows individually cleared or removed from scope', [{}], ['cleared', 'no_longer_in_scope'], 409],
+  ['completed version-one sample with zero captured rows', [{}], [], 202],
+  ['prior clean completed set retained after a failed attempt', [{}, { status: 'failed', created_at: '2026-10-03T00:00:00Z' }], [], 202],
+]) {
+  test(`full dry-run HTTP gate handles ${label}`, async () => {
+    const runs = samples.map((sample, index) => ({ id: `sample-${index}`, company_id: 'c1', mode: 'dry_run',
+      sample_limit_per_type: 10, review_capture_version: 1, status: 'completed', created_at: '2026-10-02T00:00:00Z', ...sample }))
+    const rows = statuses.map(status => ({ company_id: 'c1', run_id: 'sample-0', status }))
+    const supabase = { rpc() {}, from(table) {
+      let filters = [], orders = [], head = false
+      const query = {
+        select(_fields, options) { head = options?.head === true; return query },
+        eq(key, value) { filters.push(row => row[key] === value); return query },
+        gt(key, value) { filters.push(row => row[key] > value); return query },
+        order(key) { orders.push(key); return query }, limit() { return query },
+        maybeSingle: async () => ({ data: selected()[0] ?? null, error: null }),
+        then(resolve, reject) { return Promise.resolve(head ? { count: selected().length, error: null } : { data: selected(), error: null }).then(resolve, reject) },
+      }
+      function selected() { return (table === 'h2a_sync_runs' ? runs : rows).filter(row => filters.every(filter => filter(row)))
+        .sort((left, right) => { for (const key of orders) { const diff = String(right[key]).localeCompare(String(left[key])); if (diff) return diff } return 0 }) }
+      return query
+    } }
+    const repository = createH2ARepository(supabase)
+    let queued = 0
+    repository.getConfig = async () => ({ state: 'dry_run', preflight_status: 'valid', portal_id: '123', initial_start_locked_at: '2026-10-01T00:00:00Z' })
+    repository.getActiveLease = async () => null
+    repository.queueRun = async () => { queued++; return { id: 'full' } }
+    const handler = createRunHandler({ requireRequest: async () => ({ companyId: 'c1', userId: 'u1' }), repository, dispatch: async () => {} })
+    const response = await handler({ httpMethod: 'POST', body: JSON.stringify({ mode: 'dry_run', dryRunScope: 'full' }) })
+    assert.equal(response.statusCode, expected)
+    assert.equal(queued, expected === 202 ? 1 : 0)
+    if (expected === 409) assert.equal(JSON.parse(response.body).error, 'Run a fresh sample with no underlying review items before running the full dry run.')
+  })
+}
 
 test('dry-run scope is restricted to manual dry runs and fixed supported values', async () => {
   let queued = 0

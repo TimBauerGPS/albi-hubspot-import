@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
+import { renderWorkflowPage } from './ui-render-fixture.mjs'
 import { DRY_RUN_REVIEW_TOTAL_FIELDS } from '../../netlify/functions/_h2a/constants.js'
 import { DRY_RUN_TOTAL_LABELS, presentDryRunTotals } from '../../src/features/hubspotToAlbi/dryRunTotals.js'
 import { dryRunActions } from '../../src/features/hubspotToAlbi/dryRunFlow.js'
@@ -158,10 +159,10 @@ test('readiness refresh preserves the mounted form and activation explicitly con
   assert.doesNotMatch(page, /setReloadToken/)
   assert.match(page, /I reviewed this completed dry run/)
   assert.match(page, /activating confirms/i)
-  assert.match(page, /detailed per-record review is not available yet/i)
+  assert.doesNotMatch(page, /detailed per-record review is not available yet/i)
 })
 
-test('dry-run controls lead with a ten-per-type sample and gate the full run on sample success', async () => {
+test('dry-run controls lead with a ten-per-type sample and gate full on zero captured review rows', async () => {
   const page = await source('SettingsPage.jsx')
   assert.match(page, /Run sample dry run/)
   assert.match(page, /up to 10 from each activity type/i)
@@ -169,16 +170,68 @@ test('dry-run controls lead with a ten-per-type sample and gate the full run on 
   assert.match(page, /Run full dry run/)
   assert.match(page, /dryRunScope: 'sample'/)
   assert.match(page, /dryRunScope: 'full'/)
-  assert.deepEqual(dryRunActions({ state: 'ready', live: false, dryRunReady: false, sampleDryRunReady: false }), {
-    showStartSample: true, showRetrySample: false, showSampleAndFull: false,
+  assert.deepEqual(dryRunActions({ state: 'ready', live: false, fullDryRunCompleted: false, sample: null }), {
+    showStartSample: true, showRetrySample: false, showReview: false, showVerifySample: false, showFull: false,
   })
-  assert.deepEqual(dryRunActions({ state: 'dry_run', live: false, dryRunReady: false, sampleDryRunReady: false }), {
-    showStartSample: false, showRetrySample: true, showSampleAndFull: false,
+  assert.deepEqual(dryRunActions({ state: 'dry_run', live: false, fullDryRunCompleted: false, sample: null }), {
+    showStartSample: false, showRetrySample: true, showReview: false, showVerifySample: false, showFull: false,
   })
-  assert.deepEqual(dryRunActions({ state: 'dry_run', live: false, dryRunReady: false, sampleDryRunReady: true }), {
-    showStartSample: false, showRetrySample: false, showSampleAndFull: true,
+  assert.deepEqual(dryRunActions({ state: 'dry_run', live: false, fullDryRunCompleted: false, sample: { reviewCapable: true, total: 0, needsReview: 0, fullDryRunReady: true } }), {
+    showStartSample: false, showRetrySample: false, showReview: false, showVerifySample: false, showFull: true,
   })
-  assert.deepEqual(dryRunActions({ state: 'dry_run', live: false, dryRunReady: true, sampleDryRunReady: true }), {
-    showStartSample: false, showRetrySample: false, showSampleAndFull: false,
+  assert.deepEqual(dryRunActions({ state: 'dry_run', live: false, fullDryRunCompleted: true, sample: { reviewCapable: true, total: 0, needsReview: 0, fullDryRunReady: true } }), {
+    showStartSample: false, showRetrySample: false, showReview: false, showVerifySample: false, showFull: false,
   })
+})
+
+test('unresolved, rechecked and historical samples follow the safe review/verify sequence', () => {
+  for (const [sample, review, verify] of [
+    [{ reviewCapable: true, total: 3, needsReview: 1, fullDryRunReady: false }, true, false],
+    [{ reviewCapable: true, total: 3, needsReview: 0, fullDryRunReady: false }, false, true],
+    [{ reviewCapable: false, total: 0, needsReview: 0, fullDryRunReady: false }, false, true],
+  ]) {
+    assert.deepEqual(dryRunActions({ state: 'dry_run', live: false, fullDryRunCompleted: false, sample }), {
+      showStartSample: false, showRetrySample: false, showReview: review, showVerifySample: verify, showFull: false,
+    })
+    assert.deepEqual(dryRunActions({ state: 'live', live: true, fullDryRunCompleted: false, sample }), {
+      showStartSample: false, showRetrySample: false, showReview: false, showVerifySample: false, showFull: false,
+    })
+  }
+})
+
+const readySettings = sampleReview => ({ companyName: 'Example', hubspotTokenMask: 'masked', albiApiKeyMask: 'masked',
+  config: { state: 'dry_run', selected_start_date: '2026-10-01', initial_start_locked_at: '2026-10-01T00:00:00Z', option_confirmation_status: 'confirmed' },
+  preflight: { status: 'valid', details: {} }, optionMappings: [], dryRunReviewReady: false,
+  lastCompletedSampleDryRun: sampleReview ? { id: 'completed', totals: { requires_review: 93 } } : null, sampleReview })
+
+test('rendered Settings offers full only for the fresh zero-row sample and retains review after recheck', async () => {
+  for (const [sample, full, review, verify] of [
+    [null, false, false, false],
+    [{ reviewCapable: false, total: 0, needsReview: 0, fullDryRunReady: false }, false, false, true],
+    [{ reviewCapable: true, total: 3, needsReview: 2, fullDryRunReady: false }, false, true, false],
+    [{ reviewCapable: true, total: 3, needsReview: 0, fullDryRunReady: false }, false, true, true],
+    [{ reviewCapable: true, total: 0, needsReview: 0, fullDryRunReady: true }, true, false, false],
+  ]) {
+    const html = await renderWorkflowPage('SettingsPage', readySettings(sample), { dryRunActions, presentDryRunTotals })
+    assert.equal(html.includes('Run full dry run'), full)
+    assert.equal(html.includes('href="/hubspot-to-albi/sample-review"'), review)
+    assert.equal(html.includes('Run fresh verification sample'), verify)
+  }
+})
+
+test('rendered Settings shows newer failed sample separately and keeps prior completed review navigation', async () => {
+  const data = { ...readySettings({ reviewCapable: true, total: 3, needsReview: 2, fullDryRunReady: false }),
+    lastSampleDryRun: { id: 'failed-new', status: 'failed', createdAt: '2026-10-02T00:00:00Z' } }
+  const html = await renderWorkflowPage('SettingsPage', data, { dryRunActions, presentDryRunTotals })
+  assert.match(html, /Newer sample failed/)
+  assert.match(html, /prior completed sample/i)
+  assert.match(html, /href="\/hubspot-to-albi\/sample-review"/)
+  assert.match(html, /Retry sample dry run/)
+  assert.doesNotMatch(html, /Run full dry run/)
+  const member = await renderWorkflowPage('SettingsPage', data, { dryRunActions, presentDryRunTotals }, { isAdmin: false })
+  assert.doesNotMatch(member, /href="\/hubspot-to-albi\/sample-review"/)
+  const fullCompleted = await renderWorkflowPage('SettingsPage', { ...data, dryRunReviewReady: true,
+    lastCompletedDryRun: { id: 'full', totals: {} } }, { dryRunActions, presentDryRunTotals })
+  assert.match(fullCompleted, /href="\/hubspot-to-albi\/sample-review"/)
+  assert.doesNotMatch(fullCompleted, /Run full dry run|Retry sample dry run/)
 })

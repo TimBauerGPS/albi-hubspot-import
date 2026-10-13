@@ -1,6 +1,7 @@
 import { H2AAuthError, requireH2ARequest } from './_h2a/auth.js'
 
-const RUN_SELECT = 'id,mode,trigger,status,totals,sample_limit_per_type,created_at,started_at,finished_at,error_summary'
+const RUN_SELECT = 'id,mode,trigger,status,totals,sample_limit_per_type,review_capture_version,created_at,started_at,finished_at,error_summary'
+const SAMPLE_RUN_SELECT = 'id,mode,status,sample_limit_per_type,review_capture_version,created_at,finished_at'
 const REVIEW_ITEM_SELECT = 'id,run_id,object_type,source_id,albi_target_type,albi_target_id,outcome,sanitized_details,created_at'
 const RUN_FIELDS = ['id', 'mode', 'trigger', 'status', 'created_at', 'started_at', 'finished_at']
 const TOTAL_FIELDS = new Set([
@@ -110,6 +111,9 @@ export function sanitizeOverviewRun(run) {
     run.sample_limit_per_type >= 1 && run.sample_limit_per_type <= 50) {
     result.sampleLimitPerType = run.sample_limit_per_type
   }
+  if (run.mode === 'dry_run' && run.sample_limit_per_type === 10 && run.review_capture_version === 1) {
+    result.reviewCaptureVersion = 1
+  }
   const errorCategory = typeof run.error_summary === 'string' && Object.hasOwn(ERROR_CATEGORIES, run.error_summary)
     ? ERROR_CATEGORIES[run.error_summary]
     : null
@@ -164,12 +168,13 @@ export async function getOverview({ repository, companyId, cursor = null, limit 
   if (typeof companyId !== 'string' || !companyId.trim()) fail(400, 'A valid company is required.')
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) fail(400, 'Overview page size must be between 1 and 100.')
   const before = validateCursor(cursor)
-  const [page, activeRun, recentRun, lastSuccessfulRun, unresolvedConflictCount] = await Promise.all([
+  const [page, activeRun, recentRun, lastSuccessfulRun, unresolvedConflictCount, sampleRuns] = await Promise.all([
     repository.listRuns(companyId, { limit, before }),
     repository.getActiveRun(companyId),
     repository.getRecentRun(companyId),
     repository.getLastCompletedRun(companyId),
     repository.countOpenConflicts(companyId),
+    repository.getSampleReviewRuns(companyId),
   ])
   const rows = Array.isArray(page?.items) ? page.items : []
   const selected = rows.slice(0, limit)
@@ -185,6 +190,8 @@ export async function getOverview({ repository, companyId, cursor = null, limit 
       activeRun: sanitizeOverviewRun(activeRun),
       recentRun: sanitizeOverviewRun(recentRun),
       lastSuccessfulRun: sanitizeOverviewRun(lastSuccessfulRun),
+      latestSampleRun: sanitizeOverviewRun(sampleRuns.latest),
+      completedSampleRun: sanitizeOverviewRun(sampleRuns.completed),
       unresolvedConflictCount: Number.isSafeInteger(unresolvedConflictCount) && unresolvedConflictCount >= 0
         ? unresolvedConflictCount : 0,
     },
@@ -248,6 +255,19 @@ export function createOverviewRepository(supabase) {
         .eq('company_id', companyId).eq('status', 'open')
       if (result?.error) throw result.error
       return Number.isSafeInteger(result?.count) ? result.count : 0
+    },
+    async getSampleReviewRuns(companyId) {
+      const config = checked(await supabase.from('h2a_company_config').select('initial_start_locked_at')
+        .eq('company_id', companyId).maybeSingle())
+      if (!config?.initial_start_locked_at) return { latest: null, completed: null }
+      const sampleQuery = () => supabase.from('h2a_sync_runs').select(SAMPLE_RUN_SELECT)
+        .eq('company_id', companyId).eq('mode', 'dry_run').eq('sample_limit_per_type', 10)
+        .gt('created_at', config.initial_start_locked_at)
+        .order('created_at', { ascending: false }).order('id', { ascending: false })
+      const [latest, completed] = await Promise.all([
+        maybeOne(sampleQuery()), maybeOne(sampleQuery().eq('status', 'completed')),
+      ])
+      return { latest, completed }
     },
     async listSampleReviewItems(companyId, runIds) {
       if (!Array.isArray(runIds) || runIds.length === 0) return []

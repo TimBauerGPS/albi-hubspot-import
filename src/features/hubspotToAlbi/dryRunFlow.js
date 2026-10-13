@@ -1,8 +1,12 @@
-export function dryRunActions({ state, live, dryRunReady, sampleDryRunReady }) {
-  const awaitingFullDryRun = state === 'dry_run' && !dryRunReady
+export function dryRunActions({ state, live, fullDryRunCompleted, sample }) {
+  const inDryRun = state === 'dry_run' && !live
+  const clean = sample?.reviewCapable === true && sample?.fullDryRunReady === true
+  const rechecksComplete = sample?.reviewCapable === true && sample.total > 0 && sample.needsReview === 0
   return {
-    showStartSample: state !== 'dry_run' && !live,
-    showRetrySample: awaitingFullDryRun && !sampleDryRunReady,
-    showSampleAndFull: awaitingFullDryRun && sampleDryRunReady,
+    showStartSample: !inDryRun && !live,
+    showRetrySample: inDryRun && !fullDryRunCompleted && !sample,
+    showReview: inDryRun && !fullDryRunCompleted && sample?.reviewCapable === true && sample.needsReview > 0,
+    showVerifySample: inDryRun && !fullDryRunCompleted && (rechecksComplete || sample?.reviewCapable === false),
+    showFull: inDryRun && !fullDryRunCompleted && clean,
   }
 }

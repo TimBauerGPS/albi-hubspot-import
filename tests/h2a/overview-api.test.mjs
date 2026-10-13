@@ -51,6 +51,10 @@ function repository(overrides = {}) {
       calls.push(['countOpenConflicts', companyId])
       return 4
     },
+    async getSampleReviewRuns(companyId) {
+      calls.push(['getSampleReviewRuns', companyId])
+      return { latest: null, completed: null }
+    },
     async listSampleReviewItems(companyId, runIds) {
       calls.push(['listSampleReviewItems', companyId, runIds])
       return []
@@ -75,6 +79,7 @@ function recordingSupabase() {
 
     select(...args) { return this.operation('select', ...args) }
     eq(...args) { return this.operation('eq', ...args) }
+    gt(...args) { return this.operation('gt', ...args) }
     not(...args) { return this.operation('not', ...args) }
     is(...args) { return this.operation('is', ...args) }
     in(...args) { return this.operation('in', ...args) }
@@ -97,7 +102,7 @@ test('overview is tenant scoped and returns active, recent, last-success, and op
   const repo = repository()
   const result = await getOverview({ repository: repo, companyId: 'company-1', limit: 25 })
 
-  assert.deepEqual(repo.calls.map(call => call[1]), Array(5).fill('company-1'))
+  assert.deepEqual(repo.calls.map(call => call[1]), Array(6).fill('company-1'))
   assert.equal(result.summary.activeRun.status, 'running')
   assert.equal(result.summary.recentRun.status, 'completed')
   assert.equal(result.summary.lastSuccessfulRun.status, 'completed')
@@ -140,6 +145,62 @@ test('overview exposes only validated sample metadata needed to label bounded dr
     assert.equal(sanitizeOverviewRun(run({ mode: 'dry_run', sample_limit_per_type: value })).sampleLimitPerType, undefined)
   }
   assert.equal(sanitizeOverviewRun(run({ mode: 'live', sample_limit_per_type: 10 })).sampleLimitPerType, undefined)
+})
+
+test('overview exposes the camel-case capture marker only for exact version-one bounded dry runs', () => {
+  const sample = sanitizeOverviewRun(run({ mode: 'dry_run', sample_limit_per_type: 10, review_capture_version: 1 }))
+  assert.equal(sample.reviewCaptureVersion, 1)
+  assert.equal(sample.review_capture_version, undefined)
+  for (const malformed of [
+    { mode: 'live', sample_limit_per_type: 10, review_capture_version: 1 },
+    { mode: 'dry_run', sample_limit_per_type: null, review_capture_version: 1 },
+    { mode: 'dry_run', sample_limit_per_type: 9, review_capture_version: 1 },
+    { mode: 'dry_run', sample_limit_per_type: '10', review_capture_version: 1 },
+    { mode: 'dry_run', sample_limit_per_type: 10, review_capture_version: '1' },
+    { mode: 'dry_run', sample_limit_per_type: 10, review_capture_version: 2 },
+  ]) assert.equal(sanitizeOverviewRun(run(malformed)).reviewCaptureVersion, undefined)
+})
+
+test('overview retains the completed review set independently from a newer failed bounded attempt', async () => {
+  const completed = run({ id: 'completed-set', mode: 'dry_run', sample_limit_per_type: 10, review_capture_version: 1 })
+  const failed = run({ id: 'failed-attempt', mode: 'dry_run', sample_limit_per_type: 10, review_capture_version: 1,
+    status: 'failed', created_at: '2026-10-06T00:00:00Z', source_snapshot: { email: 'private@example.com' }, error_summary: 'private provider text' })
+  const repo = repository({
+    async listRuns() { return { items: [failed], hasMore: true } },
+    async getSampleReviewRuns(companyId) { assert.equal(companyId, 'company-1'); return { latest: failed, completed } },
+  })
+  const result = await getOverview({ repository: repo, companyId: 'company-1', limit: 1 })
+  assert.equal(result.summary.latestSampleRun.id, 'failed-attempt')
+  assert.equal(result.summary.latestSampleRun.status, 'failed')
+  assert.equal(result.summary.completedSampleRun.id, 'completed-set')
+  assert.equal(result.summary.completedSampleRun.reviewCaptureVersion, 1)
+  for (const unsafe of ['private@example.com', 'source_snapshot', 'private provider text', 'review_capture_version']) {
+    assert.equal(JSON.stringify(result).includes(unsafe), false)
+  }
+})
+
+test('overview sample lookup scopes current and completed metadata after the tenant date lock', async () => {
+  const supabase = recordingSupabase()
+  const originalFrom = supabase.from
+  supabase.from = table => table === 'h2a_company_config'
+    ? { select: columns => { assert.equal(columns, 'initial_start_locked_at'); return {
+      eq: (key, value) => { assert.equal(key, 'company_id'); assert.equal(value, 'company-1'); return {
+        maybeSingle: async () => ({ data: { initial_start_locked_at: timestamp }, error: null }),
+      } },
+    } } } : originalFrom(table)
+  await createOverviewRepository(supabase).getSampleReviewRuns('company-1')
+  assert.equal(supabase.queries.length, 2)
+  for (const query of supabase.queries) {
+    for (const [key, value] of [['company_id', 'company-1'], ['mode', 'dry_run'], ['sample_limit_per_type', 10]]) {
+      assert.ok(query.operations.some(op => op.method === 'eq' && op.args[0] === key && op.args[1] === value))
+    }
+    assert.ok(query.operations.some(op => op.method === 'gt' && op.args[0] === 'created_at' && op.args[1] === timestamp))
+    assert.deepEqual(query.operations.filter(op => op.method === 'order').map(op => op.args), [
+      ['created_at', { ascending: false }], ['id', { ascending: false }],
+    ])
+    assert.ok(query.operations.find(op => op.method === 'select').args[0].includes('review_capture_version'))
+  }
+  assert.ok(supabase.queries[1].operations.some(op => op.method === 'eq' && op.args[0] === 'status' && op.args[1] === 'completed'))
 })
 
 test('sample dry-run review breakdown is deduplicated and exposes only fixed safe categories', async () => {

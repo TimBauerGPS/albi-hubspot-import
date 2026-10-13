@@ -265,6 +265,9 @@ export default function OverviewPage() {
   const activeRun = summary.activeRun
   const recentRun = summary.recentRun
   const lastSuccess = summary.lastSuccessfulRun
+  const completedSample = summary.completedSampleRun
+  const newerSampleFailed = ['failed', 'partially_failed'].includes(summary.latestSampleRun?.status) &&
+    summary.latestSampleRun.id !== completedSample?.id
   const runDisabled = runningNow || ACTIVE_STATUSES.has(activeRun?.status)
   const pollingPauseNotice = overviewPollingPauseNotice(pollingPauseReason)
 
@@ -314,6 +317,21 @@ export default function OverviewPage() {
         </section>
       )}
 
+      {newerSampleFailed && (
+        <section className="rounded-lg border border-red-200 bg-red-50 px-4 py-3" role="status">
+          <h3 className="text-sm font-semibold text-red-900">Newer sample failed</h3>
+          <p className="mt-1 text-xs leading-5 text-red-800">{completedSample
+            ? 'The prior completed sample remains available for review. Check the failed attempt in run history, then retry the sample in Settings.'
+            : 'No sample has completed yet. Check the failed attempt in run history, then retry the sample in Settings.'}</p>
+          <div className="mt-2 flex flex-wrap gap-3">
+            {isAdmin && completedSample?.status === 'completed' && completedSample?.reviewCaptureVersion === 1 && (
+              <Link to="/hubspot-to-albi/sample-review" className="text-xs font-semibold text-brand-700 underline focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500">Review underlying records</Link>
+            )}
+            <Link to="/hubspot-to-albi/settings" className="text-xs font-semibold text-brand-700 underline focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500">Open Settings</Link>
+          </div>
+        </section>
+      )}
+
       <section aria-labelledby="h2a-health-title">
         <h3 id="h2a-health-title" className="sr-only">Sync health</h3>
         <dl className="grid gap-px overflow-hidden rounded-xl border border-gray-200 bg-gray-200 sm:grid-cols-2 lg:grid-cols-4">
@@ -355,6 +373,13 @@ export default function OverviewPage() {
                     <p className="mt-2 text-sm font-medium text-gray-900">{dateTime(item.started_at || item.created_at)}</p>
                     <div className="mt-2"><RunTotals run={item} /></div>
                     <ReviewBreakdown run={item} />
+                    {item.mode === 'dry_run' && item.sampleLimitPerType === 10 && item.status === 'completed' && (
+                      item.reviewCaptureVersion === 1
+                        ? isAdmin && item.id === completedSample?.id && (
+                          <Link to="/hubspot-to-albi/sample-review" className="mt-2 inline-flex text-xs font-semibold text-brand-700 underline focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500">Review underlying records</Link>
+                        )
+                        : <p className="mt-2 text-xs leading-5 text-gray-500">Run a new sample to create detailed review data. This historical sample has aggregate totals only.</p>
+                    )}
                     {item.errorCategory && <p className="mt-2 text-xs font-medium text-red-700">{item.errorCategory}</p>}
                   </div>
                   <p className="text-xs text-gray-500">{item.finished_at ? `Finished ${dateTime(item.finished_at)}` : 'Not finished'}</p>

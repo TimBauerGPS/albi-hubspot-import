@@ -4,6 +4,7 @@ import { DRY_RUN_REVIEW_TOTAL_FIELDS, HUBSPOT_ACTIVITY_TYPES } from './_h2a/cons
 import { decryptSecret, encryptSecret, loadCredentialKeyring, maskSecret } from './_h2a/crypto.js'
 import { pacificBusinessDate, pacificStartOfDate } from './_h2a/time.js'
 import { mappingsMatchOptions, safePreflightDetails } from './_h2a/preflight.js'
+import { createH2ARepository } from './_h2a/repository.js'
 
 const CONFIG_FIELDS = ['company_id', 'state', 'portal_id', 'selected_start_date', 'initial_start_locked_at',
   'preflight_status', 'preflight_checked_at', 'option_confirmation_status', 'options_confirmed_by',
@@ -71,8 +72,17 @@ function toCompletedDryRun(row) {
     .filter(field => Number.isSafeInteger(row.totals?.[field]) && row.totals[field] > 0)
     .map(field => [field, row.totals[field]]))
   return { id: row.id, createdAt: row.created_at, finishedAt: row.finished_at,
+    ...(row.sample_limit_per_type === 10 && row.review_capture_version === 1 ? { reviewCaptureVersion: 1 } : {}),
     ...(Number.isInteger(row.sample_limit_per_type) && row.sample_limit_per_type >= 1 && row.sample_limit_per_type <= 50
       ? { sampleLimitPerType: row.sample_limit_per_type } : {}), totals }
+}
+
+function toSampleAttempt(row) {
+  if (!row) return null
+  return { id: row.id, createdAt: row.created_at, finishedAt: row.finished_at,
+    status: ['queued', 'running', 'paused', 'completed', 'partially_failed', 'failed', 'cancelled'].includes(row.status) ? row.status : 'unknown',
+    sampleLimitPerType: 10,
+    ...(row.review_capture_version === 1 ? { reviewCaptureVersion: 1 } : {}) }
 }
 
 function validateDate(value, today) {
@@ -156,7 +166,7 @@ export function createSettingsHandler(options = {}) {
       async function getCompletedDryRun({ sample = false } = {}) {
         if (!config.initial_start_locked_at) return null
         let query = supabase.from('h2a_sync_runs')
-          .select('id, created_at, finished_at, totals, sample_limit_per_type')
+          .select('id, created_at, finished_at, totals, sample_limit_per_type, review_capture_version, status')
           .eq('company_id', companyId)
           .eq('mode', 'dry_run')
           .eq('status', 'completed')
@@ -164,8 +174,35 @@ export function createSettingsHandler(options = {}) {
         query = sample ? query.eq('sample_limit_per_type', 10) : query.is('sample_limit_per_type', null)
         return checked(query
           .order('created_at', { ascending: false })
+          .order('id', { ascending: false })
           .limit(1)
           .maybeSingle())
+      }
+
+      async function getSampleReview(sample) {
+        if (!sample) return null
+        const reviewCapable = sample.review_capture_version === 1 && sample.sample_limit_per_type === 10
+        if (!reviewCapable) return { reviewCapable: false, total: 0, needsReview: 0, cleared: 0, noLongerInScope: 0, fullDryRunReady: false }
+        const repository = createH2ARepository(supabase)
+        const [total, needsReview, cleared, noLongerInScope] = await Promise.all([
+          repository.countDryRunReviews(companyId, sample.id),
+          repository.countDryRunReviews(companyId, sample.id, 'needs_review'),
+          repository.countDryRunReviews(companyId, sample.id, 'cleared'),
+          repository.countDryRunReviews(companyId, sample.id, 'no_longer_in_scope'),
+        ])
+        // Revalidate the exact counted set after zero: replacement cleanup may have removed its rows.
+        const current = total === 0 ? await repository.getLatestCompletedSampleDryRun(companyId, config.initial_start_locked_at) : null
+        return { reviewCapable, total, needsReview, cleared, noLongerInScope,
+          fullDryRunReady: total === 0 && current?.id === sample.id && current?.review_capture_version === 1 }
+      }
+
+      async function getLatestSampleDryRun() {
+        if (!config.initial_start_locked_at) return null
+        return checked(supabase.from('h2a_sync_runs')
+          .select('id,created_at,finished_at,sample_limit_per_type,review_capture_version,status')
+          .eq('company_id', companyId).eq('mode', 'dry_run').eq('sample_limit_per_type', 10)
+          .gt('created_at', config.initial_start_locked_at)
+          .order('created_at', { ascending: false }).order('id', { ascending: false }).limit(1).maybeSingle())
       }
 
       async function saveConfig(patch) {
@@ -302,6 +339,8 @@ export function createSettingsHandler(options = {}) {
       const safeConfig = Object.fromEntries(CONFIG_FIELDS.filter(field => config[field] !== undefined).map(field => [field, config[field]]))
       const completedDryRun = await getCompletedDryRun()
       const completedSampleDryRun = await getCompletedDryRun({ sample: true })
+      const sampleReview = await getSampleReview(completedSampleDryRun)
+      const latestSampleDryRun = await getLatestSampleDryRun()
       return response(200, {
         companyId, companyName: context.companyName,
         config: safeConfig, optionMappings: mappings.map(toMapping),
@@ -309,6 +348,7 @@ export function createSettingsHandler(options = {}) {
         hubspotTokenMask: maskSecret(secrets.hubspotToken), albiApiKeyMask: maskSecret(secrets.albiApiKey),
         dryRunReviewReady: Boolean(completedDryRun), lastCompletedDryRun: toCompletedDryRun(completedDryRun),
         lastCompletedSampleDryRun: toCompletedDryRun(completedSampleDryRun),
+        sampleReview, lastSampleDryRun: toSampleAttempt(latestSampleDryRun),
         ...(backfillRequestId ? { backfillRequestId } : {}),
       })
     } catch (error) {

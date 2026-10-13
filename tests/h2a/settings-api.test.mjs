@@ -26,7 +26,7 @@ const toRpc = ({ keyVersion, ...rest }) => ({ ...rest, key_version: keyVersion }
 const fromRpc = ({ key_version, ...rest }) => ({ ...rest, keyVersion: key_version })
 
 function fixture({ role = 'admin', superAdmin = false, config = {}, credentials = true, mappings = [], runs = [], failure = null,
-  concurrentConfig = false, rejectArrayEquality = false } = {}) {
+  concurrentConfig = false, rejectArrayEquality = false, reviews = [], reviewCount } = {}) {
   const tables = {
     companies: [{ id: 'company-a', name: 'Alpha' }, { id: 'company-b', name: 'Beta' }],
     company_members: [{ user_id: 'user-1', company_id: 'company-a', role }],
@@ -38,6 +38,7 @@ function fixture({ role = 'admin', superAdmin = false, config = {}, credentials 
       updated_at: '2026-10-01T10:00:00.000Z', ...config,
     }],
     h2a_option_mappings: mappings.map(dbMapping), h2a_backfill_windows: [], h2a_cursors: [],
+    h2a_dry_run_reviews: reviews,
     h2a_sync_runs: runs.map((run, index) => ({
       id: `run-${index + 1}`, company_id: 'company-a', mode: 'dry_run', status: 'completed',
       sample_limit_per_type: null, totals: { dry_run: 7 }, created_at: '2026-10-02T10:00:01.000Z',
@@ -50,16 +51,18 @@ function fixture({ role = 'admin', superAdmin = false, config = {}, credentials 
   }]] : [])
   const writes = []
   const rpcCalls = []
+  const reads = []
   let beforeCredentialWrite = async () => {}
   let afterCredentialWrite = async () => {}
+  let afterReviewCount = async () => {}
   const supabase = {
     auth: { async getUser(jwt) { return jwt === 'valid-jwt' ? { data: { user: { id: 'user-1' } }, error: null } : { data: { user: null }, error: { message: 'bad token' } } } },
     from(table) {
       assert.ok(tables[table], `Unexpected public table ${table}`)
-      let operation = 'read', values, filters = [], selected = false, orderedBy, ascending = true, rowLimit
+      let operation = 'read', values, filters = [], selected = false, ordering = [], rowLimit, countOptions
       const matches = row => filters.every(([operator, column, value]) => operator === 'eq' ? row[column] === value : row[column] > value)
       const builder = {
-        select() { selected = true; return builder },
+        select(columns, options) { selected = true; countOptions = options; reads.push({ table, columns, options, filters }); return builder },
         eq(column, value) { filters.push(['eq', column, value]); return builder },
         gt(column, value) { filters.push(['gt', column, value]); return builder },
         is(column, value) { filters.push(['eq', column, value]); return builder },
@@ -67,7 +70,7 @@ function fixture({ role = 'admin', superAdmin = false, config = {}, credentials 
         upsert(payload) { operation = 'upsert'; values = payload; return builder },
         update(payload) { operation = 'update'; values = payload; return builder },
         delete() { operation = 'delete'; return builder },
-        order(column, options = {}) { orderedBy = column; ascending = options.ascending !== false; return builder },
+        order(column, options = {}) { ordering.push([column, options.ascending !== false]); return builder },
         limit(value) { rowLimit = value; return builder },
         async maybeSingle() { const result = await execute(); return { ...result, data: result.data?.[0] ?? null } },
         async single() { return builder.maybeSingle() },
@@ -81,7 +84,15 @@ function fixture({ role = 'admin', superAdmin = false, config = {}, credentials 
         if (concurrentConfig && table === 'h2a_company_config' && operation === 'update') tables[table][0].initial_start_locked_at = now
         if (operation === 'read') {
           let rows = tables[table].filter(matches)
-          if (orderedBy) rows = [...rows].sort((left, right) => String(left[orderedBy]).localeCompare(String(right[orderedBy])) * (ascending ? 1 : -1))
+          if (ordering.length) rows = [...rows].sort((left, right) => { for (const [column, ascending] of ordering) {
+            const difference = String(left[column]).localeCompare(String(right[column])) * (ascending ? 1 : -1)
+            if (difference) return difference
+          } return 0 })
+          if (countOptions?.head) {
+            const count = reviewCount === undefined ? rows.length : reviewCount
+            if (!filters.some(([, column]) => column === 'status')) await afterReviewCount()
+            return { data: null, count, error: null }
+          }
           if (rowLimit !== undefined) rows = rows.slice(0, rowLimit)
           return { data: structuredClone(rows), error: null }
         }
@@ -129,9 +140,10 @@ function fixture({ role = 'admin', superAdmin = false, config = {}, credentials 
     return { ...response, json: JSON.parse(response.body) }
   }
   return {
-    request, handle, supabase, tables, privateCredentials, writes, rpcCalls,
+    request, handle, supabase, tables, privateCredentials, writes, rpcCalls, reads,
     setBeforeCredentialWrite(fn) { beforeCredentialWrite = fn },
     setAfterCredentialWrite(fn) { afterCredentialWrite = fn },
+    setAfterReviewCount(fn) { afterReviewCount = fn },
   }
 }
 
@@ -150,6 +162,94 @@ test('member GET returns masks, configuration, mappings and preflight without cr
   for (const forbidden of [hubspotToken, albiApiKey, 'ciphertext', 'key_version', 'hubspot_envelope', 'albi_envelope']) assert.equal(result.body.includes(forbidden), false)
   assert.equal(result.headers['Cache-Control'], 'no-store')
   assert.equal(f.writes.length, 0)
+})
+
+test('settings exposes only review counters and booleans while all rechecked rows block full readiness', async () => {
+  const f = fixture({ config: { state: 'dry_run', initial_start_locked_at: now },
+    runs: [{ id: 'sample', sample_limit_per_type: 10, review_capture_version: 1 }], reviews: [
+      { company_id: 'company-a', run_id: 'sample', status: 'cleared', source_snapshot: { email: 'private@example.com' }, reason: 'name_only_candidate' },
+      { company_id: 'company-a', run_id: 'sample', status: 'cleared' },
+      { company_id: 'company-a', run_id: 'sample', status: 'no_longer_in_scope' },
+      { company_id: 'company-b', run_id: 'sample', status: 'needs_review' },
+      { company_id: 'company-a', run_id: 'other', status: 'needs_review' },
+    ] })
+  const response = await f.request()
+  assert.equal(response.statusCode, 200)
+  assert.deepEqual(response.json.sampleReview, { reviewCapable: true, total: 3, needsReview: 0,
+    cleared: 2, noLongerInScope: 1, fullDryRunReady: false })
+  assert.equal(response.json.dryRunReviewReady, false)
+  assert.equal(response.body.includes('private@example.com'), false)
+  assert.equal(response.body.includes('name_only_candidate'), false)
+  for (const query of f.reads.filter(read => read.table === 'h2a_dry_run_reviews')) {
+    assert.equal(query.columns, 'id')
+    assert.deepEqual(query.options, { count: 'exact', head: true })
+    assert.ok(query.filters.some(([, key, value]) => key === 'company_id' && value === 'company-a'))
+    assert.ok(query.filters.some(([, key, value]) => key === 'run_id' && value === 'sample'))
+  }
+})
+
+test('settings fresh zero-row version-one sample enables full dry run without enabling live activation', async () => {
+  const f = fixture({ config: { state: 'dry_run', initial_start_locked_at: now },
+    runs: [{ sample_limit_per_type: 10, review_capture_version: 1 }] })
+  const response = await f.request()
+  assert.deepEqual(response.json.sampleReview, { reviewCapable: true, total: 0, needsReview: 0,
+    cleared: 0, noLongerInScope: 0, fullDryRunReady: true })
+  assert.equal(response.json.dryRunReviewReady, false)
+})
+
+test('settings latest historical sample never inherits an older clean version-one sample', async () => {
+  const f = fixture({ config: { state: 'dry_run', initial_start_locked_at: now }, runs: [
+    { id: 'older-clean', sample_limit_per_type: 10, review_capture_version: 1 },
+    { id: 'historical', sample_limit_per_type: 10, review_capture_version: null, created_at: '2026-10-02T11:00:00Z' },
+  ] })
+  const response = await f.request()
+  assert.equal(response.json.lastCompletedSampleDryRun.id, 'historical')
+  assert.deepEqual(response.json.sampleReview, { reviewCapable: false, total: 0, needsReview: 0,
+    cleared: 0, noLongerInScope: 0, fullDryRunReady: false })
+  assert.equal(f.reads.some(read => read.table === 'h2a_dry_run_reviews'), false)
+})
+
+test('settings failed newer sample remains separate from the prior completed review set', async () => {
+  const f = fixture({ config: { state: 'dry_run', initial_start_locked_at: now }, runs: [
+    { id: 'completed-set', sample_limit_per_type: 10, review_capture_version: 1 },
+    { id: 'failed-attempt', sample_limit_per_type: 10, review_capture_version: 1, status: 'failed',
+      created_at: '2026-10-02T11:00:00Z', error_summary: 'private provider text', source_snapshot: { email: 'private@example.com' } },
+  ] })
+  const response = await f.request()
+  assert.equal(response.json.lastSampleDryRun.id, 'failed-attempt')
+  assert.equal(response.json.lastSampleDryRun.status, 'failed')
+  assert.equal(response.json.lastCompletedSampleDryRun.id, 'completed-set')
+  assert.equal(response.json.sampleReview.reviewCapable, true)
+  assert.equal(response.json.sampleReview.fullDryRunReady, true)
+  for (const unsafe of ['private@example.com', 'private provider text', 'source_snapshot', 'error_summary']) assert.equal(response.body.includes(unsafe), false)
+})
+
+test('settings without a completed sample provides no review projection', async () => {
+  const f = fixture({ config: { initial_start_locked_at: now }, runs: [{ sample_limit_per_type: 10, review_capture_version: 1, status: 'failed' }] })
+  const response = await f.request()
+  assert.equal(response.json.sampleReview, null)
+  assert.equal(response.json.lastCompletedSampleDryRun, null)
+  assert.equal(response.json.lastSampleDryRun.status, 'failed')
+})
+
+test('malformed review counts fail settings closed with a fixed error', async () => {
+  const f = fixture({ config: { initial_start_locked_at: now }, runs: [{ sample_limit_per_type: 10, review_capture_version: 1 }], reviewCount: null })
+  const response = await f.request()
+  assert.equal(response.statusCode, 500)
+  assert.deepEqual(response.json, { error: 'Unable to access H2A settings.' })
+})
+
+test('settings zero-count projection revalidates the counted set after replacement cleanup', async () => {
+  const f = fixture({ config: { initial_start_locked_at: now },
+    runs: [{ id: 'sample-A', sample_limit_per_type: 10, review_capture_version: 1 }] })
+  f.setAfterReviewCount(async () => {
+    f.tables.h2a_sync_runs.push({ ...f.tables.h2a_sync_runs[0], id: 'sample-B', created_at: '2026-10-02T11:00:00Z', review_capture_version: null })
+  })
+  const response = await f.request()
+  assert.equal(response.statusCode, 200)
+  assert.equal(response.json.lastCompletedSampleDryRun.id, 'sample-A')
+  assert.equal(response.json.sampleReview.total, 0)
+  assert.equal(response.json.sampleReview.fullDryRunReady, false)
 })
 
 test('admins can manage a tenant-scoped, normalized notification recipient list', async () => {

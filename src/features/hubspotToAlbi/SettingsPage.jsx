@@ -182,8 +182,11 @@ export default function SettingsPage() {
   const mappingsReady = hasRequiredMappings(settings)
   const dryRunReady = Boolean(settings?.dryRunReviewReady)
   const sampleDryRunReady = Boolean(settings?.lastCompletedSampleDryRun)
+  const sample = settings?.sampleReview
+  const newerSampleFailed = ['failed', 'partially_failed'].includes(settings?.lastSampleDryRun?.status) &&
+    settings.lastSampleDryRun.id !== settings?.lastCompletedSampleDryRun?.id
   const live = settings?.config?.state === 'live'
-  const dryRunControls = dryRunActions({ state: settings?.config?.state, live, dryRunReady, sampleDryRunReady })
+  const dryRunControls = dryRunActions({ state: settings?.config?.state, live, fullDryRunCompleted: dryRunReady, sample })
   const locked = Boolean(settings?.config?.initial_start_locked_at)
   const busy = Boolean(busyAction)
   const disabledReason = 'This page is read-only for members. Ask a company admin to make changes.'
@@ -194,9 +197,11 @@ export default function SettingsPage() {
       : !connectionReady ? 'Run the connection check.'
         : !dateReady ? 'Save the Pacific start date.'
           : !mappingsReady ? 'Confirm all seven required mappings.'
-            : !sampleDryRunReady ? 'Queue and review a sample dry run.'
-              : !dryRunReady ? 'Queue and review the full dry run.'
-              : !live ? 'Confirm live activation.' : 'Monitor sync operations on Overview.'
+            : dryRunReady ? !live ? 'Confirm live activation.' : 'Monitor sync operations on Overview.'
+              : !sample ? 'Queue and review a sample dry run.'
+                : sample.reviewCapable && sample.needsReview > 0 ? 'Open Sample Review, correct records in HubSpot or Albi, and individually recheck them.'
+                  : !sample.fullDryRunReady ? 'Run a fresh verification sample before the full dry run.'
+                    : 'Queue and review the full dry run.'
   const canEnterDryRun = isAdmin && !busy && credentialsReady && connectionReady && dateReady && mappingsReady && !live
   const canActivate = isAdmin && !busy && connectionReady && mappingsReady && dryRunReady && settings?.config?.state === 'dry_run'
   const options = settings?.preflight?.details?.options ?? EMPTY_OPTIONS
@@ -254,7 +259,7 @@ export default function SettingsPage() {
       await runH2ASync(session, companyId, 'dry_run', { signal, dryRunScope })
       return current
     }, dryRunScope === 'sample'
-      ? 'Sample dry run queued. Refresh readiness after it completes, then review it on Overview.'
+      ? 'Sample dry run queued. Refresh readiness after it completes, then open Sample Review for underlying records.'
       : 'Full dry run queued. Refresh readiness after it completes, then review it on Overview.')
   }
 
@@ -465,7 +470,7 @@ export default function SettingsPage() {
           </details>
         </SetupCard>
 
-        <SetupCard number="05" title="Dry run, review, then activate" complete={live} description="Lock the initial date with a dry run, wait for completion, review operational results, then explicitly enable live writes.">
+        <SetupCard number="05" title="Dry run, review, then activate" complete={live} description="Run a sample, correct and recheck underlying records, verify with a fresh sample, then review a full dry run before enabling live writes.">
           <div className="mt-5 grid gap-5 lg:grid-cols-2">
             <div>
               <p className="text-sm font-semibold text-gray-900">Dry run</p>
@@ -476,19 +481,24 @@ export default function SettingsPage() {
                     {busyAction === 'dry-run' ? 'Queueing…' : 'Run sample dry run'}
                   </button>
                 )}
-                {dryRunControls.showRetrySample && (
+                {(dryRunControls.showRetrySample || (newerSampleFailed && !dryRunReady && !live && settings.config.state === 'dry_run' && !dryRunControls.showVerifySample)) && (
                   <button type="button" onClick={() => queueDryRun({ dryRunScope: 'sample' })} disabled={!isAdmin || busy} className={buttonPrimary}>
                     {busyAction === 'dry-run' ? 'Queueing…' : 'Retry sample dry run'}
                   </button>
                 )}
-                {dryRunControls.showSampleAndFull && (<>
+                {dryRunControls.showReview && isAdmin && (
+                  <Link to="/hubspot-to-albi/sample-review" className={buttonPrimary}>Open Sample Review</Link>
+                )}
+                {dryRunControls.showVerifySample && (
                   <button type="button" onClick={() => queueDryRun({ dryRunScope: 'sample' })} disabled={!isAdmin || busy} className={buttonSecondary}>
-                    {busyAction === 'dry-run' ? 'Queueing…' : 'Run sample again'}
+                    {busyAction === 'dry-run' ? 'Queueing…' : 'Run fresh verification sample'}
                   </button>
+                )}
+                {dryRunControls.showFull && (
                   <button type="button" onClick={() => queueDryRun({ dryRunScope: 'full' })} disabled={!isAdmin || busy} className={buttonPrimary}>
                     {busyAction === 'dry-run' ? 'Queueing…' : 'Run full dry run'}
                   </button>
-                </>)}
+                )}
                 {settings.config.state === 'dry_run' && (
                   <button
                     type="button"
@@ -500,10 +510,22 @@ export default function SettingsPage() {
                   >{busyAction === 'readiness-refresh' ? 'Refreshing readiness…' : 'Refresh readiness'}</button>
                 )}
               </div>
+              {newerSampleFailed && (
+                <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-3" role="status">
+                  <p className="text-sm font-semibold text-red-900">Newer sample failed</p>
+                  <p className="mt-1 text-xs text-red-800">{sampleDryRunReady
+                    ? 'The prior completed sample remains available for review. Retry the sample after checking the failed run on Overview.'
+                    : 'No sample has completed yet. Check the failed run on Overview, then retry the sample.'}</p>
+                  <Link to="/hubspot-to-albi" className="mt-2 inline-flex text-xs font-semibold text-red-900 underline focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500">Open Overview</Link>
+                  {isAdmin && sample?.reviewCapable === true && (
+                    <Link to="/hubspot-to-albi/sample-review" className="ml-3 mt-2 inline-flex text-xs font-semibold text-brand-700 underline focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500">Open prior Sample Review</Link>
+                  )}
+                </div>
+              )}
               {sampleDryRunReady && !dryRunReady && (
                 <div className="mt-4 rounded-lg border border-brand-200 bg-brand-50 px-3 py-3">
                   <p className="text-sm font-semibold text-brand-950">Sample completed successfully</p>
-                  <p className="mt-1 text-xs text-brand-800">Finished {settings.lastCompletedSampleDryRun?.finishedAt ? new Date(settings.lastCompletedSampleDryRun.finishedAt).toLocaleString() : 'recently'}. Review it on Overview before running the full history.</p>
+                  <p className="mt-1 text-xs text-brand-800">Finished {settings.lastCompletedSampleDryRun?.finishedAt ? new Date(settings.lastCompletedSampleDryRun.finishedAt).toLocaleString() : 'recently'}. These are the original run totals; individual rechecks update review progress only.</p>
                   {completedSampleDryRunTotals.length > 0 && (
                     <dl className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
                       {completedSampleDryRunTotals.map(total => (
@@ -513,6 +535,19 @@ export default function SettingsPage() {
                         </div>
                       ))}
                     </dl>
+                  )}
+                  <p className="mt-3 text-xs leading-5 text-brand-800">{sample?.reviewCapable !== true
+                    ? 'Run a new sample to create detailed review data.'
+                    : sample.total === 0 && sample.fullDryRunReady
+                      ? 'No underlying records need correction. This fresh sample captured zero review rows; the full dry run is available.'
+                      : sample.needsReview > 0
+                        ? 'Correct records directly in HubSpot or Albi, then individually recheck each record in Sample Review.'
+                        : 'Corrections are clear for this sample. Run a fresh sample to verify them; this sample does not unlock the full dry run.'}</p>
+                  {sample?.reviewCapable === true && sample.total > 0 && (
+                    <>
+                      <p className="mt-2 text-xs text-brand-900">{sample.needsReview} need review · {sample.cleared} cleared · {sample.noLongerInScope} no longer in scope</p>
+                      {isAdmin && !dryRunControls.showReview && <Link to="/hubspot-to-albi/sample-review" className="mt-2 inline-flex text-xs font-semibold text-brand-700 underline focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500">Open Sample Review</Link>}
+                    </>
                   )}
                 </div>
               )}
@@ -541,7 +576,6 @@ export default function SettingsPage() {
                     {completedDryRunTotals.length > 0
                       ? 'Activating confirms the admin reviewed the completed dry-run totals shown above.'
                       : 'Activating confirms the admin reviewed this completed dry run, which reported no outcome totals.'}
-                    {' '}Detailed per-record review is not available yet; it will live on Overview in a later release.
                   </p>
                   <Link to="/hubspot-to-albi" className="mt-3 inline-flex text-sm font-semibold text-brand-700 underline decoration-brand-200 underline-offset-4 hover:decoration-brand-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500">Open Overview</Link>
                 </div>

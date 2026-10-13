@@ -20,7 +20,7 @@ const SAFE_SERVER_MESSAGES = Object.freeze({
   'Conflict page size must be between 1 and 100.': 'Conflict page size must be between 1 and 100.',
   'Company ID is required.': 'Company ID is required.',
   'Choose a sample or full dry run.': 'Choose a sample or full dry run.',
-  'Complete a sample dry run before running the full dry run.': 'Complete a sample dry run before running the full dry run.',
+  'Run a fresh sample with no underlying review items before running the full dry run.': 'Run a fresh sample with no underlying review items before running the full dry run.',
   'Complete option mappings are required.': 'Complete option mappings are required.',
   'Confirm contact and organization defaults and every activity type.': 'Confirm contact and organization defaults and every activity type.',
   'Disable live sync before starting a dry run.': 'Disable live sync before starting a dry run.',

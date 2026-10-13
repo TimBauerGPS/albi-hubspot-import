@@ -175,6 +175,7 @@ test('client exposes actionable fixed endpoint errors and keeps unknown text gen
   const safeEndpointErrors = [
     ['Invalid conflict cursor.', 'Invalid conflict cursor.', 400],
     ['A completed dry run is required before live activation.', 'A completed dry run is required before live activation.', 409],
+    ['Run a fresh sample with no underlying review items before running the full dry run.', 'Run a fresh sample with no underlying review items before running the full dry run.', 409],
     ['Invalid conflict page size.', 'Invalid conflict page size.'],
     ['Invalid overview cursor.', 'Invalid overview cursor.'],
     ['Invalid overview page size.', 'Invalid overview page size.'],

@@ -58,7 +58,7 @@ test('full dry-run readiness selects a fresh completed version-one bounded sampl
     { count: 0, error: null }, data({ id: 'sample-2', review_capture_version: 1 })])
   assert.equal(await repository.hasCleanReviewSampleDryRun('company-1', '2026-10-01T00:00:00Z'), true)
   assert.deepEqual(equalityFilters(calls[0]), [['company_id', 'company-1'], ['mode', 'dry_run'],
-    ['status', 'completed'], ['sample_limit_per_type', 10], ['review_capture_version', 1]])
+    ['status', 'completed'], ['sample_limit_per_type', 10]])
   assert.ok(calls[0].steps.some(step => step[0] === 'gt' && step[1] === 'created_at' && step[2] === '2026-10-01T00:00:00Z'))
   assert.deepEqual(calls[0].steps.filter(step => step[0] === 'order'), [
     ['order', 'created_at', { ascending: false }], ['order', 'id', { ascending: false }],
@@ -76,6 +76,15 @@ test('replacement completion and pruning cannot turn the former sample into clea
   assert.equal(await repository.hasCleanReviewSampleDryRun('company-1', '2026-10-01T00:00:00Z'), false)
   assert.deepEqual(equalityFilters(calls[1]), [['company_id', 'company-1'], ['run_id', 'sample-A']])
   assert.deepEqual(calls[2], calls[0])
+})
+
+test('latest historical bounded sample cannot reuse an older version-one clean sample', async () => {
+  const { repository, calls } = reviewRepositoryFixture()
+  repository.getLatestCompletedSampleDryRun = async () => ({ id: 'new-historical', review_capture_version: null })
+  repository.getCurrentReviewSample = async () => ({ id: 'older-clean', review_capture_version: 1 })
+  repository.countDryRunReviews = async () => 0
+  assert.equal(await repository.hasCleanReviewSampleDryRun('company-1', '2026-10-01T00:00:00Z'), false)
+  assert.equal(calls.length, 0)
 })
 
 test('zero-row readiness requires the same version-one sample to remain current', async () => {
