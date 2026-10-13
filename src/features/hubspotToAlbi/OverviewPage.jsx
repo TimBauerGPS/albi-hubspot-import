@@ -51,7 +51,7 @@ function RunTotals({ run }) {
   )
 }
 
-function ReviewBreakdown({ run }) {
+function ReviewBreakdown({ run, canReview }) {
   const breakdown = presentReviewBreakdown(run)
   if (!breakdown) return null
 
@@ -71,7 +71,13 @@ function ReviewBreakdown({ run }) {
             <ul className="mt-1.5 space-y-1">
               {group.items.map(item => (
                 <li key={item.key} className="flex items-start justify-between gap-4 leading-5">
-                  <span><span className="font-medium text-gray-700">{item.objectLabel}</span><span className="text-gray-500"> · {item.reasonLabel}</span></span>
+                  {canReview && group.key === 'record' && /^(contacts|organizations|companies):/.test(item.key) ? (
+                    <Link to={`/hubspot-to-albi/sample-review?objectType=${item.key.startsWith('contacts:') ? 'contacts' : 'companies'}&reason=${encodeURIComponent(item.key.slice(item.key.indexOf(':') + 1))}`} className="rounded underline focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500">
+                      <span className="font-medium text-gray-700">{item.objectLabel}</span><span className="text-gray-500"> · {item.reasonLabel}</span>
+                    </Link>
+                  ) : (
+                    <span><span className="font-medium text-gray-700">{item.objectLabel}</span><span className="text-gray-500"> · {item.reasonLabel}</span></span>
+                  )}
                   <span className="shrink-0 font-semibold tabular-nums text-gray-900">{item.count}</span>
                 </li>
               ))}
@@ -376,7 +382,7 @@ export default function OverviewPage() {
                     </div>
                     <p className="mt-2 text-sm font-medium text-gray-900">{dateTime(item.started_at || item.created_at)}</p>
                     <div className="mt-2"><RunTotals run={item} /></div>
-                    <ReviewBreakdown run={item} />
+                    <ReviewBreakdown run={item} canReview={isAdmin && item.id === completedSample?.id && item.status === 'completed' && item.reviewCaptureVersion === 1} />
                     {item.mode === 'dry_run' && item.sampleLimitPerType === 10 && item.status === 'completed' && (
                       item.reviewCaptureVersion === 1
                         ? isAdmin && item.id === completedSample?.id && (

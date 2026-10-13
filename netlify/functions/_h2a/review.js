@@ -1,3 +1,4 @@
+import { H2A_REVIEW_REASON_CATALOG, H2A_REVIEW_ERROR_CATEGORIES, H2A_REVIEW_ERROR_CODES } from '../../../shared/h2aReviewReasons.js'
 import { decideContactMatch, decideOrganizationMatch, selectReviewCandidates } from './match.js'
 import { normalizePhone } from './normalize.js'
 import { resolveContactType } from './options.js'
@@ -14,29 +15,14 @@ function frozenSet(values) {
   return Object.freeze(set)
 }
 
-const ERROR_CATEGORIES = frozenSet(['auth', 'permission', 'validation', 'permanent', 'transient', 'rate_limit', 'error'])
-const ERROR_CODES = frozenSet(['pagination_loop', 'malformed_response', 'application_error', 'unsupported_contract', 'timeout', 'network', 'operation_failed'])
+const ERROR_CATEGORIES = frozenSet(H2A_REVIEW_ERROR_CATEGORIES)
+const ERROR_CODES = frozenSet(H2A_REVIEW_ERROR_CODES)
 const REVIEW_OUTCOMES = frozenSet(['still_needs_review', 'safe_to_link', 'safe_to_create', 'source_missing', 'recheck_failed'])
 const EVENT_TYPES = frozenSet(['captured', 'recheck_started', 'still_needs_review', 'cleared', 'no_longer_in_scope', 'recheck_failed'])
 const STATUSES = frozenSet(['needs_review', 'cleared', 'no_longer_in_scope'])
 const EVIDENCE = frozenSet(['existing_mapping', 'email', 'phone', 'mobilePhone', 'name', 'domain', 'address'])
 
-export const REVIEW_REASONS = frozenSet([
-  'existing_mapping', 'unique_exact_match', 'unique_exact_domain', 'name_and_corroboration', 'no_match',
-  'target_already_mapped', 'duplicate_candidates', 'email_phone_disagree', 'unsupported_phone_evidence',
-  'name_only_candidate', 'missing_required_name', 'contradictory_evidence',
-  'albi_organization_update_contract_unverified', 'albi_contact_update_contract_unverified',
-  'nonblank_field_difference', 'organization_fields_require_review', 'contact_fields_require_review',
-  'albi_contact_association_contract_unverified', 'association_contract_unverified',
-  'organization_type_confirmation_required', 'contact_type_confirmation_required', 'activity_type_confirmation_required',
-  'unsupported_international_format', 'invalid_phone_length', 'extension_not_supported',
-  'organization_unresolved', 'multiple_associated_organizations', 'missing_hubspot_company', 'missing_hubspot_contact',
-  'multiple_candidates', 'missing_target', 'unresolved_target', 'dry_run_preview', 'reviewer_skipped',
-  'not_verified_direct_crm_email', 'delivery_reconciled', 'already_delivered',
-  'delivered', 'reconciled', 'stale_attempt', 'retry_scheduled', 'failed',
-  ...REVIEW_OUTCOMES,
-  ...[...ERROR_CATEGORIES].flatMap(category => [...ERROR_CODES].map(code => `${category}:${code}`)),
-])
+export const REVIEW_REASONS = frozenSet(Object.keys(H2A_REVIEW_REASON_CATALOG))
 export const REVIEW_CONFLICT_TYPES = frozenSet([
   'organization_match', 'organization_fields', 'organization_phone', 'contact_match', 'contact_fields',
   'contact_phone', 'configuration', 'association', 'missing_source', 'activity_target',

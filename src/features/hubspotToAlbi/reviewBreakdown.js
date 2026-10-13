@@ -1,5 +1,8 @@
+import { getH2AReviewReason } from '../../../shared/h2aReviewReasons.js'
+
 const OBJECT_LABELS = Object.freeze({
   organizations: 'Organizations',
+  companies: 'Organizations',
   contacts: 'Contacts',
   meetings: 'Meetings',
   calls: 'Calls',
@@ -7,36 +10,6 @@ const OBJECT_LABELS = Object.freeze({
   communications: 'Communications',
   notes: 'Notes',
   other: 'Other records',
-})
-
-const REASON_LABELS = Object.freeze({
-  planned_record_dependency: 'Depends on a record that would be created',
-  missing_target: 'No matching Albi record',
-  multiple_candidates: 'Multiple possible Albi matches',
-  multiple_associated_organizations: 'Multiple associated organizations',
-  missing_hubspot_contact: 'HubSpot contact is missing',
-  missing_hubspot_company: 'HubSpot company is missing',
-  contact_type_confirmation_required: 'Contact type needs confirmation',
-  activity_type_confirmation_required: 'Activity type needs confirmation',
-  organization_type_confirmation_required: 'Organization type needs confirmation',
-  target_already_mapped: 'Albi record is already mapped',
-  duplicate_candidates: 'Possible duplicate records',
-  email_phone_disagree: 'Email and phone point to different records',
-  unsupported_phone_evidence: 'Phone could not be used for matching',
-  name_only_candidate: 'Match is based on name only',
-  missing_required_name: 'A required name is missing',
-  contradictory_evidence: 'Matching evidence conflicts',
-  albi_organization_update_contract_unverified: 'Organization update needs verification',
-  nonblank_field_difference: 'HubSpot and Albi have different values',
-  albi_contact_update_contract_unverified: 'Contact update needs verification',
-  albi_contact_association_contract_unverified: 'Contact organization link needs verification',
-  invalid_phone_length: 'Phone number has an invalid length',
-  unsupported_international_format: 'Phone format is not supported',
-  extension_not_supported: 'Phone extensions are not supported',
-  organization_fields_require_review: 'Related organization fields need review',
-  contact_fields_require_review: 'Related contact fields need review',
-  association_contract_unverified: 'Related contact-organization link needs review',
-  other_review_reason: 'Other review reason',
 })
 
 const GROUP_COPY = Object.freeze({
@@ -58,7 +31,7 @@ function safeEntry(entry) {
   if (!Number.isSafeInteger(entry?.count) || entry.count <= 0) return null
   const kind = entry.kind === 'record' || entry.kind === 'simulation' ? entry.kind : 'activity'
   const objectType = Object.hasOwn(OBJECT_LABELS, entry.objectType) ? entry.objectType : 'other'
-  const reason = Object.hasOwn(REASON_LABELS, entry.reason) ? entry.reason : 'other_review_reason'
+  const reason = getH2AReviewReason(entry.reason).code
   return { kind, objectType, reason, count: entry.count }
 }
 
@@ -83,11 +56,11 @@ export function presentReviewBreakdown(run) {
       .filter(item => item.kind === kind)
       .sort((left, right) => right.count - left.count
         || OBJECT_LABELS[left.objectType].localeCompare(OBJECT_LABELS[right.objectType])
-        || REASON_LABELS[left.reason].localeCompare(REASON_LABELS[right.reason]))
+        || getH2AReviewReason(left.reason).label.localeCompare(getH2AReviewReason(right.reason).label))
       .map(item => ({
         key: `${item.objectType}:${item.reason}`,
         objectLabel: OBJECT_LABELS[item.objectType],
-        reasonLabel: REASON_LABELS[item.reason],
+        reasonLabel: getH2AReviewReason(item.reason).label,
         count: item.count,
       }))
     const total = items.reduce((sum, item) => sum + item.count, 0)

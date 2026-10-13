@@ -1,5 +1,14 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { presentReviewBreakdown } from '../../src/features/hubspotToAlbi/reviewBreakdown.js'
+
+test('breakdown retains the queue label for formerly collapsed review reasons', () => {
+  const breakdown = presentReviewBreakdown({ mode: 'dry_run', sampleLimitPerType: 10, totals: { requires_review: 1 },
+    reviewBreakdown: [{ kind: 'record', objectType: 'contacts', reason: 'organization_unresolved', count: 1 }] })
+  assert.equal(breakdown.groups[0].items[0].reasonLabel, 'Organization needs review')
+  assert.equal(presentSampleReviewItem({ reason: 'organization_unresolved' }).reasonLabel, 'Organization needs review')
+  assert.equal(presentSampleReviewItem({ reason: 'email_phone_disagree' }).reasonLabel, 'Email and phone point to different records')
+})
 import {
   SAMPLE_REVIEW_GUIDANCE,
   SAMPLE_REVIEW_REASON_OPTIONS,

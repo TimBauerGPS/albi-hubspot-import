@@ -17,6 +17,28 @@ import { mountWorkflowPage, renderWorkflowPage } from './ui-render-fixture.mjs'
 const root = new URL('../../src/features/hubspotToAlbi/', import.meta.url)
 const source = name => readFile(new URL(name, root), 'utf8')
 
+test('Overview reason rows open the queue filtered to that contact reason', async () => {
+  const run = { id: 'sample-filter', mode: 'dry_run', status: 'completed', sampleLimitPerType: 10, reviewCaptureVersion: 1,
+    totals: { requires_review: 1 }, reviewBreakdown: [{ kind: 'record', objectType: 'contacts', reason: 'auth:network', count: 1 }] }
+  const html = await renderWorkflowPage('OverviewPage', { summary: { completedSampleRun: run }, runs: [run] }, overviewBindings)
+  assert.match(html, /href="\/hubspot-to-albi\/sample-review\?objectType=contacts&amp;reason=auth%3Anetwork"/)
+})
+
+test('Overview organization reason links use companies and unknown object types stay plain text', async () => {
+  const run = { id: 'sample-organizations', mode: 'dry_run', status: 'completed', sampleLimitPerType: 10, reviewCaptureVersion: 1,
+    totals: { requires_review: 3 }, reviewBreakdown: [
+      { kind: 'record', objectType: 'organizations', reason: 'missing_target', count: 1 },
+      { kind: 'record', objectType: 'companies', reason: 'missing_hubspot_company', count: 1 },
+      { kind: 'record', objectType: 'unknown', reason: 'missing_required_name', count: 1 },
+    ] }
+  const html = await renderWorkflowPage('OverviewPage', { summary: { completedSampleRun: run }, runs: [run] }, overviewBindings)
+  assert.match(html, /href="\/hubspot-to-albi\/sample-review\?objectType=companies&amp;reason=missing_target"/)
+  assert.match(html, /href="\/hubspot-to-albi\/sample-review\?objectType=companies&amp;reason=missing_hubspot_company"/)
+  assert.doesNotMatch(html, /href="[^\"]*reason=missing_required_name"/)
+  const member = await renderWorkflowPage('OverviewPage', { summary: { completedSampleRun: run }, runs: [run] }, overviewBindings, { isAdmin: false })
+  assert.doesNotMatch(member, /href="[^\"]*reason=/)
+})
+
 test('overview totals use fixed dry-run and live vocabularies and reject unsafe values', () => {
   assert.deepEqual(presentRunTotals({ mode: 'live', totals: {
     created: 2, delivered: 3, failed: 0, raw_error: 8, updated: -1, linked: 1.5,
