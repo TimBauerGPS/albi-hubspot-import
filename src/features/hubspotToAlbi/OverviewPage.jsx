@@ -106,8 +106,9 @@ export default function OverviewPage() {
   const fetchFirstPage = useCallback(signal => getH2AOverview(session, companyId, { limit: 15, signal }), [companyId, session])
 
   const refreshFirstPage = useCallback(async signal => {
+    const request = ++requestRevision.current
     const value = await fetchFirstPage(signal)
-    if (tenantKeyRef.current === tenantKey) {
+    if (!signal?.aborted && requestRevision.current === request && tenantKeyRef.current === tenantKey) {
       setOverview(current => mergeOverviewRefresh(current, value))
       setLastUpdatedAt(new Date().toISOString())
     }
@@ -233,12 +234,15 @@ export default function OverviewPage() {
     const controller = new AbortController()
     mutationControllers.current.add(controller)
     const startedFor = tenantKey
+    const request = ++requestRevision.current
     setLoadingMore(true)
     setActionError('')
     try {
       const page = await getH2AOverview(session, companyId, { cursor: overview.nextCursor, limit: 15, signal: controller.signal })
-      if (tenantKeyRef.current !== startedFor) return
-      setOverview(current => ({ ...current, runs: [...current.runs, ...page.runs], nextCursor: page.nextCursor }))
+      if (controller.signal.aborted || requestRevision.current !== request || tenantKeyRef.current !== startedFor) return
+      setOverview(current => ({ ...current, summary: page.summary,
+        runs: [...new Map([...current.runs, ...page.runs].map(run => [run.id, run])).values()],
+        nextCursor: page.nextCursor }))
     } catch (cause) {
       if (cause?.name !== 'AbortError' && tenantKeyRef.current === startedFor) setActionError(cause.message)
     } finally {

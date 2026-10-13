@@ -27,3 +27,55 @@ export async function renderWorkflowPage(name, data, bindings, { isAdmin = true 
   const component = vm.runInNewContext(`${code}\n${name}`, context)
   return renderToStaticMarkup(createElement(component))
 }
+
+// Run real page handlers with persistent hook state and effect scheduling, doubling only HTTP.
+export async function mountWorkflowPage(name, bindings) {
+  const source = await readFile(new URL(`../../src/features/hubspotToAlbi/${name}.jsx`, import.meta.url), 'utf8')
+  const code = transformSync(source.replace(/^import[\s\S]*?from ['"][^'"]+['"]\s*$/gm, '')
+    .replace('export default function', 'function'), { loader: 'jsx', jsxFactory: 'h', jsxFragment: 'Fragment' }).code
+  const slots = [], effects = [], pending = [], requests = []
+  let index = 0, tree, dirty = true
+  const context = { session: { access_token: 'token' }, companyId: 'company-1', companyName: 'Example',
+    isAdmin: true, tenantRevision: 0, completeTenantTransition() {} }
+  const useState = initial => {
+    const slot = index++
+    if (!(slot in slots)) slots[slot] = typeof initial === 'function' ? initial() : initial
+    return [slots[slot], value => { slots[slot] = typeof value === 'function' ? value(slots[slot]) : value; dirty = true }]
+  }
+  const useRef = initial => { const slot = index++; return slots[slot] ??= { current: initial } }
+  const useEffect = (run, deps) => {
+    const slot = index++, prior = effects[slot]
+    if (!prior || !deps || deps.some((value, i) => !Object.is(value, prior.deps[i]))) {
+      pending.push(() => { prior?.cleanup?.(); effects[slot] = { deps, cleanup: run() } })
+    }
+  }
+  const useCallback = (callback, deps) => {
+    const ref = useRef()
+    if (!ref.current || deps.some((value, i) => !Object.is(value, ref.current.deps[i]))) ref.current = { callback, deps }
+    return ref.current.callback
+  }
+  const h = (type, props, ...children) => ({ type: typeof type === 'function' ? type.name : type,
+    props: props ?? {}, children: children.flat(Infinity) })
+  const component = vm.runInNewContext(`${code}\n${name}`, { ...bindings, h, Fragment: 'fragment',
+    useState, useRef, useEffect, useCallback, useMemo: callback => callback(), useOutletContext: () => context,
+    Link: function Link() {}, Date, Intl, Set, Map, AbortController,
+    getH2AOverview: (...args) => { requests.push(args); return bindings.getH2AOverview(...args) },
+  })
+  async function flush() {
+    for (let attempt = 0; attempt < 16; attempt++) {
+      if (dirty) { dirty = false; index = 0; tree = component(); while (pending.length) pending.shift()() }
+      await Promise.resolve(); await Promise.resolve()
+    }
+  }
+  const nodes = (root = tree) => {
+    const result = []
+    const visit = node => { if (!node || typeof node !== 'object') return; result.push(node); node.children?.forEach(visit) }
+    visit(root)
+    return result
+  }
+  await flush()
+  return { context, requests, flush, nodes, state: () => slots[0], text: () => JSON.stringify(tree),
+    rerender: () => { dirty = true; return flush() },
+    find: (type, text) => nodes().find(node => node.type === type && JSON.stringify(node.children).includes(text)),
+    unmount: () => effects.forEach(effect => effect?.cleanup?.()) }
+}

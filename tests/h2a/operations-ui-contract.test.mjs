@@ -12,7 +12,7 @@ import {
   proposedConflictFields,
 } from '../../src/features/hubspotToAlbi/operations.js'
 import { presentReviewBreakdown } from '../../src/features/hubspotToAlbi/reviewBreakdown.js'
-import { renderWorkflowPage } from './ui-render-fixture.mjs'
+import { mountWorkflowPage, renderWorkflowPage } from './ui-render-fixture.mjs'
 
 const root = new URL('../../src/features/hubspotToAlbi/', import.meta.url)
 const source = name => readFile(new URL(name, root), 'utf8')
@@ -247,6 +247,103 @@ test('superseded review-capable history rows cannot link to a different current 
   const current = { ...prior, id: 'current' }
   const html = await renderWorkflowPage('OverviewPage', { summary: { completedSampleRun: current }, runs: [prior] }, overviewBindings)
   assert.doesNotMatch(html, /href="\/hubspot-to-albi\/sample-review"/)
+})
+
+const sampleRun = id => ({ id, mode: 'dry_run', status: 'completed', sampleLimitPerType: 10, reviewCaptureVersion: 1 })
+const sampleOverview = (completed, runs = [completed], extra = {}) => ({
+  summary: { completedSampleRun: completed, latestSampleRun: completed }, runs, nextCursor: 'history-page', ...extra,
+})
+const deferredOverview = () => { let resolve; const promise = new Promise(done => { resolve = done }); return { promise, resolve } }
+const reviewLinks = (ui, runId) => ui.nodes(ui.nodes().find(node => node.type === 'li' && node.props.key === runId))
+  .filter(node => node.type === 'Link' && node.props.to === '/hubspot-to-albi/sample-review')
+
+test('pagination updates current sample metadata and failure notice while deduplicating history', async () => {
+  const sampleA = sampleRun('sample-A'), sampleB = sampleRun('sample-B')
+  const older = { id: 'older-history', mode: 'live', status: 'completed' }
+  const failed = { ...sampleRun('sample-C-failed'), status: 'failed' }
+  const ui = await mountWorkflowPage('OverviewPage', { ...overviewBindings,
+    getH2AOverview: async (_session, _company, options) => options.cursor
+      ? sampleOverview(sampleB, [older, sampleA, sampleB], { summary: { completedSampleRun: sampleB, latestSampleRun: failed }, nextCursor: 'next-history' })
+      : sampleOverview(sampleA, [sampleA, older]),
+  })
+  assert.equal(reviewLinks(ui, 'sample-A').length, 1)
+  await ui.find('button', 'Load more').props.onClick(); await ui.flush()
+  assert.equal(ui.state().summary.completedSampleRun.id, 'sample-B')
+  assert.equal(ui.state().summary.latestSampleRun.id, 'sample-C-failed')
+  assert.deepEqual([...ui.state().runs].map(run => run.id), ['sample-A', 'older-history', 'sample-B'])
+  assert.equal(ui.state().nextCursor, 'next-history')
+  assert.equal(reviewLinks(ui, 'sample-A').length, 0)
+  assert.equal(reviewLinks(ui, 'sample-B').length, 1)
+  assert.match(ui.text(), /Newer sample failed/)
+  ui.unmount()
+})
+
+test('late pagination after a tenant switch updates neither history nor sample summary', async () => {
+  const oldPage = deferredOverview(), sampleA = sampleRun('tenant-1-sample'), sampleB = sampleRun('obsolete-page'), sampleC = sampleRun('tenant-2-sample')
+  const ui = await mountWorkflowPage('OverviewPage', { ...overviewBindings,
+    getH2AOverview: async (_session, company, options) => company === 'company-2'
+      ? sampleOverview(sampleC) : options.cursor ? oldPage.promise : sampleOverview(sampleA),
+  })
+  const pending = ui.find('button', 'Load more').props.onClick(); await ui.flush()
+  const oldSignal = ui.requests.at(-1)[2].signal
+  ui.context.companyId = 'company-2'; ui.context.tenantRevision = 1; await ui.rerender()
+  oldPage.resolve(sampleOverview(sampleB, [sampleB], { summary: { completedSampleRun: sampleB, latestSampleRun: { ...sampleB, status: 'failed' } } }))
+  await pending; await ui.flush()
+  assert.equal(oldSignal.aborted, true)
+  assert.equal(ui.state().summary.completedSampleRun.id, 'tenant-2-sample')
+  assert.deepEqual([...ui.state().runs].map(run => run.id), ['tenant-2-sample'])
+  assert.doesNotMatch(ui.text(), /obsolete-page|Newer sample failed/)
+  ui.unmount()
+})
+
+test('pagination aborted on unmount cannot publish its late history or sample summary', async () => {
+  const page = deferredOverview(), sampleA = sampleRun('sample-A'), sampleB = sampleRun('late-sample-B')
+  const ui = await mountWorkflowPage('OverviewPage', { ...overviewBindings,
+    getH2AOverview: async (_session, _company, options) => options.cursor ? page.promise : sampleOverview(sampleA),
+  })
+  const pending = ui.find('button', 'Load more').props.onClick(); await ui.flush()
+  const signal = ui.requests.at(-1)[2].signal
+  ui.unmount(); page.resolve(sampleOverview(sampleB)); await pending; await ui.flush()
+  assert.equal(signal.aborted, true)
+  assert.equal(ui.state().summary.completedSampleRun.id, 'sample-A')
+  assert.deepEqual([...ui.state().runs].map(run => run.id), ['sample-A'])
+})
+
+test('older pagination cannot overwrite the current sample observed by a newer refresh', async () => {
+  const page = deferredOverview(), sampleA = sampleRun('sample-A'), sampleB = sampleRun('refreshed-sample-B')
+  let first = true
+  const ui = await mountWorkflowPage('OverviewPage', { ...overviewBindings,
+    getH2AOverview: async (_session, _company, options) => {
+      if (options.cursor) return page.promise
+      const sample = first ? sampleA : sampleB; first = false; return sampleOverview(sample)
+    },
+  })
+  const pending = ui.find('button', 'Load more').props.onClick(); await ui.flush()
+  await ui.find('button', 'Refresh').props.onClick(); await ui.flush()
+  page.resolve(sampleOverview(sampleA, [{ id: 'obsolete-history' }])); await pending; await ui.flush()
+  assert.equal(ui.state().summary.completedSampleRun.id, 'refreshed-sample-B')
+  assert.equal(ui.state().runs.some(run => run.id === 'obsolete-history'), false)
+  assert.equal(reviewLinks(ui, 'sample-A').length, 0)
+  ui.unmount()
+})
+
+test('older refresh cannot overwrite current sample metadata from newer pagination', async () => {
+  const refresh = deferredOverview(), sampleA = sampleRun('sample-A'), sampleB = sampleRun('obsolete-refresh-B'), sampleC = sampleRun('page-sample-C')
+  let first = true
+  const ui = await mountWorkflowPage('OverviewPage', { ...overviewBindings,
+    getH2AOverview: async (_session, _company, options) => {
+      if (options.cursor) return sampleOverview(sampleC)
+      if (!first) return refresh.promise
+      first = false; return sampleOverview(sampleA)
+    },
+  })
+  const pending = ui.find('button', 'Refresh').props.onClick(); await ui.flush()
+  await ui.find('button', 'Load more').props.onClick(); await ui.flush()
+  refresh.resolve(sampleOverview(sampleB)); await pending; await ui.flush()
+  assert.equal(ui.state().summary.completedSampleRun.id, 'page-sample-C')
+  assert.equal(ui.state().runs.some(run => run.id === 'obsolete-refresh-B'), false)
+  assert.equal(reviewLinks(ui, 'sample-A').length, 0)
+  ui.unmount()
 })
 
 test('conflict queue exposes count, focused refresh, pagination, and member read-only mode', async () => {
