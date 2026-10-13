@@ -115,7 +115,7 @@ export default function SampleReviewPage() {
   }, [companyId, session, tenantKey, selectedId, detailRetry, replaceItem])
 
   async function loadMore() {
-    if (!nextCursor || loadingMore) return
+    if (!nextCursor || loadingMore || recheckLock.current) return
     const controller = new AbortController()
     controllers.current.add(controller)
     const request = requestRevision.current
@@ -154,10 +154,16 @@ export default function SampleReviewPage() {
 
   async function handleRecheck() {
     if (!detail?.updatedAt || detail.id !== selectedId || recheckLock.current) return
+    // Recheck owns a new generation so prior pages cannot restore stale
+    // progress. Keep the current queue and cursor for a later pagination retry.
+    const request = ++requestRevision.current
+    ++detailRevision.current
+    for (const pending of controllers.current) pending.abort()
+    controllers.current.clear()
+    setLoadingMore(false); setDetailLoading(false)
     const controller = new AbortController()
     controllers.current.add(controller)
     recheckLock.current = controller
-    const request = requestRevision.current
     const startedFor = tenantKey
     const reviewId = detail.id
     const current = () => !controller.signal.aborted && requestRevision.current === request && tenantKeyRef.current === startedFor
@@ -245,7 +251,7 @@ export default function SampleReviewPage() {
                     <p className="mt-2 break-all text-xs text-gray-600">HubSpot ID: {review.sourceId}</p><p className="mt-1 text-xs text-gray-500">Last recheck: {recheckTime(review.lastRecheckedAt)}</p>
                   </button></li>
                 })}</ol>
-                {nextCursor && <div className="border-t border-gray-100 px-4 py-3"><button type="button" onClick={loadMore} disabled={loadingMore} className={`${secondaryButton} w-full`}>{loadingMore ? 'Loading…' : 'Load more'}</button></div>}
+                {nextCursor && <div className="border-t border-gray-100 px-4 py-3"><button type="button" onClick={loadMore} disabled={loadingMore || Boolean(busyId)} className={`${secondaryButton} w-full`}>{loadingMore ? 'Loading…' : 'Load more'}</button></div>}
               </aside>
               {detailLoading ? <section className="rounded-xl border border-gray-200 bg-white px-5 py-10 text-sm text-gray-600" role="status">Loading selected record…</section>
                 : detailError ? <section className="rounded-xl border border-red-200 bg-red-50 px-5 py-6" role="alert"><h3 className="font-semibold text-red-900">Record could not be loaded</h3><p className="mt-1 text-sm text-red-800">{detailError}</p><button type="button" className={`${secondaryButton} mt-3`} onClick={() => setDetailRetry(value => value + 1)}>Retry loading record</button></section>

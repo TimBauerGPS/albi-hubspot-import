@@ -220,9 +220,9 @@ test('unique capture replay updates the same tenant/run/source identity and ensu
 })
 
 // State lives at the external database boundary; repository capture/replay and
-// compensation run unmodified. The index behavior is separately pinned in SQL.
-function durableCaptureFixture({ eventFailure = false, deleteFailure = false } = {}) {
-  let stored = null, failEvent = eventFailure, failDelete = deleteFailure
+// retry run unmodified. The index behavior is separately pinned in SQL.
+function durableCaptureFixture({ eventFailure = false, delayedEventFailure = null } = {}) {
+  let stored = null, failEvent = eventFailure, delayedFailure = delayedEventFailure
   const events = [], deletes = [], calls = []
   const repository = createH2ARepository({
     from(table) {
@@ -234,6 +234,7 @@ function durableCaptureFixture({ eventFailure = false, deleteFailure = false } =
         if (table === 'h2a_dry_run_review_events') {
           assert.equal(operation, 'insert')
           assert.equal(payload.company_id, 'company-1'); assert.equal(payload.review_id, REVIEW_ID)
+          if (delayedFailure) { const pending = delayedFailure; delayedFailure = null; pending.started(); return pending.promise }
           if (failEvent) { failEvent = false; return { error: { code: '08006', message: 'event provider secret' } } }
           if (events.length) return { error: { code: '23505', constraint: 'h2a_dry_review_events_captured_once_idx' } }
           events.push({ id: 'event-1', ...payload }); return data(events[0])
@@ -248,7 +249,6 @@ function durableCaptureFixture({ eventFailure = false, deleteFailure = false } =
         if (operation === 'update') { stored = { ...stored, ...payload }; return data(stored) }
         if (operation === 'delete') {
           deletes.push(filters)
-          if (failDelete) { failDelete = false; return { error: { message: 'cleanup provider secret' } } }
           stored = null; events.length = 0; return data(null)
         }
         return data(stored)
@@ -261,16 +261,34 @@ function durableCaptureFixture({ eventFailure = false, deleteFailure = false } =
   return { repository, events, deletes, calls, row: () => stored }
 }
 
-test('retry repairs the captured event after both event insertion and compensation deletion fail', async () => {
-  const f = durableCaptureFixture({ eventFailure: true, deleteFailure: true })
+test('failed initial captured-event insertion retains its bounded row until retry repairs the audit', async () => {
+  const f = durableCaptureFixture({ eventFailure: true })
   await assert.rejects(() => f.repository.recordDryRunReview('company-1', reviewRow),
     error => error.message === 'Review capture event was not recorded')
-  assert.ok(f.row()); assert.equal(f.events.length, 0)
+  assert.ok(f.row()); assert.equal(f.events.length, 0); assert.equal(f.deletes.length, 0)
   const repaired = await f.repository.recordDryRunReview('company-1', reviewRow)
   assert.equal(repaired.id, REVIEW_ID); assert.equal(f.events.length, 1)
   assert.equal(f.events[0].event_type, 'captured')
   await f.repository.recordDryRunReview('company-1', reviewRow)
-  assert.equal(f.events.length, 1); assert.equal(f.deletes.length, 1)
+  assert.equal(f.events.length, 1); assert.equal(f.deletes.length, 0)
+})
+
+test('a delayed inserter event failure cannot delete a concurrent replay repair that already succeeded', async () => {
+  let releaseFailure, eventStarted
+  const started = new Promise(resolve => { eventStarted = resolve })
+  const f = durableCaptureFixture({ delayedEventFailure: {
+    started: eventStarted, promise: new Promise(resolve => { releaseFailure = resolve }),
+  } })
+  const inserter = f.repository.recordDryRunReview('company-1', reviewRow)
+  const rejected = assert.rejects(inserter, error => error.message === 'Review capture event was not recorded')
+  await started
+  const replay = await f.repository.recordDryRunReview('company-1', reviewRow)
+  assert.equal(replay.id, REVIEW_ID); assert.ok(f.row()); assert.equal(f.events.length, 1)
+  releaseFailure({ error: { code: '08006', message: 'event provider secret' } })
+  await rejected
+  assert.ok(f.row()); assert.equal(f.events.length, 1); assert.equal(f.deletes.length, 0)
+  await f.repository.recordDryRunReview('company-1', reviewRow)
+  assert.equal(f.events.length, 1)
 })
 
 test('concurrent and repeated capture attempts retain one row and one captured audit event', async () => {
@@ -292,15 +310,13 @@ test('only the captured-event unique index conflict counts as repaired and repla
   }
 })
 
-test('failed captured-event insertion deletes only the just-inserted tenant/run/review and fails safely', async () => {
-  for (const cleanup of [data(null), { error: { message: 'cleanup provider secret' } }]) {
-    const { repository, calls } = reviewRepositoryFixture([data(reviewRow), data(reviewRow),
-      { error: { code: '08006', message: 'event provider secret' } }, cleanup])
-    await assert.rejects(() => repository.recordDryRunReview('company-1', reviewRow),
-      error => error.message === 'Review capture event was not recorded')
-    assert.deepEqual(calls[3], { table: 'h2a_dry_run_reviews', steps: [ ['delete'],
-      ['eq', 'company_id', 'company-1'], ['eq', 'run_id', 'sample-2'], ['eq', 'id', REVIEW_ID] ] })
-  }
+test('failed captured-event insertion retains the row and propagates only fixed safe failure text', async () => {
+  const { repository, calls } = reviewRepositoryFixture([data(reviewRow), data(reviewRow),
+    { error: { code: '08006', message: 'event provider secret' } }])
+  await assert.rejects(() => repository.recordDryRunReview('company-1', reviewRow),
+    error => error.message === 'Review capture event was not recorded')
+  assert.equal(calls.length, 3)
+  assert.equal(calls.some(call => call.steps.some(step => step[0] === 'delete')), false)
 })
 
 test('unique violation without a matching source identity is rejected without updating or recording an event', async () => {

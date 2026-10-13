@@ -120,16 +120,17 @@ test('pagination publishes refreshed progress with the same sample and preserves
 })
 
 test('sample replacement during pagination clears old evidence and refetches the new first page', async () => {
-  const firstB = deferred(), oldRecheck = deferred(); let firstPages = 0
+  const firstB = deferred(), oldDetail = deferred(); let firstPages = 0
   const sampleB = { id: 'sample-B', reviewCaptureVersion: 1, historical: false }
   const bRow = { ...row('review-B'), runId: 'sample-B', displayName: 'New Sample Person' }
   const ui = await mount({ getH2ADryRunReviews: (_s, _c, filters) => filters.cursor
     ? Promise.resolve(page([{ ...bRow, id: 'cursor-B' }], { sample: sampleB, nextCursor: 'cursor-B-next' }))
-    : ++firstPages === 1 ? Promise.resolve(page([row('review-A')], { nextCursor: 'cursor-A' })) : firstB.promise,
-    getH2ADryRunReview: (_s, _c, id) => Promise.resolve({ item: { ...full(id), runId: id === 'review-B' ? 'sample-B' : 'sample-1' } }),
-    recheckH2ADryRunReview: () => oldRecheck.promise })
-  const recheck = ui.detail().props.onRecheck(); await ui.flush()
-  const oldSignal = ui.calls.find(call => call.name === 'recheckH2ADryRunReview').args[3].signal
+    : ++firstPages === 1 ? Promise.resolve(page([row('review-A'), row('review-A2')], { nextCursor: 'cursor-A' })) : firstB.promise,
+    getH2ADryRunReview: (_s, _c, id) => id === 'review-A2' ? oldDetail.promise
+      : Promise.resolve({ item: { ...full(id), runId: id === 'review-B' ? 'sample-B' : 'sample-1' } }) })
+  ui.nodes().filter(node => node.type === 'button' && JSON.stringify(node.children).includes('HubSpot ID:'))[1].props.onClick()
+  await ui.flush()
+  const oldSignal = ui.calls.filter(call => call.name === 'getH2ADryRunReview').at(-1).args[3].signal
   await ui.find('button', 'Load more').props.onClick(); await ui.flush()
   assert.equal(ui.detail(), undefined)
   assert.doesNotMatch(ui.text(), /review-A|cursor-B|Alex Example/)
@@ -138,13 +139,83 @@ test('sample replacement during pagination clears old evidence and refetches the
   assert.equal(ui.calls.filter(call => call.name === 'getH2ADryRunReviews').at(-1).args[2].cursor, undefined)
   firstB.resolve(page([bRow], { sample: sampleB, progress: { ...progress, total: 1, needsReview: 1 }, nextCursor: 'first-B-next' }))
   await ui.flush()
-  oldRecheck.resolve({ item: { ...full('review-A'), status: 'cleared' }, progress: { ...progress, needsReview: 0 } })
-  await recheck; await ui.flush()
+  oldDetail.resolve({ item: full('review-A2') }); await ui.flush()
   assert.equal(ui.detail().props.item.id, 'review-B')
   assert.equal(ui.detail().props.item.runId, 'sample-B')
   assert.doesNotMatch(ui.text(), /review-A|cursor-B|Corrections are clear/)
   ui.unmount()
 })
+
+for (const first of ['recheck', 'pagination']) {
+  test(`recheck cancels prior same-sample pagination when ${first} completes first and preserves a retryable cursor`, async () => {
+    const more = deferred(), rechecked = deferred(); let pages = 0
+    const updatedProgress = { ...progress, needsReview: 0, cleared: 2 }
+    const ui = await mount({ getH2ADryRunReviews: (_s, _c, filters) => !filters.cursor
+      ? Promise.resolve(page([row()], { nextCursor: 'original-cursor' }))
+      : ++pages === 1 ? more.promise : Promise.resolve(page([row('new-page')], { progress: updatedProgress })),
+      recheckH2ADryRunReview: () => rechecked.promise })
+    const loadMore = ui.find('button', 'Load more').props.onClick
+    const pagination = loadMore(); await ui.flush()
+    const pageSignal = ui.calls.filter(call => call.name === 'getH2ADryRunReviews').at(-1).args[2].signal
+    const action = ui.detail().props.onRecheck(); await ui.flush()
+    const recheckSignal = ui.calls.find(call => call.name === 'recheckH2ADryRunReview').args[3].signal
+    const finishPage = async () => { more.resolve(page([row('stale-page')], { nextCursor: 'stale-cursor' })); await pagination; await ui.flush() }
+    const finishRecheck = async () => { rechecked.resolve({ item: { ...full(), status: 'cleared' }, progress: updatedProgress }); await action; await ui.flush() }
+    if (first === 'recheck') { await finishRecheck(); await finishPage() } else { await finishPage(); await finishRecheck() }
+    assert.equal(ui.detail().props.item.status, 'cleared')
+    assert.deepEqual(ui.nodes().filter(node => node.type === 'dd').map(node => node.children[0]), [0, 2, 0])
+    assert.match(ui.text(), /Corrections are clear for this sample/)
+    assert.doesNotMatch(ui.text(), /stale-page/)
+    assert.equal(pageSignal.aborted, true); assert.equal(recheckSignal.aborted, false)
+    assert.equal(ui.find('button', 'Load more').props.disabled, false)
+    await ui.find('button', 'Load more').props.onClick(); await ui.flush()
+    assert.equal(ui.calls.filter(call => call.name === 'getH2ADryRunReviews').at(-1).args[2].cursor, 'original-cursor')
+    assert.match(ui.text(), /new-page/)
+    ui.unmount()
+  })
+}
+
+test('a saved Load more handler cannot start pagination during recheck and the control recovers afterward', async () => {
+  const rechecked = deferred()
+  const ui = await mount({ getH2ADryRunReviews: () => Promise.resolve(page([row()], { nextCursor: 'next' })),
+    recheckH2ADryRunReview: () => rechecked.promise })
+  const loadMore = ui.find('button', 'Load more').props.onClick
+  const action = ui.detail().props.onRecheck(); await ui.flush()
+  await loadMore(); await ui.flush()
+  assert.equal(ui.calls.filter(call => call.name === 'getH2ADryRunReviews').length, 1)
+  assert.equal(ui.find('button', 'Load more').props.disabled, true)
+  rechecked.resolve({ item: full(), progress }); await action; await ui.flush()
+  assert.equal(ui.find('button', 'Load more').props.disabled, false)
+  ui.unmount()
+})
+
+for (const status of [502, 409]) {
+  test(`recheck ${status} cancels stale pagination while retaining evidence, progress and the retryable cursor`, async () => {
+    const more = deferred(); let pages = 0, detailReads = 0
+    const ui = await mount({ getH2ADryRunReviews: (_s, _c, filters) => !filters.cursor
+      ? Promise.resolve(page([row()], { nextCursor: 'original-cursor' }))
+      : ++pages === 1 ? more.promise : Promise.resolve(page([row('retried-page')])),
+      getH2ADryRunReview: () => Promise.resolve({ item: { ...full(), updatedAt: ++detailReads === 1
+        ? '2026-10-12T12:00:00.000Z' : '2026-10-12T12:02:00.000Z' } }),
+      recheckH2ADryRunReview: () => Promise.reject(Object.assign(new Error('Unable to recheck this sample review.'), { status })) })
+    const pagination = ui.find('button', 'Load more').props.onClick(); await ui.flush()
+    const signal = ui.calls.filter(call => call.name === 'getH2ADryRunReviews').at(-1).args[2].signal
+    await ui.detail().props.onRecheck(); await ui.flush()
+    more.resolve(page([row('stale-page')], { progress: { ...progress, needsReview: 999 }, nextCursor: 'stale-cursor' }))
+    await pagination; await ui.flush()
+    assert.equal(ui.detail().props.item.id, 'review-1')
+    assert.deepEqual(ui.nodes().filter(node => node.type === 'dd').map(node => node.children[0]), [2, 0, 0])
+    assert.equal(signal.aborted, true)
+    assert.match(ui.text(), status === 409 ? /changed/ : /Recheck failed/)
+    assert.equal(ui.detail().props.item.updatedAt, status === 409 ? '2026-10-12T12:02:00.000Z' : '2026-10-12T12:00:00.000Z')
+    assert.doesNotMatch(ui.text(), /stale-page/)
+    assert.equal(ui.find('button', 'Load more').props.disabled, false)
+    await ui.find('button', 'Load more').props.onClick(); await ui.flush()
+    assert.equal(ui.calls.filter(call => call.name === 'getH2ADryRunReviews').at(-1).args[2].cursor, 'original-cursor')
+    assert.match(ui.text(), /retried-page/)
+    ui.unmount()
+  })
+}
 
 for (const transition of ['filter', 'tenant', 'unmount']) {
   test(`stale replacement pagination after ${transition} cannot reset the current queue or start another fetch`, async () => {

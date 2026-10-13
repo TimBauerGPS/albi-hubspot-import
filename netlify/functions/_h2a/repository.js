@@ -210,14 +210,8 @@ export function createH2ARepository(supabase) {
         if (!event) throw new Error('Review capture event was not recorded')
       } catch (error) {
         if (!capturedEventAlreadyExists(error)) {
-          // Compensate only this call's new row. Replays repair a retained row's
-          // missing audit event, protected against duplicates by the partial index.
-          if (!inserted?.error) {
-            try {
-              checked(await supabase.from('h2a_dry_run_reviews').delete().eq('company_id', companyId)
-                .eq('run_id', input.run_id).eq('id', review.id))
-            } catch { /* The capture must still fail if compensation is unavailable. */ }
-          }
+          // Retain the bounded row for replay repair. Deleting it could erase
+          // a captured event that a concurrent replay has already ensured.
           throw new Error('Review capture event was not recorded')
         }
       }
