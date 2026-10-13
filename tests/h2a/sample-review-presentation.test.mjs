@@ -35,8 +35,8 @@ test('detail presentation allowlists direct identity fields and fixed side-by-si
     sourceSnapshot: {
       id: 'hs-1', fullName: 'Ada Lovelace', firstName: 'Ada', lastName: 'Lovelace', email: 'ada@example.test',
       phoneNumber: '555-0100', mobileNumber: '555-0101', organizationId: 'hs-company', organizationName: 'Analytical Engines',
-      domain: 'example.test', address1: '1 Main St', address2: 'Suite 2', city: 'London', state: 'LN', zipcode: 'N1', country: 'UK',
-      jobTitle: 'SECRET FIELD', notes: 'PRIVATE',
+      domain: 'example.test', jobTitle: 'Engineer', address1: '1 Main St', address2: 'Suite 2', city: 'London', state: 'LN', zipcode: 'N1', country: 'UK',
+      notes: 'PRIVATE',
     },
     proposedChanges: { conflicts: { email: { current: 'ada@albi.test', proposed: 'ada@example.test' }, notes: { current: 'SECRET', proposed: 'SECRET' } },
       updates: { jobTitle: 'SECRET' }, unchanged: ['city', 'notes'] },
@@ -51,7 +51,7 @@ test('detail presentation allowlists direct identity fields and fixed side-by-si
   assert.deepEqual(presented.source, {
     id: 'hs-1', fullName: 'Ada Lovelace', firstName: 'Ada', lastName: 'Lovelace', email: 'ada@example.test',
     phoneNumber: '555-0100', mobileNumber: '555-0101', organizationId: 'hs-company', organizationName: 'Analytical Engines',
-    domain: 'example.test', address1: '1 Main St', address2: 'Suite 2', city: 'London', state: 'LN', zipcode: 'N1', country: 'UK',
+    domain: 'example.test', jobTitle: 'Engineer', address1: '1 Main St', address2: 'Suite 2', city: 'London', state: 'LN', zipcode: 'N1', country: 'UK',
   })
   assert.equal(presented.candidates[0].id, 'albi-1')
   assert.deepEqual(presented.candidates[0].comparisons, [
@@ -66,6 +66,7 @@ test('detail presentation allowlists direct identity fields and fixed side-by-si
     { key: 'organizationId', label: 'Organization ID', hubspot: 'hs-company', albi: 'org-1' },
     { key: 'organizationName', label: 'Organization', hubspot: 'Analytical Engines', albi: 'Engines Ltd' },
     { key: 'domain', label: 'Domain', hubspot: 'example.test', albi: 'albi.test' },
+    { key: 'jobTitle', label: 'Job title', hubspot: 'Engineer', albi: 'Not provided' },
     { key: 'address1', label: 'Address', hubspot: '1 Main St', albi: '2 High St' },
     { key: 'address2', label: 'Address line 2', hubspot: 'Suite 2', albi: 'Floor 3' },
     { key: 'city', label: 'City', hubspot: 'London', albi: 'London' },
@@ -78,6 +79,16 @@ test('detail presentation allowlists direct identity fields and fixed side-by-si
   assert.deepEqual(presented.proposedChanges, [
     { key: 'email', label: 'Email', hubspot: 'ada@example.test', albi: 'ada@albi.test' },
   ])
+})
+
+test('a job-title-only conflict retains both approved values in comparisons and differences', () => {
+  const presented = presentSampleReviewItem({ objectType: 'contacts', reason: 'nonblank_field_difference',
+    sourceSnapshot: { id: 'hs-1', jobTitle: 'Engineer' }, candidateSnapshots: [{ id: 'albi-1', jobTitle: 'Manager' }],
+    proposedChanges: { conflicts: { jobTitle: { current: 'Manager', proposed: 'Engineer' } } } })
+  assert.equal(presented.source.jobTitle, 'Engineer')
+  assert.deepEqual(presented.candidates[0].comparisons.find(field => field.key === 'jobTitle'),
+    { key: 'jobTitle', label: 'Job title', hubspot: 'Engineer', albi: 'Manager' })
+  assert.deepEqual(presented.proposedChanges, [{ key: 'jobTitle', label: 'Job title', hubspot: 'Engineer', albi: 'Manager' }])
 })
 
 test('malformed item data is normalized to safe defaults', () => {

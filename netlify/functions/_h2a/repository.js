@@ -7,6 +7,7 @@ const BASE_RUN_TOTAL_FIELDS = ['created', 'updated', 'linked', 'delivered', 'rec
 const REVIEW_RUN_COLUMNS = 'id,company_id,mode,status,sample_limit_per_type,review_capture_version,created_at,finished_at'
 const REVIEW_COLUMNS = 'id,company_id,run_id,portal_id,object_type,source_id,reason,conflict_type,source_snapshot,candidate_snapshots,match_evidence,proposed_changes,status,recheck_outcome,last_rechecked_at,last_rechecked_by,created_at,updated_at'
 const REVIEW_EVENT_COLUMNS = 'id,company_id,review_id,actor_id,event_type,reason,sanitized_details,created_at'
+const CAPTURED_EVENT_INDEX = 'h2a_dry_review_events_captured_once_idx'
 const REVIEW_STATUSES = new Set(['needs_review', 'cleared', 'no_longer_in_scope'])
 const REVIEW_OBJECT_TYPES = new Set(['contacts', 'companies'])
 const REVIEW_EVENT_TYPES = new Set(['captured', 'recheck_started', 'still_needs_review', 'cleared', 'no_longer_in_scope', 'recheck_failed'])
@@ -62,6 +63,11 @@ function reviewEventPayload(companyId, reviewId, { eventType, reason = null, act
 function checked(result) {
   if (result?.error) throw result.error
   return result?.data
+}
+
+function capturedEventAlreadyExists(error) {
+  return error?.code === '23505' && (error.constraint === CAPTURED_EVENT_INDEX ||
+    error.message === `duplicate key value violates unique constraint "${CAPTURED_EVENT_INDEX}"`)
 }
 
 function scoped(supabase, table, companyId, columns = '*') {
@@ -189,27 +195,31 @@ export function createH2ARepository(supabase) {
         object_type: input.object_type, source_id: input.source_id, reason: input.reason, conflict_type: input.conflict_type,
         ...reviewEvidencePayload(input, input.object_type), status: 'needs_review' }
       const inserted = await supabase.from('h2a_dry_run_reviews').insert(payload).select(REVIEW_COLUMNS).single()
+      let review
       if (inserted?.error) {
         if (inserted.error.code !== '23505') throw inserted.error
         const existing = checked(await reviewSourceIdentity(reviewQuery(supabase, companyId, input.run_id), payload).maybeSingle())
         if (!existing) throw inserted.error
-        return checked(await reviewSourceIdentity(supabase.from('h2a_dry_run_reviews').update(payload)
+        review = checked(await reviewSourceIdentity(supabase.from('h2a_dry_run_reviews').update(payload)
           .eq('company_id', companyId).eq('run_id', input.run_id), payload).eq('id', existing.id).select(REVIEW_COLUMNS).single())
-      }
-      const review = checked(inserted)
+      } else review = checked(inserted)
       if (!review?.id) throw new Error('Invalid review capture response')
       try {
         const event = await this.appendDryRunReviewEvent(companyId, input.run_id, review.id,
           { eventType: 'captured', reason: payload.reason })
         if (!event) throw new Error('Review capture event was not recorded')
-      } catch {
-        // Remove only this call's insertion so a retry can insert the row and audit together.
-        // An uncertain event response is safe: parent deletion also cascades any inserted event.
-        try {
-          checked(await supabase.from('h2a_dry_run_reviews').delete().eq('company_id', companyId)
-            .eq('run_id', input.run_id).eq('id', review.id))
-        } catch { /* The capture must still fail if compensation is unavailable. */ }
-        throw new Error('Review capture event was not recorded')
+      } catch (error) {
+        if (!capturedEventAlreadyExists(error)) {
+          // Compensate only this call's new row. Replays repair a retained row's
+          // missing audit event, protected against duplicates by the partial index.
+          if (!inserted?.error) {
+            try {
+              checked(await supabase.from('h2a_dry_run_reviews').delete().eq('company_id', companyId)
+                .eq('run_id', input.run_id).eq('id', review.id))
+            } catch { /* The capture must still fail if compensation is unavailable. */ }
+          }
+          throw new Error('Review capture event was not recorded')
+        }
       }
       return review
     },

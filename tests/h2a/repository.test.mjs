@@ -207,14 +207,89 @@ test('capture builds a positive-allowlist payload and records one fixed captured
   assert.deepEqual(event.sanitized_details, {})
 })
 
-test('unique capture replay updates the same tenant/run/source identity without another captured event', async () => {
-  const { repository, calls } = reviewRepositoryFixture([{ error: { code: '23505' } }, data(reviewRow), data(reviewRow)])
+test('unique capture replay updates the same tenant/run/source identity and ensures its captured event', async () => {
+  const { repository, calls } = reviewRepositoryFixture([{ error: { code: '23505' } }, data(reviewRow), data(reviewRow),
+    data(reviewRow), { error: { code: '23505', message: 'duplicate key value violates unique constraint "h2a_dry_review_events_captured_once_idx"' } }])
   assert.deepEqual(await repository.recordDryRunReview('company-1', reviewRow), reviewRow)
   assert.deepEqual(equalityFilters(calls[1]), [['company_id', 'company-1'], ['run_id', 'sample-2'],
     ['portal_id', '123'], ['object_type', 'contacts'], ['source_id', '42']])
   assert.deepEqual(equalityFilters(calls[2]), [['company_id', 'company-1'], ['run_id', 'sample-2'],
     ['portal_id', '123'], ['object_type', 'contacts'], ['source_id', '42'], ['id', REVIEW_ID]])
-  assert.equal(calls.some(call => call.table === 'h2a_dry_run_review_events'), false)
+  assert.equal(calls.filter(call => call.table === 'h2a_dry_run_review_events').length, 1)
+  assert.equal(calls[4].steps.find(step => step[0] === 'insert')[1].event_type, 'captured')
+})
+
+// State lives at the external database boundary; repository capture/replay and
+// compensation run unmodified. The index behavior is separately pinned in SQL.
+function durableCaptureFixture({ eventFailure = false, deleteFailure = false } = {}) {
+  let stored = null, failEvent = eventFailure, failDelete = deleteFailure
+  const events = [], deletes = [], calls = []
+  const repository = createH2ARepository({
+    from(table) {
+      const filters = [], query = {}; let operation = 'read', payload
+      const call = { table, filters }; calls.push(call)
+      for (const method of ['select', 'eq']) query[method] = (...args) => { if (method === 'eq') filters.push(args); return query }
+      for (const method of ['insert', 'update', 'delete']) query[method] = value => { operation = method; payload = value; return query }
+      const finish = () => {
+        if (table === 'h2a_dry_run_review_events') {
+          assert.equal(operation, 'insert')
+          assert.equal(payload.company_id, 'company-1'); assert.equal(payload.review_id, REVIEW_ID)
+          if (failEvent) { failEvent = false; return { error: { code: '08006', message: 'event provider secret' } } }
+          if (events.length) return { error: { code: '23505', constraint: 'h2a_dry_review_events_captured_once_idx' } }
+          events.push({ id: 'event-1', ...payload }); return data(events[0])
+        }
+        assert.equal(table, 'h2a_dry_run_reviews')
+        if (operation === 'insert') {
+          if (stored) return { error: { code: '23505' } }
+          stored = { ...payload, id: REVIEW_ID }; return data(stored)
+        }
+        assert.ok(filters.some(([key, value]) => key === 'company_id' && value === 'company-1'))
+        assert.ok(filters.some(([key, value]) => key === 'run_id' && value === 'sample-2'))
+        if (operation === 'update') { stored = { ...stored, ...payload }; return data(stored) }
+        if (operation === 'delete') {
+          deletes.push(filters)
+          if (failDelete) { failDelete = false; return { error: { message: 'cleanup provider secret' } } }
+          stored = null; events.length = 0; return data(null)
+        }
+        return data(stored)
+      }
+      query.single = async () => finish(); query.maybeSingle = async () => finish()
+      query.then = (resolve, reject) => Promise.resolve().then(finish).then(resolve, reject)
+      return query
+    }, rpc: async () => { throw Error('Capture must not invoke RPC') },
+  })
+  return { repository, events, deletes, calls, row: () => stored }
+}
+
+test('retry repairs the captured event after both event insertion and compensation deletion fail', async () => {
+  const f = durableCaptureFixture({ eventFailure: true, deleteFailure: true })
+  await assert.rejects(() => f.repository.recordDryRunReview('company-1', reviewRow),
+    error => error.message === 'Review capture event was not recorded')
+  assert.ok(f.row()); assert.equal(f.events.length, 0)
+  const repaired = await f.repository.recordDryRunReview('company-1', reviewRow)
+  assert.equal(repaired.id, REVIEW_ID); assert.equal(f.events.length, 1)
+  assert.equal(f.events[0].event_type, 'captured')
+  await f.repository.recordDryRunReview('company-1', reviewRow)
+  assert.equal(f.events.length, 1); assert.equal(f.deletes.length, 1)
+})
+
+test('concurrent and repeated capture attempts retain one row and one captured audit event', async () => {
+  const f = durableCaptureFixture()
+  const results = await Promise.all(Array.from({ length: 3 }, () => f.repository.recordDryRunReview('company-1', reviewRow)))
+  assert.deepEqual(results.map(result => result.id), [REVIEW_ID, REVIEW_ID, REVIEW_ID])
+  assert.equal(f.events.length, 1); assert.equal(f.deletes.length, 0)
+  assert.equal(f.calls.filter(call => call.table === 'h2a_dry_run_review_events').length, 3)
+})
+
+test('only the captured-event unique index conflict counts as repaired and replay never compensates an existing row', async () => {
+  for (const failure of [{ code: '23505', constraint: 'unrelated_index', message: 'provider secret' },
+    { code: '23505', message: 'provider secret' }, { code: '08006', constraint: 'h2a_dry_review_events_captured_once_idx' }]) {
+    const { repository, calls } = reviewRepositoryFixture([{ error: { code: '23505' } }, data(reviewRow), data(reviewRow),
+      data(reviewRow), { error: failure }])
+    await assert.rejects(() => repository.recordDryRunReview('company-1', reviewRow),
+      error => error.message === 'Review capture event was not recorded')
+    assert.equal(calls.some(call => call.steps.some(step => step[0] === 'delete')), false)
+  }
 })
 
 test('failed captured-event insertion deletes only the just-inserted tenant/run/review and fails safely', async () => {

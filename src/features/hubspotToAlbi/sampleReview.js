@@ -63,13 +63,13 @@ export const SAMPLE_REVIEW_REASON_OPTIONS = Object.freeze(Object.entries(SAMPLE_
 const SOURCE_FIELDS = Object.freeze([
   ['id', 'ID'], ['fullName', 'Full name'], ['firstName', 'First name'], ['lastName', 'Last name'], ['name', 'Name'],
   ['email', 'Email'], ['phoneNumber', 'Phone'], ['mobileNumber', 'Mobile'], ['organizationId', 'Organization ID'],
-  ['organizationName', 'Organization'], ['domain', 'Domain'], ['address1', 'Address'], ['address2', 'Address line 2'],
+  ['organizationName', 'Organization'], ['domain', 'Domain'], ['jobTitle', 'Job title'], ['address1', 'Address'], ['address2', 'Address line 2'],
   ['city', 'City'], ['state', 'State / region'], ['zipcode', 'Postal code'], ['country', 'Country'],
 ])
 const COMPARISON_FIELDS = Object.freeze([
   ['id', 'ID'], ['fullName', 'Full name'], ['name', 'Name'], ['firstName', 'First name'], ['lastName', 'Last name'],
   ['email', 'Email'], ['phoneNumber', 'Phone'], ['mobileNumber', 'Mobile'], ['organizationId', 'Organization ID'],
-  ['organizationName', 'Organization'], ['domain', 'Domain'], ['address1', 'Address'], ['address2', 'Address line 2'],
+  ['organizationName', 'Organization'], ['domain', 'Domain'], ['jobTitle', 'Job title'], ['address1', 'Address'], ['address2', 'Address line 2'],
   ['city', 'City'], ['state', 'State / region'], ['zipcode', 'Postal code'], ['country', 'Country'],
 ])
 const STATUSES = new Set(['needs_review', 'cleared', 'no_longer_in_scope'])

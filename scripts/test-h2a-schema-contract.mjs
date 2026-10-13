@@ -124,6 +124,15 @@ test('dry-run review storage is tenant-safe, bounded, service-only, and CAS-upda
   }
 })
 
+test('captured events are unique per tenant/review through an idempotent service-only partial index', () => {
+  for (const [sql, declaration] of [[readSchema(), 'create unique index'], [readReviewMigration(), 'create unique index if not exists']]) {
+    assert.match(sql, new RegExp(`${declaration} h2a_dry_review_events_captured_once_idx\\s+on public\\.h2a_dry_run_review_events \\(company_id, review_id\\)\\s+where event_type = 'captured';`))
+    assert.match(sql, /revoke all on table public\.h2a_dry_run_review_events from public, anon, authenticated, service_role;/)
+    assert.match(sql, /grant select, insert on table public\.h2a_dry_run_review_events to service_role;/)
+    assert.doesNotMatch(sql, /grant [^;]*h2a_dry_run_review_events to (?:public|anon|authenticated)/)
+  }
+})
+
 test('recheck RPC rejects a newer completed historical bounded sample as superseded under the review lock', () => {
   for (const sql of [readSchema(), readReviewMigration()]) {
     const rpc = functionBody(sql.replace('create or replace function public.h2a_apply_dry_run_recheck', 'create function public.h2a_apply_dry_run_recheck'), 'h2a_apply_dry_run_recheck')

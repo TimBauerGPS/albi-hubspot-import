@@ -106,6 +106,85 @@ test('load-more appends unique rows without disturbing the selected record', asy
   assert.equal(ui.detail().props.item.id, 'review-1'); ui.unmount()
 })
 
+test('pagination publishes refreshed progress with the same sample and preserves its selection', async () => {
+  const refreshed = { ...progress, needsReview: 1, cleared: 1 }
+  const ui = await mount({ getH2ADryRunReviews: (_s, _c, filters) => Promise.resolve(filters.cursor
+    ? page([row('review-2')], { progress: refreshed, nextCursor: 'next-2' }) : page([row()], { nextCursor: 'next' })) })
+  await ui.find('button', 'Load more').props.onClick(); await ui.flush()
+  const counter = ui.nodes().find(node => node.type === 'dl' && node.props['aria-label'] === 'Sample review progress')
+  assert.match(JSON.stringify(counter), /"children":\[1\]/)
+  assert.equal(ui.detail().props.item.id, 'review-1')
+  const action = ui.find('button', 'Load more').props.onClick(); await action; await ui.flush()
+  assert.equal(ui.calls.filter(call => call.name === 'getH2ADryRunReviews').at(-1).args[2].cursor, 'next-2')
+  ui.unmount()
+})
+
+test('sample replacement during pagination clears old evidence and refetches the new first page', async () => {
+  const firstB = deferred(), oldRecheck = deferred(); let firstPages = 0
+  const sampleB = { id: 'sample-B', reviewCaptureVersion: 1, historical: false }
+  const bRow = { ...row('review-B'), runId: 'sample-B', displayName: 'New Sample Person' }
+  const ui = await mount({ getH2ADryRunReviews: (_s, _c, filters) => filters.cursor
+    ? Promise.resolve(page([{ ...bRow, id: 'cursor-B' }], { sample: sampleB, nextCursor: 'cursor-B-next' }))
+    : ++firstPages === 1 ? Promise.resolve(page([row('review-A')], { nextCursor: 'cursor-A' })) : firstB.promise,
+    getH2ADryRunReview: (_s, _c, id) => Promise.resolve({ item: { ...full(id), runId: id === 'review-B' ? 'sample-B' : 'sample-1' } }),
+    recheckH2ADryRunReview: () => oldRecheck.promise })
+  const recheck = ui.detail().props.onRecheck(); await ui.flush()
+  const oldSignal = ui.calls.find(call => call.name === 'recheckH2ADryRunReview').args[3].signal
+  await ui.find('button', 'Load more').props.onClick(); await ui.flush()
+  assert.equal(ui.detail(), undefined)
+  assert.doesNotMatch(ui.text(), /review-A|cursor-B|Alex Example/)
+  assert.match(ui.text(), /Loading sample reviews/)
+  assert.equal(oldSignal.aborted, true)
+  assert.equal(ui.calls.filter(call => call.name === 'getH2ADryRunReviews').at(-1).args[2].cursor, undefined)
+  firstB.resolve(page([bRow], { sample: sampleB, progress: { ...progress, total: 1, needsReview: 1 }, nextCursor: 'first-B-next' }))
+  await ui.flush()
+  oldRecheck.resolve({ item: { ...full('review-A'), status: 'cleared' }, progress: { ...progress, needsReview: 0 } })
+  await recheck; await ui.flush()
+  assert.equal(ui.detail().props.item.id, 'review-B')
+  assert.equal(ui.detail().props.item.runId, 'sample-B')
+  assert.doesNotMatch(ui.text(), /review-A|cursor-B|Corrections are clear/)
+  ui.unmount()
+})
+
+for (const transition of ['filter', 'tenant', 'unmount']) {
+  test(`stale replacement pagination after ${transition} cannot reset the current queue or start another fetch`, async () => {
+    const more = deferred(); let firstPages = 0
+    const ui = await mount({ getH2ADryRunReviews: (_s, _c, filters) => filters.cursor ? more.promise
+      : Promise.resolve(page([row(++firstPages === 1 ? 'review-A' : 'current-record')], { nextCursor: 'next' })) })
+    const action = ui.find('button', 'Load more').props.onClick(); await ui.flush()
+    const signal = ui.calls.filter(call => call.name === 'getH2ADryRunReviews').at(-1).args[2].signal
+    if (transition === 'filter') {
+      ui.nodes().find(node => node.type === 'select' && node.props.id === 'sample-review-status').props.onChange({ target: { value: 'cleared' } })
+      await ui.flush()
+    } else if (transition === 'tenant') {
+      ui.context.companyId = 'company-2'; ui.context.tenantRevision = 1; await ui.rerender()
+    } else ui.unmount()
+    const readsBefore = ui.calls.filter(call => call.name === 'getH2ADryRunReviews').length
+    more.resolve(page([{ ...row('obsolete-B'), runId: 'sample-B' }], { sample: { id: 'sample-B', reviewCaptureVersion: 1 } }))
+    await action; await ui.flush()
+    assert.equal(signal.aborted, true)
+    assert.equal(ui.calls.filter(call => call.name === 'getH2ADryRunReviews').length, readsBefore)
+    assert.doesNotMatch(ui.text(), /obsolete-B/)
+    if (transition !== 'unmount') { assert.equal(ui.detail().props.item.id, 'current-record'); ui.unmount() }
+  })
+}
+
+test('a tenant switch while replacement first-page fetch is pending aborts and hides its late evidence', async () => {
+  const replacement = deferred(); let companyOneReads = 0
+  const ui = await mount({ getH2ADryRunReviews: (_s, company, filters) => company === 'company-2'
+    ? Promise.resolve(page([row('tenant-two')])) : filters.cursor
+      ? Promise.resolve(page([row('obsolete-B')], { sample: { id: 'sample-B', reviewCaptureVersion: 1 } }))
+      : ++companyOneReads === 1 ? Promise.resolve(page([row('review-A')], { nextCursor: 'next' })) : replacement.promise })
+  await ui.find('button', 'Load more').props.onClick(); await ui.flush()
+  assert.equal(companyOneReads, 2)
+  const signal = ui.calls.filter(call => call.name === 'getH2ADryRunReviews').at(-1).args[2].signal
+  ui.context.companyId = 'company-2'; ui.context.tenantRevision = 1; await ui.rerender()
+  replacement.resolve(page([row('obsolete-B')], { sample: { id: 'sample-B', reviewCaptureVersion: 1 } })); await ui.flush()
+  assert.equal(signal.aborted, true); assert.equal(ui.detail().props.item.id, 'tenant-two')
+  assert.doesNotMatch(ui.text(), /review-A|obsolete-B/)
+  ui.unmount()
+})
+
 test('tenant transition aborts all prior requests and ignores late list results', async () => {
   const old = deferred()
   const ui = await mount({ getH2ADryRunReviews: (_s, company) => company === 'company-1' ? old.promise : Promise.resolve(page([row('new-tenant')])) })
@@ -189,4 +268,20 @@ test('detail renders full identity, every candidate, fixed audit labels and only
   assert.ok(html.includes('&lt;script&gt;')); assert.equal(html.includes('<script>'), false)
   assert.equal((html.match(/<button/g) ?? []).length, 1); assert.match(html, /Recheck this record/)
   assert.match(html, /Review event/); assert.doesNotMatch(html, /unknown-private|unknown-secret/)
+})
+
+test('detail renders job-title-only differences and labels source job title without a candidate', async () => {
+  const source = await readFile(detailUrl, 'utf8')
+  const code = transformSync(source.replace(/^import[\s\S]*?from ['"][^'"]+['"]\s*$/gm, '').replace('export default function', 'function'),
+    { loader: 'jsx', jsxFactory: 'h' }).code
+  const Detail = vm.runInNewContext(`${code}\nSampleReviewDetail`, { ...presentation, h: createElement, Intl, Date })
+  const item = { ...full(), reason: 'nonblank_field_difference', sourceSnapshot: { id: 'hs-1', jobTitle: 'Engineer' },
+    candidateSnapshots: [{ id: 'albi-1', jobTitle: 'Manager' }],
+    proposedChanges: { conflicts: { jobTitle: { proposed: 'Engineer', current: 'Manager' } } } }
+  const html = renderToStaticMarkup(createElement(Detail, { item, onRecheck() {} }))
+  assert.match(html, /Fields with different values/)
+  assert.match(html, /HubSpot · Job title/); assert.match(html, /Albi · Job title/)
+  assert.match(html, /Engineer/); assert.match(html, /Manager/)
+  const withoutCandidate = renderToStaticMarkup(createElement(Detail, { item: { ...item, candidateSnapshots: [], proposedChanges: {} }, onRecheck() {} }))
+  assert.match(withoutCandidate, /HubSpot · Job title/); assert.match(withoutCandidate, /Engineer/)
 })

@@ -66,6 +66,9 @@ create index if not exists h2a_dry_reviews_last_rechecked_by_idx
   on public.h2a_dry_run_reviews (last_rechecked_by);
 create index if not exists h2a_dry_review_events_company_review_idx
   on public.h2a_dry_run_review_events (company_id, review_id, created_at, id);
+create unique index if not exists h2a_dry_review_events_captured_once_idx
+  on public.h2a_dry_run_review_events (company_id, review_id)
+  where event_type = 'captured';
 
 alter table public.h2a_dry_run_reviews enable row level security;
 revoke all on table public.h2a_dry_run_reviews from public, anon, authenticated, service_role;

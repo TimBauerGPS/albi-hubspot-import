@@ -186,6 +186,12 @@ export async function recheckDryRunReview(deps, { companyId, reviewId, actorId, 
         }
         evaluation = evaluateContactReview({ source, candidates, associatedCompanyIds, organization,
           mappings: scopedMappings(mappings.contacts, row.portal_id, row.source_id), optionMappings: mappings.options })
+        // Samples may have used activity company context when direct associations
+        // were empty. That context is intentionally not retained; only a fresh
+        // sample can prove it resolved. Refresh safe evidence without clearing it.
+        if (!associatedCompanyIds.length && row.conflict_type === 'association') {
+          evaluation = { ...evaluation, outcome: 'needs_review', reason: row.reason, conflictType: row.conflict_type }
+        }
       }
     }
     if (clock(deps) >= deadline) throw timeout()

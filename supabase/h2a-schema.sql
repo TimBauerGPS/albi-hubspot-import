@@ -353,6 +353,9 @@ create index h2a_dry_reviews_last_rechecked_by_idx
   on public.h2a_dry_run_reviews (last_rechecked_by);
 create index h2a_dry_review_events_company_review_idx
   on public.h2a_dry_run_review_events (company_id, review_id, created_at, id);
+create unique index h2a_dry_review_events_captured_once_idx
+  on public.h2a_dry_run_review_events (company_id, review_id)
+  where event_type = 'captured';
 
 -- Additional FK indexes cover user references and composite run/delivery/conflict FKs.
 create index h2a_credentials_updated_by_idx on private.h2a_credentials (updated_by);

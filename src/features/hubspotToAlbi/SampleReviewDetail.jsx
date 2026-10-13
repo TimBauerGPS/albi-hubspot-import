@@ -40,7 +40,7 @@ export default function SampleReviewDetail({ item, busy, recheckPending, onReche
   const events = Array.isArray(item?.events) ? item.events : []
   const comparisons = review.candidates.length ? review.candidates : [{ id: null, comparisons: Object.entries(review.source).map(([key, hubspot]) => ({
     key, label: ({ id: 'ID', fullName: 'Full name', firstName: 'First name', lastName: 'Last name', name: 'Name', email: 'Email', phoneNumber: 'Phone',
-      mobileNumber: 'Mobile', organizationId: 'Organization ID', organizationName: 'Organization', domain: 'Domain', address1: 'Address', address2: 'Address line 2', city: 'City', state: 'State / region', zipcode: 'Postal code', country: 'Country' })[key],
+      mobileNumber: 'Mobile', organizationId: 'Organization ID', organizationName: 'Organization', domain: 'Domain', jobTitle: 'Job title', address1: 'Address', address2: 'Address line 2', city: 'City', state: 'State / region', zipcode: 'Postal code', country: 'Country' })[key],
     hubspot, albi: 'No candidate found',
   })) }]
 

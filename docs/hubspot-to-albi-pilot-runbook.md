@@ -124,7 +124,7 @@ After approved migration/deployment, perform authenticated browser smoke with th
 - Conflict resolution is idempotent and schedules a targeted resume. If it reports saved-but-resume-pending, use the authorized retry path; do not create a duplicate mapping manually.
 - Disable the company in Settings before rotating credentials, changing mappings, or investigating. Disabling prevents new scheduled work but does not roll back records already created in Albi.
 - Check `H2A` run alert delivery and tenant-specific configured recipients after failures. Notifications omit provider errors and activity contents; troubleshoot from sanitized run status and provider dashboards.
-- There is no automatic cleanup. Preserve audit and delivery state unless an approved retention procedure says otherwise.
+- Retained sync runs, delivery records, and live-conflict records have no automatic cleanup. Preserve their audit and delivery state unless an approved retention procedure says otherwise. After a review-capable sample completes and is confirmed as the current set, automatic cleanup prunes superseded review rows and cascading review events only for explicitly selected completed or cancelled version-one bounded samples in that company. Queued, running, paused, partially failed, and failed review sets remain available for resume; cleanup failures leave older details inaccessible through the current-set API and retryable for maintenance.
 
 ## Required disposable-database and concurrency checks
 

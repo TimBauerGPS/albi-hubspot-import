@@ -246,6 +246,62 @@ test('ambiguous HubSpot organizations remain an association review', async () =>
   assert.equal(f.applied[0][1].conflictType, 'association')
 })
 
+for (const reason of ['multiple_associated_organizations', 'albi_contact_association_contract_unverified',
+  'association_contract_unverified', 'organization_unresolved']) {
+  test(`empty direct associations retain the existing ${reason} classification with current safe evidence`, async () => {
+    const f = fixture({ contacts: [{ id: '20', firstName: 'A', lastName: 'Person', email: 'a@example.com', authorization: 'secret' }] })
+    f.row.reason = reason; f.row.conflict_type = 'association'
+    f.row.candidate_snapshots = [{ id: 'old-candidate' }]
+    await recheckDryRunReview(f.deps, input)
+    const payload = f.applied[0][1]
+    assert.equal(payload.status, 'needs_review'); assert.equal(payload.outcome, 'still_needs_review')
+    assert.equal(payload.eventType, 'still_needs_review')
+    assert.equal(payload.reason, reason); assert.equal(payload.conflictType, 'association')
+    assert.deepEqual(payload.sourceSnapshot, { id: '10', firstName: 'A', lastName: 'Person', email: 'a@example.com' })
+    assert.deepEqual(payload.candidateSnapshots, [{ id: '20', firstName: 'A', lastName: 'Person', email: 'a@example.com' }])
+    assert.deepEqual(payload.matchEvidence, { evidence: ['email'] })
+    assert.equal(JSON.stringify(payload).includes('secret'), false)
+    assert.equal(f.calls.some(call => call[0] === 'companies' || call[0] === 'albiOrganizations'), false)
+  })
+}
+
+test('empty direct associations cannot clear an existing association review through a safe create', async () => {
+  const f = fixture({ options: [{ mapping_kind: 'default_contact_type', albi_id: '7', confirmed: true }] })
+  f.row.reason = 'organization_unresolved'; f.row.conflict_type = 'association'
+  await recheckDryRunReview(f.deps, input)
+  assert.equal(f.applied[0][1].outcome, 'still_needs_review')
+  assert.equal(f.applied[0][1].reason, 'organization_unresolved')
+})
+
+test('corrected direct association clears the original ambiguity using the shared evaluator', async () => {
+  const f = fixture({ contacts: [{ id: '20', firstName: 'A', lastName: 'Person', email: 'a@example.com', organizationId: '30' }],
+    organizations: [{ id: '30', name: 'Allied', domain: 'allied.example' }] })
+  f.row.reason = 'multiple_associated_organizations'; f.row.conflict_type = 'association'
+  f.deps.hubspotRead.getAssociations = async () => [{ fromId: '10', toObjectType: 'companies', toIds: ['11'] }]
+  f.deps.hubspotRead.getCompanies = async () => [{ id: '11', properties: { name: 'Allied', domain: 'allied.example' } }]
+  await recheckDryRunReview(f.deps, input)
+  assert.equal(f.applied[0][1].outcome, 'safe_to_link')
+  assert.equal(f.applied[0][1].status, 'cleared')
+})
+
+test('a mismatched corrected direct association keeps the current evaluator classification', async () => {
+  const f = fixture({ contacts: [{ id: '20', firstName: 'A', lastName: 'Person', email: 'a@example.com', organizationId: '40' }],
+    organizations: [{ id: '30', name: 'Allied', domain: 'allied.example' }] })
+  f.row.reason = 'multiple_associated_organizations'; f.row.conflict_type = 'association'
+  f.deps.hubspotRead.getAssociations = async () => [{ fromId: '10', toObjectType: 'companies', toIds: ['11'] }]
+  f.deps.hubspotRead.getCompanies = async () => [{ id: '11', properties: { name: 'Allied', domain: 'allied.example' } }]
+  await recheckDryRunReview(f.deps, input)
+  assert.equal(f.applied[0][1].outcome, 'still_needs_review')
+  assert.equal(f.applied[0][1].reason, 'albi_contact_association_contract_unverified')
+})
+
+test('confirmed missing source still removes an existing association review from scope', async () => {
+  const f = fixture({ source: null })
+  f.row.reason = 'multiple_associated_organizations'; f.row.conflict_type = 'association'
+  await recheckDryRunReview(f.deps, input)
+  assert.equal(f.applied[0][1].outcome, 'source_missing')
+})
+
 test('a hanging provider respects a shortened deadline and cannot apply later', async () => {
   const f = fixture()
   f.deps.deadlineMs = 5

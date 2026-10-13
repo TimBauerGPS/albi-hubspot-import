@@ -125,11 +125,24 @@ export default function SampleReviewPage() {
     try {
       const result = await getH2ADryRunReviews(session, companyId, { ...filters, cursor: nextCursor, limit: 25, signal: controller.signal })
       if (!current()) return
+      if (result?.sample?.id !== sample?.id) {
+        // A cursor belongs to the old sample. Discard this page and reload the
+        // current first page before publishing any replacement evidence.
+        ++requestRevision.current; ++detailRevision.current
+        for (const pending of controllers.current) pending.abort()
+        controllers.current.clear(); recheckLock.current = null; selectedIdRef.current = null
+        setItems([]); setSample(null); setProgress(null); setNextCursor(null); setSelectedId(null); setDetail(null)
+        setLoading(true); setLoadingMore(false); setDetailLoading(false); setBusyId(null)
+        setLoadError(''); setDetailError(''); setActionError(''); setNotice('')
+        setRetryToken(value => value + 1)
+        return
+      }
       setItems(existing => {
         const unique = new Map(existing.map(item => [item.id, item]))
         for (const item of result?.items ?? []) if (!unique.has(item.id)) unique.set(item.id, item)
         return [...unique.values()]
       })
+      setSample(result?.sample ?? null); setProgress(result?.progress ?? null)
       setNextCursor(result?.nextCursor ?? null)
     } catch (cause) {
       if (current() && cause?.name !== 'AbortError') setActionError(cause.message)
