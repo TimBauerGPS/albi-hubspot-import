@@ -7,6 +7,9 @@ import { HUBSPOT_ACTIVITY_TYPES } from '../netlify/functions/_h2a/constants.js'
 import { completeDelivery, reserveDelivery } from '../netlify/functions/_h2a/deliveries.js'
 import { HubSpotClient } from '../netlify/functions/_h2a/hubspotClient.js'
 import { makeDeliveryKey, makeSourceMarker } from '../netlify/functions/_h2a/keys.js'
+import { createDryRunReviewHandler } from '../netlify/functions/h2a-dry-run-reviews.js'
+import { createRunHandler } from '../netlify/functions/h2a-run.js'
+import { createH2ARepository } from '../netlify/functions/_h2a/repository.js'
 
 const ISOLATION_ACK = 'I_CONFIRM_THIS_IS_AN_ISOLATED_ALBI_SANDBOX'
 const ACTIVITY_CONTRACT_ACK = 'I_VERIFIED_ALBI_ACTIVITY_MARKER_READBACK'
@@ -146,6 +149,187 @@ function makeSelfTestAdapters() {
   return { calls, hubspot, albi, activities, counts: () => ({ organizations: organizations.length, contacts: contacts.length, activities: activities.length }) }
 }
 
+function makeReviewSelfTestFixture() {
+  const companyId = '00000000-0000-4000-8000-000000000010'
+  const reviewId = '00000000-0000-4000-8000-000000000011'
+  const stamp = '2026-10-12T10:00:00.000Z'
+  const adminId = '00000000-0000-4000-8000-000000000012'
+  const memberId = '00000000-0000-4000-8000-000000000013'
+  const injected = { authorization: 'fixture-secret-authorization', apiKey: 'fixture-secret-key',
+    notes: 'fixture-activity-body', hs_email_text: 'fixture-activity-body', hs_note_body: 'fixture-activity-body',
+    message: 'fixture-provider-error' }
+  const row = { id: reviewId, company_id: companyId, run_id: '00000000-0000-4000-8000-000000000015',
+    portal_id: '123', object_type: 'contacts', source_id: '10', reason: 'name_only_candidate', conflict_type: 'contact_match',
+    status: 'needs_review', created_at: stamp, updated_at: stamp,
+    source_snapshot: { id: '10', firstName: 'Fixture', lastName: 'Person', email: 'fixture@example.test', ...injected },
+    candidate_snapshots: [{ id: '20', firstName: 'Fixture', lastName: 'Person', ...injected }],
+    match_evidence: { evidence: ['name_only', injected.message], ...injected },
+    proposed_changes: { updates: { firstName: 'Fixture', ...injected }, ...injected }, ...injected }
+  const runs = [{ id: row.run_id, company_id: companyId, mode: 'dry_run', status: 'completed',
+    sample_limit_per_type: 10, review_capture_version: 1, created_at: stamp, finished_at: stamp, totals: { requires_review: 1 } }]
+  const events = [{ id: 'captured-fixture', company_id: companyId, review_id: reviewId,
+    event_type: 'recheck_failed', created_at: stamp, sanitized_details: { category: 'permission', code: 'operation_failed', ...injected } }]
+  const tables = {
+    companies: [{ id: companyId, name: 'Fixture Company' }], super_admins: [],
+    company_members: [{ user_id: adminId, company_id: companyId, role: 'admin' },
+      { user_id: memberId, company_id: companyId, role: 'member' }],
+    h2a_company_config: [{ company_id: companyId, state: 'dry_run', preflight_status: 'valid', portal_id: '123',
+      initial_start_locked_at: '2026-10-01T00:00:00.000Z' }],
+    h2a_sync_runs: runs, h2a_dry_run_reviews: [row], h2a_dry_run_review_events: events,
+    h2a_contact_mappings: [], h2a_organization_mappings: [], h2a_option_mappings: [], h2a_execution_leases: [],
+  }
+  const fixture = { companyId, reviewId, row, runs, dispatched: [], mutationAccesses: 0, providerFailure: false }
+  // Only the external storage boundary is doubled. Real auth, repository queries,
+  // response projections, evaluator, recheck service, and full-run gate execute.
+  const supabase = {
+    auth: { getUser: async token => ({ data: { user: ['admin', 'member'].includes(token) ?
+      { id: token === 'admin' ? adminId : memberId } : null }, error: null }) },
+    from(table) {
+      assert.ok(Object.hasOwn(tables, table), `unexpected table ${table}`)
+      const filters = [], orders = []
+      let maximum = Infinity, range = null, head = false, inserted = null
+      function result() {
+        const rows = inserted ?? tables[table].filter(item => filters.every(filter => filter(item)))
+          .sort((a, b) => { for (const [key, ascending] of orders) {
+            const difference = String(a[key]).localeCompare(String(b[key]))
+            if (difference) return ascending ? difference : -difference
+          } return 0 })
+        const data = rows.slice(0, maximum)
+        return { data: range ? data.slice(range[0], range[1] + 1) : data, count: rows.length, error: null }
+      }
+      const query = {
+        select(_fields, options) { head = options?.head === true; return query },
+        eq(key, value) { filters.push(item => item[key] === value); return query },
+        gt(key, value) { filters.push(item => item[key] > value); return query },
+        order(key, { ascending = true } = {}) { orders.push([key, ascending]); return query },
+        limit(value) { maximum = value; return query },
+        range(start, end) { range = [start, end]; return query },
+        insert(payload) {
+          assert.ok(['h2a_dry_run_review_events', 'h2a_sync_runs'].includes(table), `unexpected write to ${table}`)
+          inserted = [{ id: `fixture-insert-${tables[table].length}`, ...payload }]
+          tables[table].push(...inserted)
+          return query
+        },
+        async maybeSingle() { const response = result(); return { ...response, data: response.data[0] ?? null } },
+        async single() { const response = result(); assert.equal(response.data.length, 1); return { ...response, data: response.data[0] } },
+        then(resolve, reject) { const response = result(); return Promise.resolve(head ?
+          { count: response.count, error: null } : response).then(resolve, reject) },
+      }
+      return query
+    },
+    async rpc(name, input) {
+      assert.equal(name, 'h2a_apply_dry_run_recheck', 'only diagnostic recheck RPC is allowed')
+      assert.equal(input.p_company_id, companyId)
+      assert.equal(input.p_review_id, reviewId)
+      assert.equal(input.p_expected_updated_at, row.updated_at)
+      assert.equal(input.p_actor_id, adminId)
+      Object.assign(row, { status: input.p_status, recheck_outcome: input.p_recheck_outcome,
+        reason: input.p_reason, conflict_type: input.p_conflict_type, source_snapshot: input.p_source_snapshot,
+        candidate_snapshots: input.p_candidate_snapshots, match_evidence: input.p_match_evidence,
+        proposed_changes: input.p_proposed_changes, last_rechecked_at: input.p_now,
+        last_rechecked_by: input.p_actor_id, updated_at: input.p_now })
+      events.push({ id: `terminal-${events.length}`, company_id: companyId, review_id: reviewId,
+        actor_id: adminId, event_type: input.p_event_type, reason: input.p_reason,
+        sanitized_details: input.p_event_details, created_at: input.p_now })
+      return { data: { review: structuredClone(row) }, error: null }
+    },
+  }
+  const hubspot = {
+    async getContacts(ids) {
+      assert.deepEqual(ids, ['10'])
+      if (fixture.providerFailure) throw Error('fixture-provider-error with fixture-secret-key')
+      return [{ id: '10', properties: { firstname: 'Fixture', lastname: 'Person', email: 'fixture@example.test', ...injected } }]
+    },
+    async getCompanies() { throw Error('unexpected company read') },
+    async getAssociations(input) {
+      assert.deepEqual(input, { objectType: 'contacts', objectIds: ['10'], toObjectTypes: ['companies'] })
+      return [{ fromId: '10', toObjectType: 'companies', toIds: [] }]
+    },
+  }
+  const albi = {
+    async listContacts(input) {
+      assert.deepEqual(input, { cursor: '1', pageSize: 100 })
+      return { records: [{ id: '20', firstName: 'Fixture', lastName: 'Person', email: 'fixture@example.test', ...injected }], cursor: null }
+    },
+    async listOrganizations() { throw Error('unexpected organization read') },
+  }
+  const repository = createH2ARepository(supabase)
+  for (const object of [hubspot, albi, repository]) {
+    for (const name of ['createContact', 'createOrganization', 'createActivity', 'updateContact', 'updateOrganization',
+      'associateContact', 'saveMapping', 'saveCursor', 'reserveDelivery', 'deliveryStore', 'recordConflict', 'recordItem', 'dispatch', 'getCredentials']) {
+      Object.defineProperty(object, name, { get() {
+        fixture.mutationAccesses++
+        throw Error(`forbidden capability: ${name}`)
+      } })
+    }
+  }
+  fixture.options = { supabase, repository, now: () => new Date('2026-10-12T11:00:00.000Z'),
+    makeClients: async company => { assert.equal(company, companyId); return { hubspot, albi } },
+    fetch: async () => { throw Error('self-test must never access provider transport') } }
+  return fixture
+}
+
+async function runReviewSelfTest(log) {
+  // Removing admin enforcement, positive projections, read-only capabilities, or the
+  // all-captured-row gate must fail these real handler/service assertions.
+  const f = makeReviewSelfTestFixture()
+  const handler = createDryRunReviewHandler(f.options)
+  const get = (role, detail = false) => ({ httpMethod: 'GET', headers: { Authorization: `Bearer ${role}` },
+    queryStringParameters: { companyId: f.companyId, ...(detail ? { reviewId: f.reviewId } : {}) } })
+  const recheck = () => ({ httpMethod: 'POST', headers: { Authorization: 'Bearer admin' },
+    body: JSON.stringify({ companyId: f.companyId, reviewId: f.reviewId, expectedUpdatedAt: f.row.updated_at }) })
+  let checks = 0
+  function safeResponse(response, status, label) {
+    assert.equal(response.statusCode, status, label)
+    assert.equal(response.headers['Cache-Control'], 'no-store', `${label}: no cached PII`)
+    assert.doesNotMatch(response.body, /authorization|apiKey|hs_email_text|hs_note_body|fixture-secret|fixture-activity-body|fixture-provider-error/i,
+      `${label}: secret, activity, and provider text never reach response bodies`)
+    checks++
+    return JSON.parse(response.body)
+  }
+  for (const detail of [false, true]) {
+    safeResponse(await handler(get('member', detail)), 403, `member ${detail ? 'detail' : 'list'} rejected`)
+    const body = safeResponse(await handler(get('admin', detail)), 200, `admin ${detail ? 'detail' : 'list'} accepted`)
+    assert.equal(detail ? body.item.id : body.items[0].id, f.reviewId)
+    if (detail) {
+      assert.equal(body.item.sourceSnapshot.email, 'fixture@example.test')
+      assert.equal(body.item.candidateSnapshots[0].id, '20')
+      assert.equal(body.item.events[0].details.category, 'permission')
+    } else assert.deepEqual(body.progress, { total: 1, needsReview: 1, cleared: 0, noLongerInScope: 0, fullDryRunReady: false })
+  }
+  const totals = structuredClone(f.runs[0].totals)
+  f.providerFailure = true
+  safeResponse(await handler(recheck()), 502, 'provider failure remains sanitized')
+  assert.equal(f.row.status, 'needs_review', 'provider failure cannot clear a record')
+  f.providerFailure = false
+  const cleared = safeResponse(await handler(recheck()), 200, 'exact-match recheck clears diagnostic state')
+  assert.equal(cleared.item.status, 'cleared')
+  assert.equal(cleared.item.recheckOutcome, 'safe_to_link')
+  assert.deepEqual(cleared.progress, { total: 1, needsReview: 0, cleared: 1, noLongerInScope: 0, fullDryRunReady: false })
+  assert.deepEqual(f.runs[0].totals, totals, 'original run totals stay immutable')
+  assert.equal(f.mutationAccesses, 0, 'recheck cannot even access provider/sync write capabilities')
+  const run = createRunHandler({ ...f.options, dispatch: async payload => { f.dispatched.push(payload) } })
+  const full = { httpMethod: 'POST', headers: { Authorization: 'Bearer admin' },
+    body: JSON.stringify({ companyId: f.companyId, mode: 'dry_run', dryRunScope: 'full' }) }
+  safeResponse(await run(full), 409, 'cleared old sample still blocks full dry run')
+  assert.equal(f.runs.filter(item => item.status === 'queued').length, 0)
+  assert.deepEqual(f.dispatched, [], 'blocked full run cannot dispatch')
+  f.runs.push({ ...f.runs[0], id: '00000000-0000-4000-8000-000000000014',
+    created_at: '2026-10-12T12:00:00.000Z', finished_at: '2026-10-12T12:01:00.000Z', totals: { requires_review: 0 } })
+  const fresh = safeResponse(await handler(get('admin')), 200, 'fresh zero-row sample is ready')
+  assert.deepEqual(fresh.items, [])
+  assert.deepEqual(fresh.progress, { total: 0, needsReview: 0, cleared: 0, noLongerInScope: 0, fullDryRunReady: true })
+  const accepted = safeResponse(await run(full), 202, 'fresh zero-row sample queues full dry run')
+  const queued = f.runs.filter(item => item.status === 'queued')
+  assert.equal(queued.length, 1)
+  assert.equal(queued[0].mode, 'dry_run')
+  assert.equal(queued[0].sample_limit_per_type, undefined)
+  assert.equal(queued[0].review_capture_version, undefined)
+  assert.deepEqual(f.dispatched, [{ companyId: f.companyId, mode: 'dry_run', trigger: 'resume', runId: accepted.runId }])
+  assert.equal(f.mutationAccesses, 0)
+  log(`H2A sample review self-test passed: ${checks} response checks; member/admin authorization, safe projections, read-only recheck, immutable totals, and fresh zero-row full-run gate.`)
+}
+
 export async function runSelfTest({ log = output } = {}) {
   assert.deepEqual(missingSmokeEnvironment({}), REQUIRED_PROVIDER_CREDENTIALS)
   assert.equal(cleanId('123456789'), '6789')
@@ -178,6 +362,7 @@ export async function runSelfTest({ log = output } = {}) {
     assert.equal(transportCalls, 0)
   }
   log('H2A smoke orchestration self-test passed: read-only plan, guarded create and rerun exactly-once, and zero-transport write-guard ordering.')
+  await runReviewSelfTest(log)
 }
 
 function makeRunId(env) {
