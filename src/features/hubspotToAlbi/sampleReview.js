@@ -57,7 +57,7 @@ export const SAMPLE_REVIEW_GUIDANCE = Object.freeze({
   ),
 })
 
-export const SAMPLE_REVIEW_REASON_OPTIONS = Object.freeze(Object.entries(SAMPLE_REVIEW_GUIDANCE).map(([value, copy]) =>
+export const SAMPLE_REVIEW_REASON_OPTIONS = Object.freeze(Object.entries(SAMPLE_REVIEW_GUIDANCE).filter(([value]) => value !== 'other_review_reason').map(([value, copy]) =>
   Object.freeze({ value, label: copy.label })))
 
 const SOURCE_FIELDS = Object.freeze([

@@ -11,6 +11,7 @@ import Admin from './pages/Admin'
 import HubSpotToAlbiLayout from './features/hubspotToAlbi/HubSpotToAlbiLayout'
 import OverviewPage from './features/hubspotToAlbi/OverviewPage'
 import ConflictsPage from './features/hubspotToAlbi/ConflictsPage'
+import SampleReviewPage from './features/hubspotToAlbi/SampleReviewPage'
 import SettingsPage from './features/hubspotToAlbi/SettingsPage'
 
 function Spinner() {
@@ -302,6 +303,14 @@ export default function App() {
           <Route
             path="settings"
             element={<SettingsPage />}
+          />
+          <Route
+            path="sample-review"
+            element={
+              <AdminRoute session={session} isAdmin={isAdmin} hasAppAccess={hasAppAccess}>
+                <SampleReviewPage />
+              </AdminRoute>
+            }
           />
         </Route>
 

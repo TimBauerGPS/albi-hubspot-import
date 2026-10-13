@@ -6,6 +6,7 @@ import CompanySelector from './CompanySelector'
 const TABS = [
   { to: '/hubspot-to-albi', label: 'Overview', end: true },
   { to: '/hubspot-to-albi/conflicts', label: 'Conflicts' },
+  { to: '/hubspot-to-albi/sample-review', label: 'Sample Review', adminOnly: true },
   { to: '/hubspot-to-albi/settings', label: 'Settings' },
 ]
 
@@ -88,7 +89,7 @@ export default function HubSpotToAlbiLayout({
 
           <nav aria-label="HubSpot to Albi" className="mt-6 -mb-px overflow-x-auto">
             <div className="flex min-w-max gap-6">
-              {TABS.map(tab => (
+              {TABS.filter(tab => !tab.adminOnly || isAdmin).map(tab => (
                 <NavLink
                   key={tab.to}
                   to={tab.to}

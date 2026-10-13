@@ -7,10 +7,12 @@ import {
   presentSampleReviewProgress,
 } from '../../src/features/hubspotToAlbi/sampleReview.js'
 
-test('every fixed review reason has fixed label and guidance shared with filter options', () => {
-  assert.deepEqual(SAMPLE_REVIEW_REASON_OPTIONS, Object.entries(SAMPLE_REVIEW_GUIDANCE).map(([value, copy]) => ({
+test('fixed review reasons share filter labels while the unknown fallback stays presentation-only', () => {
+  assert.deepEqual(SAMPLE_REVIEW_REASON_OPTIONS, Object.entries(SAMPLE_REVIEW_GUIDANCE).filter(([value]) => value !== 'other_review_reason').map(([value, copy]) => ({
     value, label: copy.label,
   })))
+  assert.equal(SAMPLE_REVIEW_REASON_OPTIONS.some(option => option.value === 'other_review_reason'), false)
+  assert.equal(presentSampleReviewItem({ reason: 'unrecognized' }).reasonLabel, 'Other review reason')
   for (const [reason, copy] of Object.entries(SAMPLE_REVIEW_GUIDANCE)) {
     const presented = presentSampleReviewItem({ reason })
     assert.equal(presented.reasonLabel, copy.label)
