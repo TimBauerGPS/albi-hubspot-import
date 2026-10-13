@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { readFileSync } from 'node:fs'
 import { HubSpotClient } from '../../netlify/functions/_h2a/hubspotClient.js'
+import * as hubspotAdapter from '../../netlify/functions/_h2a/hubspotClient.js'
 import { AlbiClient } from '../../netlify/functions/_h2a/albiClient.js'
 import { createHttpClient } from '../../netlify/functions/_h2a/http.js'
 
@@ -27,7 +28,7 @@ function transport(responses) {
 
 test('contract metadata covers every adapter method and records unsupported Albi contracts', () => {
   assert.deepEqual(Object.keys(contractMetadata.hubspot.methods).sort(), [
-    'estimateActivities', 'getAccountInfo', 'getActivity', 'getAssociations', 'getCompanies', 'getContacts', 'listActivities', 'listOwners',
+    'addContactCompanyAssociation', 'estimateActivities', 'getAccountInfo', 'getActivity', 'getAssociations', 'getCompanies', 'getContacts', 'listActivities', 'listOwners', 'updateCompany', 'updateContact',
   ])
   assert.deepEqual(Object.keys(contractMetadata.albi.methods).sort(), [
     'associateContact', 'createActivity', 'createContact', 'createOrganization', 'listActivities', 'listContacts', 'listOptions',
@@ -35,6 +36,78 @@ test('contract metadata covers every adapter method and records unsupported Albi
   ])
   for (const method of ['updateContact', 'updateOrganization', 'associateContact']) {
     assert.equal(contractMetadata.albi.methods[method].supported, false)
+  }
+})
+
+test('HubSpot review updates send sorted allowlisted PATCH properties and project responses', async () => {
+  const f = transport([{ ...hs.updateContact, id: 123 }, hs.updateCompany])
+  const c = new HubSpotClient({ token: 'token', fetch: f.fetch })
+  assert.deepEqual(await c.updateContact('123', { phone: '5551112222', email: 'person@example.invalid', address2: '' }), {
+    id: '123', properties: { address2: '', email: 'person@example.invalid', phone: '5551112222' },
+  })
+  assert.deepEqual(await c.updateCompany(456, { name: 'Example', domain: 'example.invalid', address2: '' }), {
+    id: '456', properties: { address2: '', domain: 'example.invalid', name: 'Example' },
+  })
+  assert.deepEqual(f.calls.map(call => [call.method, call.url.toString(), call.body]), [
+    ['PATCH', 'https://api.hubapi.com/crm/v3/objects/contacts/123', { properties: { address2: '', email: 'person@example.invalid', phone: '5551112222' } }],
+    ['PATCH', 'https://api.hubapi.com/crm/v3/objects/companies/456', { properties: { address2: '', domain: 'example.invalid', name: 'Example' } }],
+  ])
+  assert.deepEqual(Object.keys(f.calls[0].body.properties), ['address2', 'email', 'phone'])
+  assert.deepEqual(Object.keys(f.calls[1].body.properties), ['address2', 'domain', 'name'])
+  assert.equal(f.calls[0].headers.Authorization, 'Bearer token')
+})
+
+test('HubSpot adds only the default contact-to-company association with a bodyless PUT', async () => {
+  const f = transport([{ arbitrary: { secret: 'private' } }])
+  const c = new HubSpotClient({ token: 'token', fetch: f.fetch })
+  assert.deepEqual(await c.addContactCompanyAssociation('123', '456'), { contactId: '123', companyId: '456' })
+  assert.equal(hubspotAdapter.HUBSPOT_CONTACT_TO_COMPANY_ASSOCIATION_TYPE, 1)
+  assert.equal(f.calls[0].method, 'PUT')
+  assert.equal(f.calls[0].url.toString(), 'https://api.hubapi.com/crm/v3/objects/contacts/123/associations/companies/456/1')
+  assert.equal(f.calls[0].body, undefined)
+})
+
+test('HubSpot review mutations reject invalid IDs and properties before requesting', async () => {
+  const f = transport([])
+  const c = new HubSpotClient({ token: 'token', fetch: f.fetch })
+  for (const method of ['updateContact', 'updateCompany']) {
+    for (const value of [{}, null, [], 'name', { unknown: 'x' }, { phone: {} }, { phone: [] }, { phone: null }, { phone: 1 }, { phone: true }, { phone: undefined }, { phone: 'x'.repeat(501) }, { constructor: 'x' }, { email: 'x', name: 'x' }]) {
+      await assert.rejects(c[method]('123', value), { category: 'validation', operation: method })
+    }
+    for (const targetId of ['', '0', '../123', '1?x=y', '01', 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, null]) {
+      await assert.rejects(c[method](targetId, { phone: 'x' }), { category: 'validation', operation: method })
+    }
+  }
+  for (const [contactId, companyId] of [['../123', '456'], ['123', '0'], ['123', null]]) {
+    await assert.rejects(c.addContactCompanyAssociation(contactId, companyId), { category: 'validation' })
+  }
+  for (const method of ['deleteContact', 'deleteCompany', 'removeContactCompanyAssociation', 'mergeContacts', 'archiveContact']) assert.equal(c[method], undefined)
+  assert.equal(f.calls.length, 0)
+})
+
+test('HubSpot review mutation failures are sanitized and never retried', async () => {
+  for (const method of ['updateContact', 'updateCompany', 'addContactCompanyAssociation']) {
+    for (const failure of [new Error('private-token raw provider error'), { statusCode: 503 }, { statusCode: 429, headers: { 'Retry-After': '1' } }]) {
+      const f = transport([failure])
+      const delays = []
+      const c = new HubSpotClient({ token: 'private-token', fetch: f.fetch, maxRetries: 3, sleep: async ms => delays.push(ms) })
+      await assert.rejects(c[method]('123', method === 'addContactCompanyAssociation' ? '456' : { phone: 'x' }), error => {
+        assert.ok(['transient', 'rate_limit'].includes(error.category))
+        assert.equal(error.operation, method)
+        assert.equal(JSON.stringify(error).includes('private-token'), false)
+        return true
+      })
+      assert.equal(f.calls.length, 1)
+      assert.deepEqual(delays, [])
+    }
+  }
+})
+
+test('HubSpot review mutation responses fail closed for malformed IDs or writable values', async () => {
+  for (const response of [{ id: '../123', properties: {} }, { id: '123' }, { id: '123', properties: { phone: {} } }, { id: '123', properties: { phone: null } }, { id: '123', properties: { phone: 'x'.repeat(501) } }]) {
+    const f = transport([response])
+    await assert.rejects(new HubSpotClient({ token: 'token', fetch: f.fetch }).updateContact('123', { phone: 'x' }), { code: 'malformed_response' })
+    assert.equal(f.calls.length, 1)
   }
 })
 

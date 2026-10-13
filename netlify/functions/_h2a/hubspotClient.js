@@ -4,6 +4,37 @@ import { ApiError, createHttpClient, id, invalid, isRecord, malformed, responseI
 // Verified against the official stable reference on 2026-10-02; never use "latest" at runtime.
 export const HUBSPOT_API_VERSION = '2026-09'
 const ROOT = `/crm/objects/${HUBSPOT_API_VERSION}`
+const WRITE_ROOT = '/crm/v3/objects'
+// HubSpot-defined contact -> company association (direction-specific type).
+export const HUBSPOT_CONTACT_TO_COMPANY_ASSOCIATION_TYPE = 1
+const WRITABLE = Object.freeze({
+  contacts: new Set(['firstname', 'lastname', 'email', 'phone', 'mobilephone', 'jobtitle', 'address', 'address2', 'city', 'state', 'zip', 'country']),
+  companies: new Set(['name', 'domain', 'phone', 'address', 'address2', 'city', 'state', 'zip', 'country']),
+})
+const MAX_WRITE_STRING = 500
+function writeProperties(value, objectType, operation) {
+  if (!isRecord(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) invalid(operation)
+  const keys = Reflect.ownKeys(value)
+  if (!keys.length || keys.some(key => typeof key !== 'string' || !WRITABLE[objectType].has(key))) invalid(operation)
+  const properties = {}
+  for (const key of keys.sort()) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key)
+    if (!Object.hasOwn(descriptor, 'value') || typeof descriptor.value !== 'string' || descriptor.value.length > MAX_WRITE_STRING) invalid(operation)
+    properties[key] = descriptor.value
+  }
+  return properties
+}
+function writeRecord(value, objectType, operation) {
+  if (!isRecord(value) || !isRecord(value.properties)) malformed(operation)
+  const properties = {}
+  for (const key of [...WRITABLE[objectType]].sort()) {
+    if (!Object.hasOwn(value.properties, key)) continue
+    const prop = value.properties[key]
+    if (typeof prop !== 'string' || prop.length > MAX_WRITE_STRING) malformed(operation)
+    properties[key] = prop
+  }
+  return { id: responseId(value.id, operation), properties }
+}
 const PROPERTIES = {
   meetings: ['hs_timestamp', 'hs_meeting_start_time', 'hs_meeting_title', 'hs_meeting_body', 'hs_meeting_outcome', 'hubspot_owner_id'],
   calls: ['hs_timestamp', 'hs_call_title', 'hs_call_body', 'hs_call_status', 'hs_call_disposition', 'hs_call_direction', 'hubspot_owner_id'],
@@ -122,6 +153,22 @@ export class HubSpotClient {
   }
   async getContacts(ids) { return this.#getRecords('contacts', ids) }
   async getCompanies(ids) { return this.#getRecords('companies', ids) }
+  async #updateRecord(objectType, targetId, properties, operation) {
+    const target = id(targetId, operation)
+    const body = { properties: writeProperties(properties, objectType, operation) }
+    const data = await this.#request(`${WRITE_ROOT}/${objectType}/${target}`, { method: 'PATCH', body, operation, retrySafe: false })
+    return writeRecord(data, objectType, operation)
+  }
+  async updateContact(targetId, properties) { return this.#updateRecord('contacts', targetId, properties, 'updateContact') }
+  async updateCompany(targetId, properties) { return this.#updateRecord('companies', targetId, properties, 'updateCompany') }
+  async addContactCompanyAssociation(contactId, companyId) {
+    const operation = 'addContactCompanyAssociation'
+    const contact = id(contactId, operation), company = id(companyId, operation)
+    await this.#request(`${WRITE_ROOT}/contacts/${contact}/associations/companies/${company}/${HUBSPOT_CONTACT_TO_COMPANY_ASSOCIATION_TYPE}`, {
+      method: 'PUT', operation, retrySafe: false, statusOnly: true,
+    })
+    return { contactId: contact, companyId: company }
+  }
   async getActivity(objectType, activityId) {
     if (!HUBSPOT_ACTIVITY_TYPES.includes(objectType)) invalid('getActivity')
     const activity = id(activityId, 'getActivity')
