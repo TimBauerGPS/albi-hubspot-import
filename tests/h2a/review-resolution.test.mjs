@@ -48,6 +48,34 @@ test('decision schemas reject provider values, unknown fields, unsafe IDs and ma
   ]) assert.throws(() => normalizeResolutionDecision(input), TypeError)
 })
 
+test('normalization and hashing reject array actions before field-choice validation can be bypassed', () => {
+  for (const input of [
+    { action: ['resolve_fields'], fieldChoices: { apiKey: 'hubspot', email: 'arbitrary provider value' } },
+    { action: ['create_albi'] },
+  ]) {
+    assert.throws(() => normalizeResolutionDecision(input), TypeError)
+    assert.throws(() => hashResolutionDecision(input), TypeError)
+  }
+})
+
+test('normalization and hashing reject object actions that coerce to valid action names', () => {
+  for (const action of [new String('create_albi'), { toString() { return 'create_albi' } }]) {
+    assert.throws(() => normalizeResolutionDecision({ action }), TypeError)
+    assert.throws(() => hashResolutionDecision({ action }), TypeError)
+  }
+})
+
+test('public projection drops array and object actions without invoking their string coercion', () => {
+  for (const action of [['create_albi'], ['resolve_fields'], new String('create_albi'),
+    { toString() { return 'create_albi' } },
+    { toString() { throw new Error('Action coercion must not run') } },
+  ]) {
+    const projected = projectReviewResolution({ action, decision: { action, fieldChoices: { apiKey: 'secret' } } })
+    assert.equal(projected.action, null)
+    assert.equal(projected.decision, null)
+  }
+})
+
 test('public resolution projection drops all internal leases, arbitrary JSON and provider messages', () => {
   const row = { id: ID, company_id: ID, run_id: ID, review_id: ID, portal_id: '123', object_type: 'contacts', source_id: '42',
     action: 'resolve_fields', status: 'waiting_on_albi', expected_review_updated_at: TIME,

@@ -32,7 +32,7 @@ export function isResolutionProviderId(value) {
 const providerId = value => isResolutionProviderId(value) ? value : null
 
 export function normalizeResolutionDecision(input) {
-  if (!object(input) || !Object.hasOwn(ACTION_FIELDS, input.action) ||
+  if (!object(input) || typeof input.action !== 'string' || !Object.hasOwn(ACTION_FIELDS, input.action) ||
     Object.keys(input).some(key => key !== 'action' && !ACTION_FIELDS[input.action].has(key))) {
     throw new TypeError('Invalid resolution decision')
   }
@@ -70,7 +70,7 @@ export function hashResolutionDecision(input) {
 
 function projectedDecision(value, action) {
   const input = record(value)
-  if (!Object.hasOwn(ACTION_FIELDS, action) || input.action !== action) return null
+  if (typeof action !== 'string' || !Object.hasOwn(ACTION_FIELDS, action) || input.action !== action) return null
   const cleaned = { action }
   for (const key of ACTION_FIELDS[action]) if (Object.hasOwn(input, key)) cleaned[key] = input[key]
   if (action === 'resolve_fields') cleaned.fieldChoices = Object.fromEntries(Object.entries(record(input.fieldChoices))
@@ -115,7 +115,7 @@ export function projectReviewResolutionEvent(row) {
 // Only this projection belongs in browser responses. Repository rows are executor-facing.
 export function projectReviewResolution(row, events = []) {
   if (!object(row)) return null
-  const action = Object.hasOwn(ACTION_FIELDS, row.action) ? row.action : null
+  const action = typeof row.action === 'string' && Object.hasOwn(ACTION_FIELDS, row.action) ? row.action : null
   return { id: uuid(row.id), runId: uuid(row.run_id), reviewId: uuid(row.review_id), portalId: providerId(row.portal_id),
     objectType: member(row.object_type, ['contacts', 'companies']), sourceId: providerId(row.source_id), action,
     status: member(row.status, RESOLUTION_STATUSES), expectedUpdatedAt: timestamp(row.expected_review_updated_at),
