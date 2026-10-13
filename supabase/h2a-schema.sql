@@ -1188,6 +1188,7 @@ grant execute on function public.h2a_requeue_conflict_resume(uuid, uuid) to serv
 
 -- Durable service-owned review resolution storage.
 
+
 -- Bind a resolution to the review's actual tenant AND run, including direct writes.
 do $$
 begin
@@ -1218,6 +1219,7 @@ create table public.h2a_dry_run_review_resolutions (
   client_request_id uuid not null,
   lease_owner uuid,
   lease_expires_at timestamptz,
+  execution_phase text check (execution_phase in ('applying', 'waiting_on_albi', 'ready_to_recheck')),
   provider_outcome_code text check (provider_outcome_code is null or provider_outcome_code ~ '^[a-z][a-z0-9_]{0,63}$'),
   created_by uuid not null references auth.users(id),
   created_at timestamptz not null default now(),
@@ -1228,8 +1230,37 @@ create table public.h2a_dry_run_review_resolutions (
   unique (company_id, review_id, expected_review_updated_at, decision_hash),
   unique (company_id, client_request_id),
   check ((lease_owner is null) = (lease_expires_at is null)),
-  check ((status = 'applying') = (lease_owner is not null))
+  check ((status = 'applying') = (lease_owner is not null)),
+  constraint h2a_review_resolutions_execution_phase_check check ((status = 'applying') = (execution_phase is not null))
 );
+
+-- Reruns can add the phase column to a previous draft, but cannot guess the
+-- source phase of an already-applying legacy lease. Validation fails closed.
+alter table public.h2a_dry_run_review_resolutions add column if not exists execution_phase text;
+do $$
+begin
+  if not exists (
+    select 1 from pg_catalog.pg_constraint
+    where conname = 'h2a_dry_run_review_resolutions_execution_phase_check'
+      and conrelid = 'public.h2a_dry_run_review_resolutions'::pg_catalog.regclass
+  ) then
+    alter table public.h2a_dry_run_review_resolutions
+      add constraint h2a_dry_run_review_resolutions_execution_phase_check
+      check (execution_phase in ('applying', 'waiting_on_albi', 'ready_to_recheck')) not valid;
+  end if;
+  if not exists (
+    select 1 from pg_catalog.pg_constraint
+    where conname = 'h2a_review_resolutions_execution_phase_check'
+      and conrelid = 'public.h2a_dry_run_review_resolutions'::pg_catalog.regclass
+  ) then
+    alter table public.h2a_dry_run_review_resolutions
+      add constraint h2a_review_resolutions_execution_phase_check
+      check ((status = 'applying') = (execution_phase is not null)) not valid;
+  end if;
+end;
+$$;
+alter table public.h2a_dry_run_review_resolutions validate constraint h2a_dry_run_review_resolutions_execution_phase_check;
+alter table public.h2a_dry_run_review_resolutions validate constraint h2a_review_resolutions_execution_phase_check;
 
 create table public.h2a_dry_run_review_resolution_events (
   id uuid primary key default gen_random_uuid(),
@@ -1318,6 +1349,25 @@ begin
     or v_review.source_id is distinct from p_source_id then
     return pg_catalog.jsonb_build_object('error', 'identity_mismatch');
   end if;
+  -- Under the review lock, exact replays survive subsequent review rechecks.
+  -- Client UUID reuse must not silently select a different semantic decision.
+  select * into v_row from public.h2a_dry_run_review_resolutions r
+    where r.company_id = p_company_id and r.client_request_id = p_client_request_id;
+  if not found then
+    select * into v_row from public.h2a_dry_run_review_resolutions r
+      where r.company_id = p_company_id and r.review_id = p_review_id
+        and r.expected_review_updated_at = p_expected_review_updated_at and r.decision_hash = p_decision_hash;
+  end if;
+  if found then
+    if v_row.run_id is distinct from p_run_id or v_row.review_id is distinct from p_review_id
+      or v_row.portal_id is distinct from p_portal_id or v_row.object_type is distinct from p_object_type
+      or v_row.source_id is distinct from p_source_id or v_row.action is distinct from p_action
+      or v_row.expected_review_updated_at is distinct from p_expected_review_updated_at
+      or v_row.decision_hash is distinct from p_decision_hash or v_row.decision is distinct from p_decision then
+      return pg_catalog.jsonb_build_object('error', 'request_conflict');
+    end if;
+    return pg_catalog.jsonb_build_object('resolution', pg_catalog.to_jsonb(v_row), 'created', false);
+  end if;
   if v_review.updated_at is distinct from p_expected_review_updated_at then
     return pg_catalog.jsonb_build_object('error', 'stale');
   end if;
@@ -1329,28 +1379,13 @@ begin
     p_company_id, p_run_id, p_review_id, p_portal_id, p_object_type, p_source_id, p_action,
     p_expected_review_updated_at, p_decision, p_decision_hash, p_client_request_id, p_actor_id, v_now, v_now
   ) on conflict do nothing returning * into v_row;
-  if found then
-    insert into public.h2a_dry_run_review_resolution_events (
-      company_id, resolution_id, actor_id, event_type, created_at
-    ) values (p_company_id, v_row.id, p_actor_id, 'planned', v_now);
-    return pg_catalog.jsonb_build_object('resolution', pg_catalog.to_jsonb(v_row), 'created', true);
-  end if;
-  -- Client UUID reuse must not silently select a different semantic decision.
-  select * into v_row from public.h2a_dry_run_review_resolutions r
-    where r.company_id = p_company_id and r.client_request_id = p_client_request_id;
-  if not found then
-    select * into v_row from public.h2a_dry_run_review_resolutions r
-      where r.company_id = p_company_id and r.review_id = p_review_id
-        and r.expected_review_updated_at = p_expected_review_updated_at and r.decision_hash = p_decision_hash;
-  end if;
-  if v_row.id is null or v_row.run_id is distinct from p_run_id or v_row.review_id is distinct from p_review_id
-    or v_row.portal_id is distinct from p_portal_id or v_row.object_type is distinct from p_object_type
-    or v_row.source_id is distinct from p_source_id or v_row.action is distinct from p_action
-    or v_row.expected_review_updated_at is distinct from p_expected_review_updated_at
-    or v_row.decision_hash is distinct from p_decision_hash or v_row.decision is distinct from p_decision then
-    return pg_catalog.jsonb_build_object('error', 'request_conflict');
-  end if;
-  return pg_catalog.jsonb_build_object('resolution', pg_catalog.to_jsonb(v_row), 'created', false);
+  -- Same-review RPC creators serialize on the lock; a remaining conflict means
+  -- concurrent client-ID reuse by another review or an out-of-band service write.
+  if not found then return pg_catalog.jsonb_build_object('error', 'request_conflict'); end if;
+  insert into public.h2a_dry_run_review_resolution_events (
+    company_id, resolution_id, actor_id, event_type, created_at
+  ) values (p_company_id, v_row.id, p_actor_id, 'planned', v_now);
+  return pg_catalog.jsonb_build_object('resolution', pg_catalog.to_jsonb(v_row), 'created', true);
 end;
 $$;
 revoke execute on function public.h2a_create_review_resolution(uuid, uuid, uuid, text, text, text, text, timestamptz, jsonb, text, uuid, uuid) from public, anon, authenticated;
@@ -1362,6 +1397,7 @@ create function public.h2a_claim_review_resolution(
 ) returns jsonb language plpgsql security invoker set search_path = '' as $$
 declare
   v_review_id uuid;
+  v_phase text;
   v_row public.h2a_dry_run_review_resolutions%rowtype;
   v_now timestamptz;
 begin
@@ -1385,12 +1421,17 @@ begin
     where r.company_id = p_company_id and r.review_id = v_review_id and r.id <> p_resolution_id
       and r.lease_owner is not null and r.lease_expires_at > v_now
   ) then return pg_catalog.jsonb_build_object('error', 'review_busy'); end if;
-  update public.h2a_dry_run_review_resolutions set status = 'applying', lease_owner = p_owner_token,
+  v_phase := case
+    when v_row.status = 'applying' then v_row.execution_phase
+    when v_row.status in ('waiting_on_albi', 'ready_to_recheck') then v_row.status
+    else 'applying' end;
+  if v_phase is null then return pg_catalog.jsonb_build_object('error', 'invalid_claim_phase'); end if;
+  update public.h2a_dry_run_review_resolutions set status = 'applying', execution_phase = v_phase, lease_owner = p_owner_token,
     lease_expires_at = v_now + pg_catalog.make_interval(secs => p_ttl_seconds), updated_at = v_now
     where company_id = p_company_id and id = p_resolution_id returning * into v_row;
   insert into public.h2a_dry_run_review_resolution_events (
-    company_id, resolution_id, actor_id, event_type, created_at
-  ) values (p_company_id, p_resolution_id, p_actor_id, 'claimed', v_now);
+    company_id, resolution_id, actor_id, event_type, sanitized_details, created_at
+  ) values (p_company_id, p_resolution_id, p_actor_id, 'claimed', pg_catalog.jsonb_build_object('execution_phase', v_phase), v_now);
   return pg_catalog.jsonb_build_object('resolution', pg_catalog.to_jsonb(v_row));
 end;
 $$;
@@ -1414,15 +1455,6 @@ begin
     or (p_provider_outcome_code is not null and p_provider_outcome_code !~ '^[a-z][a-z0-9_]{0,63}$') then
     return pg_catalog.jsonb_build_object('error', 'invalid_finish');
   end if;
-  -- Fixed event/state graph: provider success can retain further pending work.
-  if not (
-    (p_status in ('pending', 'waiting_on_albi', 'ready_to_recheck') and p_event_type in ('provider_applied', 'provider_reconciled'))
-    or (p_status = 'waiting_on_albi' and p_event_type = 'waiting_on_albi')
-    or (p_status = 'ready_to_recheck' and p_event_type = 'recheck_requested')
-    or (p_status = 'completed' and p_event_type = 'completed')
-    or (p_status = 'failed' and p_event_type = 'failed')
-    or (p_status = 'superseded' and p_event_type = 'superseded')
-  ) then return pg_catalog.jsonb_build_object('error', 'invalid_transition'); end if;
   select * into v_row from public.h2a_dry_run_review_resolutions r
     where r.company_id = p_company_id and r.id = p_resolution_id for update;
   if not found then return pg_catalog.jsonb_build_object('error', 'not_found'); end if;
@@ -1431,9 +1463,30 @@ begin
     or v_row.lease_expires_at is null or v_row.lease_expires_at <= v_now then
     return pg_catalog.jsonb_build_object('error', 'lease_lost');
   end if;
+  -- A waiting/recheck lease only evaluates existing work; it cannot restart
+  -- provider mutations. Read failures preserve that phase with a failed event.
+  if v_row.execution_phase in ('waiting_on_albi', 'ready_to_recheck') then
+    if p_status not in ('waiting_on_albi', 'ready_to_recheck', 'completed', 'superseded') or not (
+      (p_status = 'waiting_on_albi' and p_event_type = 'waiting_on_albi')
+      or (p_status = 'ready_to_recheck' and p_event_type = 'recheck_requested')
+      or (p_status = 'completed' and p_event_type = 'completed')
+      or (p_status = 'superseded' and p_event_type = 'superseded')
+      or (p_status = v_row.execution_phase and p_event_type = 'failed')
+    ) then return pg_catalog.jsonb_build_object('error', 'invalid_transition'); end if;
+  elsif v_row.execution_phase = 'applying' then
+    if not (
+      (p_status in ('pending', 'waiting_on_albi', 'ready_to_recheck') and p_event_type in ('provider_applied', 'provider_reconciled'))
+      or (p_status = 'waiting_on_albi' and p_event_type = 'waiting_on_albi')
+      or (p_status = 'ready_to_recheck' and p_event_type = 'recheck_requested')
+      or (p_status = 'completed' and p_event_type = 'completed')
+      or (p_status = 'failed' and p_event_type = 'failed')
+      or (p_status = 'superseded' and p_event_type = 'superseded')
+    ) then return pg_catalog.jsonb_build_object('error', 'invalid_transition'); end if;
+  else return pg_catalog.jsonb_build_object('error', 'invalid_transition');
+  end if;
   update public.h2a_dry_run_review_resolutions set status = p_status,
     provider_outcome_code = coalesce(p_provider_outcome_code, provider_outcome_code),
-    lease_owner = null, lease_expires_at = null, updated_at = v_now
+    lease_owner = null, lease_expires_at = null, execution_phase = null, updated_at = v_now
     where company_id = p_company_id and id = p_resolution_id returning * into v_row;
   insert into public.h2a_dry_run_review_resolution_events (
     company_id, resolution_id, actor_id, event_type, sanitized_details, created_at

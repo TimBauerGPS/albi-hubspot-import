@@ -191,6 +191,53 @@ test('resolution deployable migration and canonical mirror are semantically iden
   assert.doesNotMatch(migration, /create function/)
 })
 
+test('waiting and recheck claims preserve execution phase across expired recovery and restrict finish edges', () => {
+  for (const sql of [readSchema(), readResolutionMigration()]) {
+    const table = tableBody(sql, 'public.h2a_dry_run_review_resolutions')
+    assert.match(table, /execution_phase text check \(execution_phase in \('applying', 'waiting_on_albi', 'ready_to_recheck'\)\)/)
+    assert.match(table, /constraint h2a_review_resolutions_execution_phase_check check \(\(status = 'applying'\) = \(execution_phase is not null\)\)/)
+    const claim = functionBody(sql, 'h2a_claim_review_resolution')
+    assert.match(claim, /v_phase := case\s+when v_row\.status = 'applying' then v_row\.execution_phase\s+when v_row\.status in \('waiting_on_albi', 'ready_to_recheck'\) then v_row\.status\s+else 'applying' end/)
+    assert.match(claim, /v_phase is null[\s\S]*'invalid_claim_phase'/)
+    assert.match(claim, /execution_phase = v_phase/)
+    assert.match(claim, /'claimed', pg_catalog\.jsonb_build_object\('execution_phase', v_phase\)/)
+    const finish = functionBody(sql, 'h2a_finish_review_resolution')
+    const graph = finish.match(/if v_row\.execution_phase in \('waiting_on_albi', 'ready_to_recheck'\) then([\s\S]*?)elsif v_row\.execution_phase = 'applying' then/)
+    assert.ok(graph, 'finish must branch on the persisted execution phase')
+    assert.match(graph[1], /p_status not in \('waiting_on_albi', 'ready_to_recheck', 'completed', 'superseded'\)/)
+    assert.doesNotMatch(graph[1], /p_status = '(?:pending|failed)'/)
+    assert.doesNotMatch(graph[1], /p_event_type = 'provider_applied'/)
+    for (const [status, event] of [['waiting_on_albi', 'waiting_on_albi'], ['ready_to_recheck', 'recheck_requested'], ['completed', 'completed'], ['superseded', 'superseded']]) {
+      assert.match(graph[1], new RegExp(`p_status = '${status}' and p_event_type = '${event}'`))
+    }
+    assert.match(graph[1], /p_status = v_row\.execution_phase and p_event_type = 'failed'/)
+    assert.match(finish, /execution_phase = null/)
+    assert.match(sql, /add column if not exists execution_phase text/)
+    assert.match(sql, /conname = 'h2a_review_resolutions_execution_phase_check'/)
+  }
+})
+
+test('exact client and semantic resolution replays return before new-insert freshness CAS', () => {
+  for (const sql of [readSchema(), readResolutionMigration()]) {
+    const create = functionBody(sql, 'h2a_create_review_resolution')
+    const lock = create.indexOf('for update;')
+    const clientLookup = create.indexOf('r.client_request_id = p_client_request_id')
+    const semanticLookup = create.indexOf('r.expected_review_updated_at = p_expected_review_updated_at and r.decision_hash = p_decision_hash')
+    const conflict = create.indexOf("'request_conflict'")
+    const replayReturn = create.indexOf("'created', false")
+    const cas = create.indexOf('v_review.updated_at is distinct from p_expected_review_updated_at')
+    const insertion = create.indexOf('insert into public.h2a_dry_run_review_resolutions')
+    assert.ok(lock < clientLookup && clientLookup < semanticLookup && semanticLookup < conflict, 'resolve replay identity under the review lock')
+    assert.ok(conflict < replayReturn && replayReturn < cas && cas < insertion, 'exact replays precede freshness; only new requests are CAS-gated')
+    const validation = create.slice(semanticLookup, replayReturn)
+    for (const field of ['run_id', 'review_id', 'portal_id', 'object_type', 'source_id', 'action', 'expected_review_updated_at', 'decision_hash', 'decision']) {
+      assert.match(validation, new RegExp(`v_row\\.${field} is distinct from p_${field}`))
+    }
+    assert.match(create.slice(insertion), /on conflict do nothing/)
+    assert.match(create.slice(insertion), /'request_conflict'/)
+  }
+})
+
 test('dry-run review storage is tenant-safe, bounded, service-only, and CAS-updated', () => {
   const sql = readSchema()
   const reviews = tableBody(sql, 'public.h2a_dry_run_reviews')
