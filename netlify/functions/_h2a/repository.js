@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto'
 import { DRY_RUN_PROPOSED_ACTION_TOTALS, DRY_RUN_REVIEW_TOTAL_FIELDS, SAMPLE_LIMIT_PER_TYPE } from './constants.js'
 import { assertReviewClassification, projectReviewEvent, REVIEW_REASONS, safeReviewCandidates,
   safeReviewChanges, safeReviewEvidence, safeReviewSnapshot } from './review.js'
+import { normalizeResolutionDecision, hashResolutionDecision, safeResolutionEventDetails, isResolutionProviderId,
+  RESOLUTION_STATUSES, RESOLUTION_EVENT_TYPES, RESOLUTION_OUTCOME_CODES, RESOLUTION_EVENT_LIMIT } from './reviewResolution.js'
 
 const BASE_RUN_TOTAL_FIELDS = ['created', 'updated', 'linked', 'delivered', 'reconciled', 'skipped', 'conflict', 'failed', 'dry_run']
 const REVIEW_RUN_COLUMNS = 'id,company_id,mode,status,sample_limit_per_type,review_capture_version,created_at,finished_at'
@@ -14,6 +16,49 @@ const REVIEW_EVENT_TYPES = new Set(['captured', 'recheck_started', 'still_needs_
 const RECHECK_ERRORS = new Set(['not_found', 'stale', 'superseded', 'invalid_recheck'])
 const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const TIMESTAMP_SHAPE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/
+const RESOLUTION_COLUMNS = 'id,company_id,run_id,review_id,portal_id,object_type,source_id,action,status,expected_review_updated_at,decision,decision_hash,client_request_id,lease_owner,lease_expires_at,execution_phase,provider_outcome_code,created_by,created_at,updated_at'
+const RESOLUTION_EVENT_COLUMNS = 'id,company_id,resolution_id,actor_id,event_type,sanitized_details,created_at'
+const ORGANIZATION_CHOICE_COLUMNS = 'id,company_id,portal_id,hubspot_contact_id,hubspot_company_id,reviewed_by,reviewed_at,created_at,updated_at'
+const RESOLUTION_ERRORS = new Set(['invalid_resolution', 'not_found', 'identity_mismatch', 'request_conflict', 'stale',
+  'invalid_claim', 'not_claimable', 'review_busy', 'invalid_claim_phase', 'invalid_finish', 'lease_lost', 'invalid_transition', 'invalid_choice'])
+
+function requireResolutionUuid(value) {
+  if (typeof value !== 'string' || !UUID_SHAPE.test(value)) throw new TypeError('Invalid resolution identity')
+}
+
+function requireResolutionProviderId(value) {
+  if (!isResolutionProviderId(value)) throw new TypeError('Invalid resolution provider identity')
+}
+
+function resolutionFields(row, columns) {
+  if (!row || typeof row !== 'object' || Array.isArray(row) ||
+    columns === RESOLUTION_COLUMNS && (typeof row.id !== 'string' || !UUID_SHAPE.test(row.id))) {
+    throw new Error('Review resolution storage failed')
+  }
+  return Object.fromEntries(columns.split(',').filter(key => Object.hasOwn(row, key)).map(key => [key, row[key]]))
+}
+
+async function resolutionStorage(call) {
+  try {
+    const result = await call()
+    if (result?.error) throw new Error()
+    return result?.data
+  } catch { throw new Error('Review resolution storage failed') }
+}
+
+async function resolutionRpc(supabase, name, args, key = 'resolution', created = false) {
+  const result = await resolutionStorage(() => supabase.rpc(name, args))
+  if (RESOLUTION_ERRORS.has(result?.error)) return { error: result.error }
+  if (!result || result.error || (created && typeof result.created !== 'boolean')) throw new Error('Review resolution storage failed')
+  return { [key]: resolutionFields(result[key], key === 'choice' ? ORGANIZATION_CHOICE_COLUMNS : RESOLUTION_COLUMNS),
+    ...(created ? { created: result.created } : {}) }
+}
+
+function safeStoredResolutionEvent(row) {
+  const event = resolutionFields(row, RESOLUTION_EVENT_COLUMNS)
+  event.sanitized_details = safeResolutionEventDetails(event.sanitized_details)
+  return event
+}
 
 function requireReviewIdentity(value) {
   if (typeof value !== 'string' || !value.trim()) throw new TypeError('Review identity is required')
@@ -38,6 +83,100 @@ function reviewQuery(supabase, companyId, runId) {
 
 function reviewSourceIdentity(query, row) {
   return query.eq('portal_id', row.portal_id).eq('object_type', row.object_type).eq('source_id', row.source_id)
+}
+
+function reviewResolutionRepository(supabase) {
+  return {
+    // Explicit internal rows preserve fencing/phase for execution; HTTP callers must project them.
+    async createReviewResolution(companyId, input) {
+      requireReviewIdentity(companyId)
+      requireReviewIdentity(input.runId)
+      requireResolutionUuid(input.reviewId)
+      requireResolutionProviderId(input.portalId)
+      requireReviewValue(input.objectType, REVIEW_OBJECT_TYPES, 'object type')
+      requireResolutionProviderId(input.sourceId)
+      requireReviewTimestamp(input.expectedUpdatedAt)
+      requireResolutionUuid(input.clientRequestId)
+      requireResolutionUuid(input.actorId)
+      const decision = normalizeResolutionDecision(input.decision)
+      return resolutionRpc(supabase, 'h2a_create_review_resolution', {
+        p_company_id: companyId, p_run_id: input.runId, p_review_id: input.reviewId, p_portal_id: input.portalId,
+        p_object_type: input.objectType, p_source_id: input.sourceId, p_action: decision.action,
+        p_expected_review_updated_at: input.expectedUpdatedAt, p_decision: decision, p_decision_hash: hashResolutionDecision(decision),
+        p_client_request_id: input.clientRequestId, p_actor_id: input.actorId,
+      }, 'resolution', true)
+    },
+    async getReviewResolution(companyId, resolutionId) {
+      requireReviewIdentity(companyId)
+      requireResolutionUuid(resolutionId)
+      const row = await resolutionStorage(() => scoped(supabase, 'h2a_dry_run_review_resolutions', companyId, RESOLUTION_COLUMNS)
+        .eq('id', resolutionId).maybeSingle())
+      return row == null ? null : resolutionFields(row, RESOLUTION_COLUMNS)
+    },
+    async getCurrentReviewResolution(companyId, reviewId) {
+      requireReviewIdentity(companyId)
+      requireResolutionUuid(reviewId)
+      const row = await resolutionStorage(() => scoped(supabase, 'h2a_dry_run_review_resolutions', companyId, RESOLUTION_COLUMNS)
+        .eq('review_id', reviewId).order('created_at', { ascending: false }).order('id', { ascending: false }).limit(1).maybeSingle())
+      return row == null ? null : resolutionFields(row, RESOLUTION_COLUMNS)
+    },
+    async claimReviewResolution(companyId, resolutionId, ownerToken, actorId, ttlSeconds = 120) {
+      requireReviewIdentity(companyId)
+      for (const id of [resolutionId, ownerToken, actorId]) requireResolutionUuid(id)
+      if (!Number.isInteger(ttlSeconds) || ttlSeconds < 1 || ttlSeconds > 3600) throw new TypeError('Invalid resolution lease')
+      return resolutionRpc(supabase, 'h2a_claim_review_resolution', { p_company_id: companyId,
+        p_resolution_id: resolutionId, p_owner_token: ownerToken, p_actor_id: actorId, p_ttl_seconds: ttlSeconds })
+    },
+    async finishReviewResolution(companyId, resolutionId, ownerToken, input) {
+      requireReviewIdentity(companyId)
+      for (const id of [resolutionId, ownerToken, input.actorId]) requireResolutionUuid(id)
+      if (!RESOLUTION_STATUSES.includes(input.status) || input.status === 'applying' ||
+        !RESOLUTION_EVENT_TYPES.includes(input.eventType) || ['planned', 'claimed'].includes(input.eventType) ||
+        input.providerOutcomeCode != null && !RESOLUTION_OUTCOME_CODES.includes(input.providerOutcomeCode)) {
+        throw new TypeError('Invalid resolution finalization')
+      }
+      return resolutionRpc(supabase, 'h2a_finish_review_resolution', { p_company_id: companyId,
+        p_resolution_id: resolutionId, p_owner_token: ownerToken, p_actor_id: input.actorId, p_status: input.status,
+        p_event_type: input.eventType, p_event_details: safeResolutionEventDetails(input.details),
+        p_provider_outcome_code: input.providerOutcomeCode ?? null })
+    },
+    async listReviewResolutionEvents(companyId, resolutionId) {
+      requireReviewIdentity(companyId)
+      requireResolutionUuid(resolutionId)
+      const rows = await resolutionStorage(() => scoped(supabase, 'h2a_dry_run_review_resolution_events', companyId, RESOLUTION_EVENT_COLUMNS)
+        .eq('resolution_id', resolutionId).order('created_at', { ascending: true }).order('id', { ascending: true }).limit(RESOLUTION_EVENT_LIMIT))
+      if (!Array.isArray(rows)) throw new Error('Review resolution storage failed')
+      return rows.slice(0, RESOLUTION_EVENT_LIMIT).map(safeStoredResolutionEvent)
+    },
+    async appendReviewResolutionEvent(companyId, resolutionId, { actorId, eventType, details = {}, now = new Date().toISOString() }) {
+      requireReviewIdentity(companyId)
+      requireResolutionUuid(resolutionId)
+      requireResolutionUuid(actorId)
+      if (!RESOLUTION_EVENT_TYPES.includes(eventType)) throw new TypeError('Invalid resolution event')
+      requireReviewTimestamp(now)
+      const row = await resolutionStorage(() => supabase.from('h2a_dry_run_review_resolution_events')
+        .insert({ company_id: companyId, resolution_id: resolutionId, actor_id: actorId, event_type: eventType,
+          sanitized_details: safeResolutionEventDetails(details), created_at: now })
+        .eq('company_id', companyId).select(RESOLUTION_EVENT_COLUMNS).single())
+      return safeStoredResolutionEvent(row)
+    },
+    async getContactOrganizationChoice(companyId, portalId, contactId) {
+      requireReviewIdentity(companyId)
+      requireResolutionProviderId(portalId)
+      requireResolutionProviderId(contactId)
+      const row = await resolutionStorage(() => scoped(supabase, 'h2a_contact_organization_choices', companyId, ORGANIZATION_CHOICE_COLUMNS)
+        .eq('portal_id', portalId).eq('hubspot_contact_id', contactId).maybeSingle())
+      return row == null ? null : resolutionFields(row, ORGANIZATION_CHOICE_COLUMNS)
+    },
+    async upsertContactOrganizationChoice(companyId, input) {
+      requireReviewIdentity(companyId)
+      for (const id of [input.portalId, input.contactId, input.organizationSourceId]) requireResolutionProviderId(id)
+      requireResolutionUuid(input.actorId)
+      return resolutionRpc(supabase, 'h2a_upsert_contact_organization_choice', { p_company_id: companyId,
+        p_portal_id: input.portalId, p_hubspot_contact_id: input.contactId, p_hubspot_company_id: input.organizationSourceId,
+        p_actor_id: input.actorId }, 'choice')
+    },
+  }
 }
 
 function reviewEvidencePayload(input, objectType) {
@@ -116,6 +255,7 @@ export function aggregateRunTotals(rows, mode) {
 export function createH2ARepository(supabase) {
   if (!supabase?.from || !supabase?.rpc) throw new TypeError('A server-side Supabase client is required')
   return {
+    ...reviewResolutionRepository(supabase),
     // runId arguments are resolved by the server; HTTP handlers must never accept them from browsers.
     async getLatestCompletedSampleDryRun(companyId, after) {
       requireReviewIdentity(companyId)

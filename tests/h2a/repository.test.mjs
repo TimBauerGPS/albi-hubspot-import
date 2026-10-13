@@ -42,6 +42,125 @@ function reviewRepositoryFixture(responses = []) {
 const data = value => ({ data: value, error: null })
 const equalityFilters = call => call.steps.filter(step => step[0] === 'eq').map(step => step.slice(1))
 
+const RESOLUTION_ID = '00000000-0000-4000-8000-000000000003'
+const OWNER_ID = '00000000-0000-4000-8000-000000000004'
+const resolutionRow = { id: RESOLUTION_ID, company_id: 'company-1', run_id: 'sample-2', review_id: REVIEW_ID,
+  portal_id: '123', object_type: 'contacts', source_id: '42', action: 'create_albi', status: 'pending',
+  decision: { action: 'create_albi' }, execution_phase: null, lease_owner: null }
+
+test('review resolution RPCs use exact signatures and normalize decisions and audit details', async () => {
+  const { repository, rpcCalls } = reviewRepositoryFixture([data({ resolution: resolutionRow, created: false }),
+    data({ resolution: { ...resolutionRow, status: 'applying', execution_phase: 'waiting_on_albi', lease_owner: OWNER_ID } }),
+    data({ resolution: { ...resolutionRow, status: 'waiting_on_albi' } }), data({ choice: { hubspot_company_id: '20' } })])
+  const created = await repository.createReviewResolution('company-1', { runId: 'sample-2', reviewId: REVIEW_ID,
+    portalId: '123', objectType: 'contacts', sourceId: '42', expectedUpdatedAt: REVIEW_TIME,
+    decision: { action: 'resolve_fields', fieldChoices: { phoneNumber: 'hubspot', email: 'albi' } },
+    clientRequestId: RESOLUTION_ID, actorId: ACTOR_ID })
+  assert.equal(created.created, false)
+  assert.equal(rpcCalls[0].name, 'h2a_create_review_resolution')
+  assert.deepEqual(rpcCalls[0].args, { p_company_id: 'company-1', p_run_id: 'sample-2', p_review_id: REVIEW_ID,
+    p_portal_id: '123', p_object_type: 'contacts', p_source_id: '42', p_action: 'resolve_fields',
+    p_expected_review_updated_at: REVIEW_TIME,
+    p_decision: { action: 'resolve_fields', fieldChoices: { email: 'albi', phoneNumber: 'hubspot' } },
+    p_decision_hash: '949cec54ac94767f4aeb692bb844c25d7f8d7e656772c5f0785cfb965357deb7',
+    p_client_request_id: RESOLUTION_ID, p_actor_id: ACTOR_ID })
+  const claimed = await repository.claimReviewResolution('company-1', RESOLUTION_ID, OWNER_ID, ACTOR_ID, 120)
+  assert.equal(claimed.resolution.execution_phase, 'waiting_on_albi')
+  assert.equal(claimed.resolution.lease_owner, OWNER_ID)
+  assert.deepEqual(rpcCalls[1], { name: 'h2a_claim_review_resolution', args: {
+    p_company_id: 'company-1', p_resolution_id: RESOLUTION_ID, p_owner_token: OWNER_ID, p_actor_id: ACTOR_ID, p_ttl_seconds: 120,
+  } })
+  await repository.finishReviewResolution('company-1', RESOLUTION_ID, OWNER_ID, { actorId: ACTOR_ID,
+    status: 'waiting_on_albi', eventType: 'failed', details: { code: 'timeout', message: 'secret' }, providerOutcomeCode: 'timeout' })
+  assert.deepEqual(rpcCalls[2], { name: 'h2a_finish_review_resolution', args: {
+    p_company_id: 'company-1', p_resolution_id: RESOLUTION_ID, p_owner_token: OWNER_ID, p_actor_id: ACTOR_ID,
+    p_status: 'waiting_on_albi', p_event_type: 'failed', p_event_details: { code: 'timeout' }, p_provider_outcome_code: 'timeout',
+  } })
+  await repository.upsertContactOrganizationChoice('company-1', { portalId: '123', contactId: '42', organizationSourceId: '20', actorId: ACTOR_ID })
+  assert.deepEqual(rpcCalls[3], { name: 'h2a_upsert_contact_organization_choice', args: {
+    p_company_id: 'company-1', p_portal_id: '123', p_hubspot_contact_id: '42', p_hubspot_company_id: '20', p_actor_id: ACTOR_ID,
+  } })
+})
+
+test('resolution reads and audit inserts always scope company and apply fixed ordering and caps', async () => {
+  const event = { id: RESOLUTION_ID, actor_id: ACTOR_ID, event_type: 'failed', created_at: REVIEW_TIME,
+    sanitized_details: { code: 'timeout', raw: 'secret' } }
+  const { repository, calls } = reviewRepositoryFixture([data(resolutionRow), data(resolutionRow), data([event]), data(event), data({ hubspot_company_id: '20' })])
+  assert.deepEqual(await repository.getReviewResolution('company-1', RESOLUTION_ID), resolutionRow)
+  assert.deepEqual(await repository.getCurrentReviewResolution('company-1', REVIEW_ID), resolutionRow)
+  assert.deepEqual(equalityFilters(calls[0]), [['company_id', 'company-1'], ['id', RESOLUTION_ID]])
+  assert.deepEqual(equalityFilters(calls[1]), [['company_id', 'company-1'], ['review_id', REVIEW_ID]])
+  assert.deepEqual(calls[1].steps.filter(step => step[0] === 'order'), [
+    ['order', 'created_at', { ascending: false }], ['order', 'id', { ascending: false }],
+  ])
+  assert.deepEqual(calls[1].steps.find(step => step[0] === 'limit'), ['limit', 1])
+  const events = await repository.listReviewResolutionEvents('company-1', RESOLUTION_ID)
+  assert.deepEqual(events[0].sanitized_details, { code: 'timeout' })
+  assert.deepEqual(equalityFilters(calls[2]), [['company_id', 'company-1'], ['resolution_id', RESOLUTION_ID]])
+  assert.deepEqual(calls[2].steps.filter(step => step[0] === 'order'), [
+    ['order', 'created_at', { ascending: true }], ['order', 'id', { ascending: true }],
+  ])
+  assert.deepEqual(calls[2].steps.find(step => step[0] === 'limit'), ['limit', 100])
+  await repository.appendReviewResolutionEvent('company-1', RESOLUTION_ID,
+    { actorId: ACTOR_ID, eventType: 'failed', details: { code: 'timeout', apiKey: 'secret' }, now: REVIEW_TIME })
+  assert.deepEqual(calls[3].steps[0], ['insert', { company_id: 'company-1', resolution_id: RESOLUTION_ID,
+    actor_id: ACTOR_ID, event_type: 'failed', sanitized_details: { code: 'timeout' }, created_at: REVIEW_TIME }])
+  assert.deepEqual(equalityFilters(calls[3]), [['company_id', 'company-1']])
+  await repository.getContactOrganizationChoice('company-1', '123', '42')
+  assert.deepEqual(equalityFilters(calls[4]), [['company_id', 'company-1'], ['portal_id', '123'], ['hubspot_contact_id', '42']])
+  for (const call of calls) {
+    const select = call.steps.find(step => step[0] === 'select')
+    assert.ok(select); assert.equal(select[1].includes('*'), false)
+  }
+})
+
+test('resolution repository rejects missing scope and invalid mutation inputs before touching storage', async () => {
+  const { repository, calls, rpcCalls } = reviewRepositoryFixture()
+  for (const call of [() => repository.createReviewResolution('', {}), () => repository.getReviewResolution('', RESOLUTION_ID),
+    () => repository.getCurrentReviewResolution('', REVIEW_ID), () => repository.claimReviewResolution('', RESOLUTION_ID, OWNER_ID, ACTOR_ID),
+    () => repository.finishReviewResolution('', RESOLUTION_ID, OWNER_ID, {}), () => repository.listReviewResolutionEvents('', RESOLUTION_ID),
+    () => repository.appendReviewResolutionEvent('', RESOLUTION_ID, {}), () => repository.getContactOrganizationChoice('', '123', '42'),
+    () => repository.upsertContactOrganizationChoice('', {}),
+    () => repository.claimReviewResolution('company-1', RESOLUTION_ID, OWNER_ID, ACTOR_ID, 3601),
+    () => repository.claimReviewResolution('company-1', RESOLUTION_ID, 'owner-secret', ACTOR_ID, 120),
+    () => repository.finishReviewResolution('company-1', RESOLUTION_ID, OWNER_ID, { actorId: ACTOR_ID, status: 'failed', eventType: 'failed', providerOutcomeCode: 'provider_secret' }),
+    () => repository.appendReviewResolutionEvent('company-1', RESOLUTION_ID, { actorId: ACTOR_ID, eventType: 'unknown' }),
+    () => repository.upsertContactOrganizationChoice('company-1', { portalId: '123', contactId: '42', organizationSourceId: 'secret', actorId: ACTOR_ID }),
+  ]) await assert.rejects(call, TypeError)
+  assert.equal(calls.length, 0); assert.equal(rpcCalls.length, 0)
+})
+
+test('resolution RPC errors expose only fixed error codes and fixed transport failure text', async () => {
+  for (const response of [data({ error: 'lease_lost', message: 'secret' }), data({ error: 'provider-secret' }),
+    { error: { message: 'secret', code: '08006' } }, data(null), data({ resolution: [], raw: 'secret' })]) {
+    const { repository } = reviewRepositoryFixture([response])
+    if (response.data?.error === 'lease_lost') {
+      assert.deepEqual(await repository.claimReviewResolution('company-1', RESOLUTION_ID, OWNER_ID, ACTOR_ID), { error: 'lease_lost' })
+    } else await assert.rejects(() => repository.claimReviewResolution('company-1', RESOLUTION_ID, OWNER_ID, ACTOR_ID),
+      error => error.message === 'Review resolution storage failed')
+  }
+})
+
+test('resolution storage rejects malformed success rows rather than accepting a missing durable identity', async () => {
+  for (const response of [data({ resolution: {} }), data({ resolution: { id: 'provider-secret' } })]) {
+    const { repository } = reviewRepositoryFixture([response])
+    await assert.rejects(() => repository.claimReviewResolution('company-1', RESOLUTION_ID, OWNER_ID, ACTOR_ID),
+      error => error.message === 'Review resolution storage failed')
+  }
+})
+
+test('resolution reads strip unselected columns and retain only a capped sanitized audit history', async () => {
+  const event = { id: RESOLUTION_ID, company_id: 'company-1', resolution_id: RESOLUTION_ID,
+    actor_id: ACTOR_ID, event_type: 'failed', created_at: REVIEW_TIME, token: 'secret', sanitized_details: { code: 'timeout', raw: 'secret' } }
+  const { repository } = reviewRepositoryFixture([data({ ...resolutionRow, token: 'secret' }),
+    data(Array.from({ length: 150 }, () => event)), data(null)])
+  assert.equal((await repository.getReviewResolution('company-1', RESOLUTION_ID)).token, undefined)
+  const events = await repository.listReviewResolutionEvents('company-1', RESOLUTION_ID)
+  assert.equal(events.length, 100); assert.equal(events[0].token, undefined)
+  assert.deepEqual(events[0].sanitized_details, { code: 'timeout' })
+  assert.equal(await repository.getCurrentReviewResolution('company-1', REVIEW_ID), null)
+})
+
 test('latest completed bounded sample includes historical metadata but repeats tenant cutoff and deterministic ordering', async () => {
   const run = { id: 'historical', review_capture_version: null }
   const { repository, calls } = reviewRepositoryFixture([data(run)])
