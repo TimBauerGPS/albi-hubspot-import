@@ -3,9 +3,231 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { normalizeResolutionDecision, hashResolutionDecision, projectReviewResolution,
   projectReviewResolutionEvent, safeResolutionEventDetails } from '../../netlify/functions/_h2a/reviewResolution.js'
+import * as resolution from '../../netlify/functions/_h2a/reviewResolution.js'
 
 const ID = '00000000-0000-4000-8000-000000000003'
 const TIME = '2026-10-13T12:00:00.123456Z'
+
+const contactReview = { objectType: 'contacts', sourceId: '42', reason: 'nonblank_field_difference',
+  candidateSnapshots: [{ id: '2590478' }], proposedChanges: { updates: {}, conflicts: {
+    email: { current: 'old', proposed: 'old' }, phoneNumber: { current: 'old', proposed: 'old' },
+  }, unchanged: [] } }
+const fieldsInput = () => ({ review: structuredClone(contactReview),
+  hubspot: { id: '42', properties: { email: 'hs@example.com', phone: '111' } },
+  albi: { id: '2590478', email: 'albi@example.com', phoneNumber: '222' },
+  decision: { action: 'resolve_fields', fieldChoices: { email: 'albi', phoneNumber: 'hubspot' } } })
+const plan = input => {
+  assert.equal(typeof resolution.buildReviewResolutionPlan, 'function', 'record-level planner is exported')
+  return resolution.buildReviewResolutionPlan(input)
+}
+
+test('planner partitions mixed fields from current records and preserves the waiting state after HubSpot succeeds', () => {
+  const input = fieldsInput(), before = structuredClone(input)
+  const result = plan(input)
+  assert.deepEqual(result.providerOperation, { provider: 'hubspot', operation: 'updateContact', id: '42',
+    properties: { email: 'albi@example.com' } })
+  assert.deepEqual(result.manualTasks, [{ provider: 'albi', objectType: 'contacts', targetId: '2590478',
+    url: 'https://app.albiware.com/Relationships/Contact/2590478', fields: [{ field: 'phoneNumber', value: '111' }] }])
+  assert.equal(result.verification.successStatus, 'waiting_on_albi')
+  assert.deepEqual(result.verification.properties, { email: 'albi@example.com' })
+  assert.equal(result.decisionHash, '949cec54ac94767f4aeb692bb844c25d7f8d7e656772c5f0785cfb965357deb7')
+  assert.equal(result.mapping, null); assert.equal(result.organizationChoice, null)
+  assert.deepEqual(input, before)
+})
+
+test('whole-record equivalent choices produce one patch or one grouped manual task', () => {
+  const input = fieldsInput()
+  input.decision.fieldChoices = { email: 'albi', phoneNumber: 'albi' }
+  const automatic = plan(input)
+  assert.deepEqual(automatic.providerOperation.properties, { email: 'albi@example.com', phone: '222' })
+  assert.deepEqual(automatic.manualTasks, [])
+  assert.equal(automatic.verification.successStatus, 'ready_to_recheck')
+  input.decision.fieldChoices = { email: 'hubspot', phoneNumber: 'hubspot' }
+  const manual = plan(input)
+  assert.equal(manual.providerOperation, null)
+  assert.deepEqual(manual.manualTasks[0].fields, [{ field: 'email', value: 'hs@example.com' }, { field: 'phoneNumber', value: '111' }])
+})
+
+test('explicit chosen blank clears HubSpot while unchosen blanks and equal values are omitted', () => {
+  const input = fieldsInput()
+  input.albi.email = ''; input.albi.phoneNumber = '111'
+  assert.deepEqual(plan(input).providerOperation.properties, { email: '' })
+  input.albi.email = null
+  assert.deepEqual(plan(input).providerOperation.properties, { email: '' })
+  input.decision.fieldChoices = { phoneNumber: 'albi' }
+  assert.equal(plan(input).providerOperation, null)
+  input.decision.fieldChoices = { email: 'hubspot' }; input.hubspot.properties.email = ''
+  assert.deepEqual(plan(input).manualTasks, [])
+  input.hubspot.properties.email = null; input.albi.email = 'keep'
+  assert.deepEqual(plan(input).manualTasks[0].fields, [{ field: 'email', value: '' }])
+})
+
+test('company aliases generate one company patch and a fixed organization link', () => {
+  const input = { review: { objectType: 'companies', sourceId: '43', reason: 'organization_fields_require_review',
+    candidateSnapshots: [{ id: '635650' }], proposedChanges: { conflicts: { name: {}, zipcode: {}, address2: {} } } },
+  hubspot: { id: '43', properties: { name: 'HS', zip: '90001', address2: 'Suite 1' } },
+  albi: { id: '635650', name: 'Albi', zipCode: '90002', addressLine2: 'Suite 2' },
+  decision: { action: 'resolve_fields', fieldChoices: { name: 'albi', zipcode: 'albi', address2: 'hubspot' } } }
+  const result = plan(input)
+  assert.deepEqual(result.providerOperation, { provider: 'hubspot', operation: 'updateCompany', id: '43',
+    properties: { name: 'Albi', zip: '90002' } })
+  assert.equal(result.manualTasks[0].url, 'https://app.albiware.com/Relationships/Organization/635650')
+  assert.deepEqual(result.manualTasks[0].fields, [{ field: 'address2', value: 'Suite 1' }])
+})
+
+test('planner rejects injected values, immutable fields, inapplicable fields, and choices outside current review evidence', () => {
+  const cases = [
+    input => { input.decision.values = { email: 'injected' } },
+    input => { input.decision.url = 'https://evil.test' },
+    input => { input.values = { email: 'injected' } },
+    input => { input.decision.fieldChoices = { id: 'albi' } },
+    input => { input.decision.fieldChoices = { organizationId: 'hubspot' } },
+    input => { input.decision.fieldChoices = { name: 'albi' }; input.review.proposedChanges.conflicts.name = {} },
+    input => { input.review.objectType = 'companies' },
+    input => { delete input.review.proposedChanges.conflicts.email },
+    input => { input.review.reason = 'contact_type_confirmation_required' },
+    input => { input.review.objectType = '__proto__' },
+    input => { input.hubspot.id = '43' }, input => { input.albi.id = '0' },
+    input => { input.albi.objectType = 'companies' },
+    input => { input.hubspot.object_type = 'companies' },
+    input => { input.review.portalId = '123'; input.portalId = '456' },
+    input => { input.albi.id = '2590479' },
+    input => { input.review.candidateSnapshots = [{ id: '2590479' }] },
+    input => { delete input.albi.email }, input => { input.albi.email = { value: 'injected' } },
+    input => { input.albi.email = 'x'.repeat(501) },
+    input => { input.hubspot.properties.phone = false },
+    input => { Object.defineProperty(input.albi, 'email', { get() { throw new Error('Do not read accessor') } }) },
+  ]
+  for (const change of cases) { const input = fieldsInput(); change(input); assert.throws(() => plan(input), TypeError) }
+})
+
+test('link plans use the current reviewed candidate and require explicit many-to-one approval', () => {
+  const input = fieldsInput()
+  input.review.reason = 'multiple_candidates'; input.review.portalId = '123'
+  input.decision = { action: 'link_existing', candidateId: '2590478' }
+  const linked = plan(input)
+  assert.equal(linked.providerOperation, null)
+  assert.deepEqual(linked.mapping, { objectType: 'contacts', sourceId: '42', targetId: '2590478', approveManyToOne: false })
+  input.mappings = [{ portal_id: '123', hubspot_id: '99', albi_contact_id: '2590478' }]
+  assert.throws(() => plan(input), TypeError)
+  input.decision.approveManyToOne = true
+  assert.equal(plan(input).mapping.approveManyToOne, true)
+  input.mappings.push({ portal_id: '123', hubspot_id: '42', albi_contact_id: '888' })
+  assert.throws(() => plan(input), TypeError)
+  input.mappings = []; input.decision.candidateId = '777'
+  assert.throws(() => plan(input), TypeError)
+  input.decision.candidateId = '2590478'; input.review.candidateSnapshots = []
+  assert.throws(() => plan(input), TypeError)
+})
+
+const createInput = objectType => ({ review: { objectType, sourceId: '42', reason: 'no_match', candidateSnapshots: [] },
+  hubspot: { id: '42', properties: objectType === 'contacts' ? { firstname: 'A', lastname: 'B', email: 'a@example.com', phone: '5551112222' }
+    : { name: 'Company', phone: '5551112222' } }, decision: { action: 'create_albi' },
+  optionMappings: [{ mapping_kind: objectType === 'contacts' ? 'default_contact_type' : 'default_organization_type',
+    source_key: 'default', albi_id: '12', confirmed: true }] })
+
+test('create plans rebuild supported payloads from current HubSpot and confirmed type mappings', () => {
+  const contact = plan(createInput('contacts'))
+  assert.deepEqual(contact.providerOperation, { provider: 'albi', operation: 'createContact', payload: {
+    firstName: 'A', lastName: 'B', email: 'a@example.com', phoneNumber: '555-111-2222', contactTypeIds: ['12'],
+  } })
+  assert.deepEqual(contact.mapping, { objectType: 'contacts', sourceId: '42', targetId: null, approveManyToOne: false })
+  assert.deepEqual(contact.verification.create, { objectType: 'contacts', sourceId: '42', portalId: null,
+    typeId: '12', organizationId: null, payload: { firstName: 'A', lastName: 'B', email: 'a@example.com',
+      phoneNumber: '555-111-2222', contactTypeIds: ['12'] } })
+  assert.deepEqual(plan(createInput('companies')).providerOperation, { provider: 'albi', operation: 'createOrganization',
+    payload: { name: 'Company', phoneNumber: '555-111-2222', organizationTypeIds: ['12'] } })
+  const input = createInput('contacts'); input.hubspot.properties.mobilephone = '111'; input.hubspot.properties.zip = '90001'
+  const result = plan(input)
+  assert.equal(result.providerOperation.payload.mobileNumber, undefined)
+  assert.equal(result.providerOperation.payload.zipCode, '90001')
+})
+
+test('create prerequisites reject missing names, options, unresolved context and unsafe phone formats', () => {
+  for (const change of [
+    input => { input.hubspot.properties.lastname = '' }, input => { input.optionMappings[0].confirmed = false },
+    input => { input.optionMappings.push({ ...input.optionMappings[0] }) }, input => { input.optionMappings[0].albi_id = '0' },
+    input => { input.hubspot.properties.phone = '5551112222 x123' },
+    input => { input.associatedCompanyIds = ['99'] },
+    input => { input.mappings = [{ hubspot_id: '42', albi_contact_id: '7' }] },
+  ]) { const input = createInput('contacts'); change(input); assert.throws(() => plan(input), TypeError) }
+  const company = createInput('companies'); company.hubspot.properties.name = null
+  assert.throws(() => plan(company), TypeError)
+})
+
+const organizationInput = () => ({ ...fieldsInput(), review: { ...structuredClone(contactReview), reason: 'multiple_associated_organizations' },
+  decision: { action: 'choose_organization', organizationSourceId: '99' }, associatedCompanyIds: ['98', '99'],
+  organizations: [{ source: { id: '99', properties: { name: 'Organization' } }, targetId: '635650', organizationTypeId: '12' }],
+  albi: { id: '2590478', organizationId: '635650' } })
+
+test('already-associated organization choice saves context without a provider operation or association removal', () => {
+  const result = plan(organizationInput())
+  assert.equal(result.providerOperation, null)
+  assert.deepEqual(result.organizationChoice, { contactId: '42', organizationSourceId: '99' })
+  assert.deepEqual(result.manualTasks, [])
+})
+
+test('organization choice permits one explicit association addition and linked manual Albi reassociation', () => {
+  const input = organizationInput(); input.associatedCompanyIds = ['98']; input.albi.organizationId = '100'
+  assert.throws(() => plan(input), TypeError)
+  input.decision.addHubSpotAssociation = true
+  const result = plan(input)
+  assert.deepEqual(result.providerOperation, { provider: 'hubspot', operation: 'addContactCompanyAssociation', contactId: '42', companyId: '99' })
+  assert.deepEqual(result.manualTasks, [{ provider: 'albi', objectType: 'contacts', targetId: '2590478',
+    url: 'https://app.albiware.com/Relationships/Contact/2590478',
+    organizationUrl: 'https://app.albiware.com/Relationships/Organization/635650', fields: [{ field: 'organizationId', value: '635650' }] }])
+  assert.deepEqual(result.verification.association, { contactId: '42', companyId: '99' })
+  assert.equal(result.verification.successStatus, 'waiting_on_albi')
+})
+
+test('organization choice rejects missing, archived, mismatched or unresolved current organizations', () => {
+  for (const change of [input => { input.organizations = [] }, input => { input.organizations[0].source.archived = true },
+    input => { input.organizations[0].source.objectType = 'contacts' }, input => { input.organizations[0].targetId = null },
+    input => { input.organizations[0].targetId = 'https://evil.test' }, input => { input.review.objectType = 'companies' },
+  ]) { const input = organizationInput(); change(input); assert.throws(() => plan(input), TypeError) }
+})
+
+test('association review without identity candidates can use a server-selected current Albi contact', () => {
+  const input = organizationInput(); input.review.candidateSnapshots = []; input.albi.organizationId = '100'
+  assert.deepEqual(plan(input).manualTasks[0].fields, [{ field: 'organizationId', value: '635650' }])
+})
+
+test('create with one resolved organization uses inherited confirmed types and retains exact reconciliation evidence', () => {
+  const input = createInput('contacts')
+  input.review.portalId = '123'; input.associatedCompanyIds = ['99']
+  input.organizations = [{ source: { id: '99' }, targetId: '635650', organizationTypeId: '7' }]
+  input.optionMappings = [{ mapping_kind: 'organization_to_contact_type', source_key: '7', albi_id: '14', confirmed: true }]
+  const result = plan(input)
+  assert.equal(result.providerOperation.payload.organizationId, '635650')
+  assert.deepEqual(result.providerOperation.payload.contactTypeIds, ['14'])
+  assert.deepEqual(result.verification.create, { objectType: 'contacts', sourceId: '42', portalId: '123', typeId: '14',
+    organizationId: '635650', payload: { firstName: 'A', lastName: 'B', email: 'a@example.com', phoneNumber: '555-111-2222',
+      contactTypeIds: ['14'], organizationId: '635650' } })
+  result.providerOperation.payload.firstName = 'changed'
+  assert.equal(result.verification.create.payload.firstName, 'A')
+})
+
+test('create context rejects organization IDs that the existing numeric wrapper cannot represent', () => {
+  const input = createInput('contacts'); input.associatedCompanyIds = ['99']
+  input.organizations = [{ source: { id: '99' }, targetId: '9999999999999999999999' }]
+  assert.throws(() => plan(input), TypeError)
+})
+
+test('contact aliases cover every approved field without allowing provider-native names as decisions', () => {
+  const input = fieldsInput()
+  input.hubspot.properties = { firstname: 'HS', lastname: 'HS', email: 'HS', phone: 'HS', mobilephone: 'HS', jobtitle: 'HS',
+    address: 'HS', address2: 'HS', city: 'HS', state: 'HS', zip: 'HS', country: 'HS' }
+  input.albi = { id: '2590478', firstname: 'A', lastname: 'B', emailAddress: 'a@example.com', phone_number: '111',
+    mobilePhone: '222', title: 'Director', street_address: 'Road', addressLine2: 'Suite', city: 'City',
+    stateCode: 'CA', postalCode: '90001', countryCode: 'US' }
+  input.decision.fieldChoices = { firstName: 'albi', lastName: 'albi', email: 'albi', phoneNumber: 'albi', mobileNumber: 'albi',
+    jobTitle: 'albi', address1: 'albi', address2: 'albi', city: 'albi', state: 'albi', zipcode: 'albi', country: 'albi' }
+  input.review.proposedChanges.conflicts = Object.fromEntries(Object.keys(input.decision.fieldChoices).map(field => [field, {}]))
+  assert.deepEqual(plan(input).providerOperation.properties, { firstname: 'A', lastname: 'B', email: 'a@example.com', phone: '111',
+    mobilephone: '222', jobtitle: 'Director', address: 'Road', address2: 'Suite', city: 'City', state: 'CA', zip: '90001', country: 'US' })
+  input.decision.fieldChoices = { firstname: 'albi' }
+  assert.throws(() => plan(input), TypeError)
+})
 
 test('decisions keep exact action-specific fields and sort field choices without mutating input', () => {
   const input = { action: 'resolve_fields', fieldChoices: { phoneNumber: 'hubspot', email: 'albi' } }

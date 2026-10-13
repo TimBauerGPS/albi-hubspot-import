@@ -1,5 +1,8 @@
 import { createHash } from 'node:crypto'
-import { H2A_REVIEW_ERROR_CATEGORIES, H2A_REVIEW_ERROR_CODES } from '../../../shared/h2aReviewReasons.js'
+import { H2A_REVIEW_ERROR_CATEGORIES, H2A_REVIEW_ERROR_CODES, getH2AReviewReason } from '../../../shared/h2aReviewReasons.js'
+import { buildAlbiRecordUrl } from '../../../shared/h2aProviderLinks.js'
+import { resolveContactType } from './options.js'
+import { normalizePhone } from './normalize.js'
 
 const ACTION_FIELDS = Object.freeze({
   resolve_fields: new Set(['fieldChoices']),
@@ -66,6 +69,197 @@ function canonical(value) {
 
 export function hashResolutionDecision(input) {
   return createHash('sha256').update(canonical(normalizeResolutionDecision(input))).digest('hex')
+}
+
+// Canonical choice names stay independent of each provider's property names.
+const SHARED_FIELD_METADATA = {
+  phoneNumber: { hubspot: 'phone', albi: ['phoneNumber', 'phone', 'phone_number'] },
+  address1: { hubspot: 'address', albi: ['address1', 'address', 'streetAddress', 'street_address'] },
+  address2: { hubspot: 'address2', albi: ['address2', 'addressLine2'] },
+  city: { hubspot: 'city', albi: ['city'] }, state: { hubspot: 'state', albi: ['state', 'stateCode'] },
+  zipcode: { hubspot: 'zip', albi: ['zipcode', 'zipCode', 'zip', 'postalCode'] },
+  country: { hubspot: 'country', albi: ['country', 'countryCode'] },
+}
+const FIELD_METADATA = {
+  contacts: { firstName: { hubspot: 'firstname', albi: ['firstName', 'firstname'] },
+    lastName: { hubspot: 'lastname', albi: ['lastName', 'lastname'] },
+    email: { hubspot: 'email', albi: ['email', 'emailAddress'] },
+    mobileNumber: { hubspot: 'mobilephone', albi: ['mobileNumber', 'mobilePhone', 'mobilephone', 'mobile'] },
+    jobTitle: { hubspot: 'jobtitle', albi: ['jobTitle', 'jobtitle', 'title'] }, ...SHARED_FIELD_METADATA },
+  companies: { name: { hubspot: 'name', albi: ['name', 'companyName'] },
+    domain: { hubspot: 'domain', albi: ['domain', 'website', 'websiteUrl'] }, ...SHARED_FIELD_METADATA },
+}
+const invalidPlan = () => { throw new TypeError('Invalid resolution plan evidence') }
+const positiveId = value => { if (!isResolutionProviderId(value)) invalidPlan(); return value }
+const list = value => value === undefined ? [] : Array.isArray(value) ? value : invalidPlan()
+
+function requireRecord(value, objectType, expectedId = null) {
+  if (!object(value) || value.archived === true || value.objectType !== undefined && value.objectType !== objectType ||
+    value.object_type !== undefined && value.object_type !== objectType) invalidPlan()
+  if (value.id !== undefined) positiveId(value.id)
+  if (expectedId !== null && value.id !== undefined && value.id !== expectedId) invalidPlan()
+  return value
+}
+
+// Unlike display projections, retain explicit null/empty values and never truncate writes.
+function fieldValue(value, aliases, required = true) {
+  for (const source of [record(value.properties), value]) {
+    for (const alias of aliases) {
+      if (!Object.hasOwn(source, alias)) continue
+      const descriptor = Object.getOwnPropertyDescriptor(source, alias)
+      if (!Object.hasOwn(descriptor, 'value')) invalidPlan()
+      const item = descriptor.value
+      if (item === null) return ''
+      if (typeof item !== 'string' || item.length > 500) invalidPlan()
+      return item
+    }
+  }
+  if (required) invalidPlan()
+  return null
+}
+
+function reviewedAlbi(input, review, type) {
+  const albi = requireRecord(input.albi, type)
+  const targetId = positiveId(albi.id)
+  const candidates = list(review.candidateSnapshots)
+  if (candidates.filter(candidate => candidate?.id === targetId).length !== 1) invalidPlan()
+  return albi
+}
+
+function manualTask(type, targetId, fields, organizationId = null) {
+  const url = buildAlbiRecordUrl(type, positiveId(targetId))
+  if (!url) invalidPlan()
+  return { provider: 'albi', objectType: type, targetId, url,
+    ...(organizationId ? { organizationUrl: buildAlbiRecordUrl('companies', positiveId(organizationId)) } : {}), fields }
+}
+
+function mappingRows(input, portalId) {
+  return list(input.mappings).filter(row => {
+    if (!object(row)) invalidPlan()
+    const portal = row.portal_id ?? row.portalId
+    if (portal !== undefined && !portalId) invalidPlan()
+    return portal === undefined || portal === portalId
+  })
+}
+const mappingSource = row => row.hubspot_id ?? row.sourceId ?? row.hubspotId
+const mappingTarget = (row, type) => row[type === 'contacts' ? 'albi_contact_id' : 'albi_organization_id'] ?? row.targetId
+
+function selectedOrganization(input, sourceId) {
+  const matches = list(input.organizations).filter(item => item?.source?.id === sourceId)
+  if (matches.length !== 1) invalidPlan()
+  const organization = matches[0]
+  requireRecord(organization.source, 'companies', sourceId)
+  positiveId(organization.targetId)
+  return organization
+}
+
+function createPayload(input, hubspot, type, associations) {
+  let organization = null
+  if (type === 'contacts' && associations.length) {
+    if (associations.length !== 1) invalidPlan()
+    organization = selectedOrganization(input, associations[0])
+    if (!Number.isSafeInteger(Number(organization.targetId))) invalidPlan()
+  }
+  const options = list(input.optionMappings)
+  const selectedOptions = type === 'contacts' ? options : options.filter(row =>
+    (row?.mapping_kind ?? row?.mappingKind) === 'default_organization_type' && (row.source_key ?? row.sourceKey) === 'default')
+    .map(row => ({ ...row, mapping_kind: 'default_contact_type' }))
+  const resolved = resolveContactType({ mappings: selectedOptions, inheritFromOrganization: type === 'contacts',
+    organizationTypeId: organization?.organizationTypeId })
+  if (resolved.action !== 'resolved') invalidPlan()
+  const typeId = positiveId(resolved.contactTypeId)
+  if (!Number.isSafeInteger(Number(typeId))) invalidPlan()
+  const payload = {}
+  // Only properties accepted by the existing Albi create contracts are copied.
+  for (const field of type === 'contacts' ? ['firstName', 'lastName', 'email', 'phoneNumber', 'jobTitle',
+    'address1', 'address2', 'city', 'state', 'zipcode', 'country'] : ['name', 'phoneNumber', 'address1', 'address2', 'city', 'state', 'zipcode', 'country']) {
+    const meta = FIELD_METADATA[type][field]
+    let value = fieldValue(hubspot, [meta.hubspot, field], false)
+    if (['firstName', 'lastName', 'name'].includes(field) && !value?.trim()) invalidPlan()
+    if (value === null || value === '') continue
+    if (field === 'phoneNumber') {
+      const normalized = normalizePhone(value)
+      if (normalized.conflictReason || !normalized.writable) invalidPlan()
+      value = normalized.writable
+    }
+    payload[field === 'zipcode' ? 'zipCode' : field] = value
+  }
+  payload[type === 'contacts' ? 'contactTypeIds' : 'organizationTypeIds'] = [typeId]
+  if (organization) payload.organizationId = organization.targetId
+  return { payload, typeId, organizationId: organization?.targetId ?? null }
+}
+
+// Pure: receives only server-reloaded evidence, returns data, and never accesses capabilities.
+export function buildReviewResolutionPlan(input) {
+  if (!object(input) || Object.keys(input).some(key => !['review', 'hubspot', 'albi', 'decision', 'mappings',
+    'optionMappings', 'associatedCompanyIds', 'organizations', 'portalId'].includes(key))) invalidPlan()
+  const decision = normalizeResolutionDecision(input.decision)
+  const review = record(input.review), type = review.objectType
+  if (!['contacts', 'companies'].includes(type) || !getH2AReviewReason(review.reason).actions.includes(decision.action)) invalidPlan()
+  const sourceId = positiveId(review.sourceId)
+  const portalId = input.portalId ?? review.portalId ?? null
+  if (portalId !== null) positiveId(portalId)
+  if (review.portalId !== undefined && review.portalId !== portalId) invalidPlan()
+  const hubspot = requireRecord(input.hubspot, type, sourceId)
+  const associations = [...new Set(list(input.associatedCompanyIds).map(positiveId))]
+  const result = { decisionHash: hashResolutionDecision(decision), action: decision.action, providerOperation: null,
+    manualTasks: [], mapping: null, organizationChoice: null,
+    verification: { successStatus: 'ready_to_recheck', properties: null, association: null, create: null } }
+  if (decision.action === 'resolve_fields') {
+    const albi = reviewedAlbi(input, review, type), properties = {}, fields = []
+    const changes = record(review.proposedChanges)
+    for (const [field, winner] of Object.entries(decision.fieldChoices)) {
+      if (!Object.hasOwn(FIELD_METADATA[type], field) ||
+        !Object.hasOwn(record(changes.conflicts), field) && !Object.hasOwn(record(changes.updates), field)) invalidPlan()
+      const meta = FIELD_METADATA[type][field]
+      const hs = fieldValue(hubspot, [meta.hubspot, field]), target = fieldValue(albi, meta.albi)
+      if (hs === target) continue
+      if (winner === 'albi') properties[meta.hubspot] = target
+      else fields.push({ field, value: hs })
+    }
+    if (Object.keys(properties).length) {
+      result.providerOperation = { provider: 'hubspot', operation: type === 'contacts' ? 'updateContact' : 'updateCompany', id: sourceId, properties }
+      result.verification.properties = { ...properties }
+    }
+    if (fields.length) result.manualTasks.push(manualTask(type, albi.id, fields))
+  } else if (decision.action === 'link_existing') {
+    const albi = reviewedAlbi(input, review, type)
+    if (decision.candidateId !== albi.id) invalidPlan()
+    const mappings = mappingRows(input, portalId)
+    if (mappings.some(row => mappingSource(row) === sourceId && mappingTarget(row, type) !== albi.id) ||
+      mappings.some(row => mappingSource(row) !== sourceId && mappingTarget(row, type) === albi.id) && !decision.approveManyToOne) invalidPlan()
+    result.mapping = { objectType: type, sourceId, targetId: albi.id, approveManyToOne: decision.approveManyToOne === true }
+  } else if (decision.action === 'create_albi') {
+    if (mappingRows(input, portalId).some(row => mappingSource(row) === sourceId)) invalidPlan()
+    const create = createPayload(input, hubspot, type, associations)
+    result.providerOperation = { provider: 'albi', operation: type === 'contacts' ? 'createContact' : 'createOrganization', payload: create.payload }
+    result.mapping = { objectType: type, sourceId, targetId: null, approveManyToOne: false }
+    // Existing record creates have no provider source-marker field. Identity is for fenced service reconciliation.
+    result.verification.create = { objectType: type, sourceId, portalId, typeId: create.typeId,
+      organizationId: create.organizationId, payload: { ...create.payload,
+        [type === 'contacts' ? 'contactTypeIds' : 'organizationTypeIds']: [create.typeId] } }
+  } else {
+    if (type !== 'contacts') invalidPlan()
+    const organization = selectedOrganization(input, decision.organizationSourceId)
+    if (!associations.includes(decision.organizationSourceId)) {
+      if (decision.addHubSpotAssociation !== true) invalidPlan()
+      result.providerOperation = { provider: 'hubspot', operation: 'addContactCompanyAssociation', contactId: sourceId, companyId: decision.organizationSourceId }
+      result.verification.association = { contactId: sourceId, companyId: decision.organizationSourceId }
+    }
+    result.organizationChoice = { contactId: sourceId, organizationSourceId: decision.organizationSourceId }
+    if (input.albi !== undefined && input.albi !== null) {
+      // Association evaluation can stop before identity matching, leaving no captured candidates.
+      // The service must select this current contact through tenant-scoped matching/mappings.
+      const albi = requireRecord(input.albi, type)
+      positiveId(albi.id)
+      const current = fieldValue(albi, ['organizationId', 'organization_id'], false)
+      if (current !== null && current !== '') positiveId(current)
+      if (current !== organization.targetId) result.manualTasks.push(manualTask(type, albi.id,
+        [{ field: 'organizationId', value: organization.targetId }], organization.targetId))
+    }
+  }
+  if (result.manualTasks.length) result.verification.successStatus = 'waiting_on_albi'
+  return result
 }
 
 function projectedDecision(value, action) {
