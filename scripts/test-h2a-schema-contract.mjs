@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { test } from 'node:test'
 
 // Static deployment contract only: this does not replace PostgreSQL role/concurrency tests.
 const schemaUrl = new URL('../supabase/h2a-schema.sql', import.meta.url)
 const sampleMigrationUrl = new URL('../supabase/h2a-dry-run-samples.sql', import.meta.url)
 const reviewMigrationUrl = new URL('../supabase/h2a-dry-run-review-workflow.sql', import.meta.url)
+const resolutionMigrationUrl = new URL('../supabase/h2a-review-resolutions.sql', import.meta.url)
 const requiredTables = [
   'h2a_company_config', 'h2a_option_mappings', 'h2a_sync_runs',
   'h2a_cursors', 'h2a_backfill_windows', 'h2a_contact_mappings',
@@ -14,18 +15,24 @@ const requiredTables = [
   'h2a_conflict_resumes', 'h2a_execution_leases', 'h2a_daily_claims',
   'h2a_run_checkpoints',
   'h2a_dry_run_reviews', 'h2a_dry_run_review_events',
+  'h2a_dry_run_review_resolutions', 'h2a_dry_run_review_resolution_events', 'h2a_contact_organization_choices',
 ]
 const serviceOnlyTables = ['h2a_dry_run_reviews', 'h2a_dry_run_review_events']
+const resolutionTables = ['h2a_dry_run_review_resolutions', 'h2a_dry_run_review_resolution_events', 'h2a_contact_organization_choices']
 const readSchema = () => readFileSync(schemaUrl, 'utf8').replace(/--[^\n]*/g, '').toLowerCase()
 const readSampleMigration = () => readFileSync(sampleMigrationUrl, 'utf8').replace(/--[^\n]*/g, '').toLowerCase()
 const readReviewMigration = () => readFileSync(reviewMigrationUrl, 'utf8').replace(/--[^\n]*/g, '').toLowerCase()
+const readResolutionMigration = () => {
+  assert.ok(existsSync(resolutionMigrationUrl), 'deployable resolution migration must exist')
+  return readFileSync(resolutionMigrationUrl, 'utf8').replace(/--[^\n]*/g, '').toLowerCase()
+}
 const tableBody = (sql, table) => {
-  const body = sql.match(new RegExp(`create table ${table.replace('.', '\\.')} \\(([\\s\\S]*?)\\n\\);`))?.[1]
+  const body = sql.match(new RegExp(`create table (?:if not exists )?${table.replace('.', '\\.')} \\(([\\s\\S]*?)\\n\\);`))?.[1]
   assert.ok(body, `${table} must exist`)
   return body
 }
 const functionBody = (sql, name) => {
-  const body = sql.match(new RegExp(`create function public\\.${name}\\([\\s\\S]*?as \\$\\$([\\s\\S]*?)\\$\\$;`))?.[1]
+  const body = sql.match(new RegExp(`create (?:or replace )?function public\\.${name}\\([\\s\\S]*?as \\$\\$([\\s\\S]*?)\\$\\$;`))?.[1]
   assert.ok(body, `${name} must exist`)
   return body
 }
@@ -40,7 +47,7 @@ test('all tenant tables have UUID keys, ownership, RLS, and authenticated read-o
     assert.match(body, /\buuid primary key/)
     assert.match(body, /company_id uuid (?:primary key|not null)/)
     assert.match(sql, new RegExp(`alter table public\\.${table} enable row level security;`))
-    if (serviceOnlyTables.includes(table)) {
+    if ([...serviceOnlyTables, ...resolutionTables].includes(table)) {
       assert.match(sql, new RegExp(`revoke all on table public\\.${table} from public, anon, authenticated, service_role;`))
       assert.doesNotMatch(sql, new RegExp(`grant [^;]*on (?:table )?public\\.${table} to authenticated;`))
       assert.doesNotMatch(sql, new RegExp(`create policy[^;]+on public\\.${table}`))
@@ -69,6 +76,119 @@ test('all tenant tables have UUID keys, ownership, RLS, and authenticated read-o
     assert.match(policy, new RegExp(`company_id = ${table}\\.company_id`))
   }
   assert.doesNotMatch(sql, /create policy[^;]+for (?:all|insert|update|delete)/)
+})
+
+// These contracts catch missing tenant keys/grants, expanded state alphabets,
+// lost CAS/lease fencing, cross-review execution races, and migration mirror drift.
+test('durable resolution tables preserve tenant identity, fixed states, append-only events, and indexed FKs', () => {
+  for (const sql of [readSchema(), readResolutionMigration()]) {
+    for (const table of resolutionTables) {
+      const body = tableBody(sql, `public.${table}`)
+      assert.match(body, /id uuid primary key default gen_random_uuid\(\)/)
+      assert.match(body, /company_id uuid not null references public\.companies\(id\)/)
+      assert.match(body, /unique \(company_id, id\)/)
+      assert.match(sql, new RegExp(`alter table public\\.${table} enable row level security;`))
+      assert.match(sql, new RegExp(`revoke all on table public\\.${table} from public, anon, authenticated, service_role;`))
+      assert.doesNotMatch(sql, new RegExp(`grant [^;]*public\\.${table} to (?:public|anon|authenticated)`))
+      assert.doesNotMatch(sql, new RegExp(`create policy[^;]*public\\.${table}`))
+    }
+    const resolutions = tableBody(sql, 'public.h2a_dry_run_review_resolutions')
+    const events = tableBody(sql, 'public.h2a_dry_run_review_resolution_events')
+    const choices = tableBody(sql, 'public.h2a_contact_organization_choices')
+    const values = (body, field) => [...body.match(new RegExp(`${field} text[^\\n]*check \\(${field} in \\(([\\s\\S]*?)\\)\\)`))[1].matchAll(/'([^']+)'/g)].map(m => m[1])
+    assert.deepEqual(values(resolutions, 'status'), ['pending', 'applying', 'waiting_on_albi', 'ready_to_recheck', 'completed', 'failed', 'superseded'])
+    assert.deepEqual(values(resolutions, 'action'), ['resolve_fields', 'link_existing', 'create_albi', 'choose_organization'])
+    assert.deepEqual(values(events, 'event_type'), ['planned', 'claimed', 'provider_applied', 'provider_reconciled', 'waiting_on_albi', 'recheck_requested', 'completed', 'failed', 'superseded'])
+    assert.match(resolutions, /unique \(company_id, review_id, expected_review_updated_at, decision_hash\)/)
+    assert.match(resolutions, /unique \(company_id, client_request_id\)/)
+    assert.match(resolutions, /foreign key \(company_id, run_id\) references public\.h2a_sync_runs \(company_id, id\) on delete cascade/)
+    assert.match(resolutions, /foreign key \(company_id, run_id, review_id\) references public\.h2a_dry_run_reviews \(company_id, run_id, id\) on delete cascade/)
+    assert.match(resolutions, /decision_hash ~ '\^\[a-f0-9\]\{64\}\$'/)
+    assert.match(resolutions, /check \(\(lease_owner is null\) = \(lease_expires_at is null\)\)/)
+    assert.match(events, /foreign key \(company_id, resolution_id\) references public\.h2a_dry_run_review_resolutions \(company_id, id\) on delete cascade/)
+    assert.match(events, /sanitized_details jsonb not null default '\{\}'::jsonb check \(jsonb_typeof\(sanitized_details\) = 'object'\)/)
+    assert.match(sql, /grant select, insert on table public\.h2a_dry_run_review_resolution_events to service_role;/)
+    assert.doesNotMatch(sql, /grant [^;]*(?:update|delete)[^;]*public\.h2a_dry_run_review_resolution_events/)
+    assert.match(choices, /unique \(company_id, portal_id, hubspot_contact_id\)/)
+    assert.match(sql, /create index (?:if not exists )?h2a_review_resolutions_active_idx\s+on public\.h2a_dry_run_review_resolutions \(company_id, status, created_at, id\)\s+where status in \('pending', 'applying', 'waiting_on_albi', 'ready_to_recheck', 'failed'\)/)
+    for (const [table, columns] of [
+      ['h2a_dry_run_review_resolutions', ['run_id', 'review_id', 'created_by']],
+      ['h2a_dry_run_review_resolution_events', ['resolution_id', 'actor_id']],
+      ['h2a_contact_organization_choices', ['reviewed_by']],
+    ]) for (const column of columns) assert.match(sql, new RegExp(`create index (?:if not exists )?\\w+\\s+on public\\.${table} \\(${column}\\)`))
+    assert.match(sql, /from pg_catalog\.pg_constraint[\s\S]*conrelid = 'public\.h2a_dry_run_reviews'::pg_catalog\.regclass/)
+    assert.match(sql, /conname = 'h2a_dry_run_reviews_company_run_id_key'/)
+    assert.match(sql, /add constraint h2a_dry_run_reviews_company_run_id_key unique \(company_id, run_id, id\)/)
+    assert.doesNotMatch(sql, /add constraint if not exists/)
+  }
+})
+
+test('resolution RPCs fail closed, pin invoker search paths, and expose execution only to service role', () => {
+  const required = {
+    h2a_create_review_resolution: ['company_id', 'run_id', 'review_id', 'portal_id', 'object_type', 'source_id', 'action', 'expected_review_updated_at', 'decision', 'decision_hash', 'client_request_id', 'actor_id'],
+    h2a_claim_review_resolution: ['company_id', 'resolution_id', 'owner_token', 'actor_id', 'ttl_seconds'],
+    h2a_finish_review_resolution: ['company_id', 'resolution_id', 'owner_token', 'actor_id', 'status', 'event_type', 'event_details'],
+    h2a_upsert_contact_organization_choice: ['company_id', 'portal_id', 'hubspot_contact_id', 'hubspot_company_id', 'actor_id'],
+  }
+  for (const sql of [readSchema(), readResolutionMigration()]) for (const [name, parameters] of Object.entries(required)) {
+    const definition = sql.match(new RegExp(`create (?:or replace )?function public\\.${name}\\(([\\s\\S]*?)as \\$\\$`))?.[1]
+    assert.match(definition, /security invoker set search_path = ''/)
+    const body = functionBody(sql, name)
+    for (const parameter of parameters) assert.match(body, new RegExp(`p_${parameter} is null`))
+    assert.match(sql, new RegExp(`revoke execute on function public\\.${name}\\([^;]+\\) from public, anon, authenticated;`))
+    assert.match(sql, new RegExp(`grant execute on function public\\.${name}\\([^;]+\\) to service_role;`))
+    assert.doesNotMatch(body, /(?:http|net)\.(?:http|post|get)|p_\w*snapshot/)
+  }
+})
+
+test('resolution RPCs serialize review claims, fence completion, and preserve idempotent creation', () => {
+  for (const sql of [readSchema(), readResolutionMigration()]) {
+    const create = functionBody(sql, 'h2a_create_review_resolution')
+    assert.match(create, /where r\.company_id = p_company_id and r\.id = p_review_id[\s\S]*for update/)
+    for (const field of ['run_id', 'portal_id', 'object_type', 'source_id']) assert.match(create, new RegExp(`v_review\\.${field} is distinct from p_${field}`))
+    assert.match(create, /v_review\.updated_at is distinct from p_expected_review_updated_at/)
+    assert.match(create, /on conflict do nothing/)
+    assert.match(create, /'request_conflict'/)
+    assert.match(create, /insert into public\.h2a_dry_run_review_resolution_events[\s\S]*'planned'/)
+    const claim = functionBody(sql, 'h2a_claim_review_resolution')
+    assert.match(claim, /pg_catalog\.pg_advisory_xact_lock\(pg_catalog\.hashtextextended\(p_company_id::text \|\| ':' \|\| v_review_id::text, 0\)\)/)
+    assert.match(claim, /status in \('pending', 'applying', 'waiting_on_albi', 'ready_to_recheck', 'failed'\)/)
+    assert.match(claim, /lease_owner is null or r\.lease_expires_at <= v_now/)
+    assert.match(claim, /r\.id <> p_resolution_id[\s\S]*r\.lease_expires_at > v_now/)
+    assert.match(claim, /status = 'applying'/)
+    assert.match(claim, /p_ttl_seconds <= 0 or p_ttl_seconds > 3600/)
+    assert.match(claim, /'claimed'/)
+    const finish = functionBody(sql, 'h2a_finish_review_resolution')
+    assert.match(finish, /v_row\.lease_owner is distinct from p_owner_token/)
+    assert.match(finish, /v_row\.lease_expires_at <= v_now/)
+    assert.match(finish, /v_row\.status <> 'applying'/)
+    assert.match(finish, /p_status not in \('pending', 'waiting_on_albi', 'ready_to_recheck', 'completed', 'failed', 'superseded'\)/)
+    assert.match(finish, /p_status in \('pending', 'waiting_on_albi', 'ready_to_recheck'\) and p_event_type in \('provider_applied', 'provider_reconciled'\)/)
+    for (const [status, event] of [['waiting_on_albi', 'waiting_on_albi'], ['ready_to_recheck', 'recheck_requested'], ['completed', 'completed'], ['failed', 'failed'], ['superseded', 'superseded']]) {
+      assert.match(finish, new RegExp(`p_status = '${status}' and p_event_type = '${event}'`))
+    }
+    assert.match(finish, /'invalid_transition'/)
+    assert.match(finish, /lease_owner = null, lease_expires_at = null/)
+    const assignments = finish.match(/update public\.h2a_dry_run_review_resolutions set([\s\S]*?)where/)?.[1]
+    assert.ok(assignments)
+    assert.doesNotMatch(assignments, /\b(?:company_id|run_id|review_id|portal_id|object_type|source_id)\s*=/)
+    const choice = functionBody(sql, 'h2a_upsert_contact_organization_choice')
+    assert.match(choice, /pg_catalog\.pg_advisory_xact_lock[\s\S]*p_company_id::text[\s\S]*p_portal_id[\s\S]*p_hubspot_contact_id/)
+    assert.match(choice, /on conflict \(company_id, portal_id, hubspot_contact_id\) do update/)
+  }
+})
+
+test('resolution deployable migration and canonical mirror are semantically identical', () => {
+  const schema = readSchema()
+  const start = schema.indexOf('create table public.h2a_dry_run_review_resolutions')
+  assert.ok(start > 0, 'canonical resolution block exists')
+  const canonical = schema.slice(schema.lastIndexOf('do $$', start))
+  const migration = readResolutionMigration()
+  const normalize = value => value.replace(/\bif not exists\s+/g, '').replace(/create or replace function/g, 'create function').replace(/\s+/g, ' ').trim()
+  assert.equal(normalize(canonical), normalize(migration.slice(migration.indexOf('do $$'))))
+  for (const table of resolutionTables) assert.match(migration, new RegExp(`create table if not exists public\\.${table}`))
+  assert.doesNotMatch(migration, /create (?:unique )?index (?!if not exists)/)
+  assert.doesNotMatch(migration, /create function/)
 })
 
 test('dry-run review storage is tenant-safe, bounded, service-only, and CAS-updated', () => {
