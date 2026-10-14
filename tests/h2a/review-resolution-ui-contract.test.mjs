@@ -126,9 +126,32 @@ test('active resolution disables duplicate confirmation and announces applying',
   await ui.flush()
   assert.equal(ui.find('button', 'Applying…').props.disabled, true)
   assert.match(ui.text(), /Applying resolution/)
+  const dialog = ui.nodes().find(node => node.props?.role === 'dialog')
+  assert.equal(ui.nodes(dialog).some(node => node.props?.role === 'status' && JSON.stringify(node.children).includes('Applying resolution')), true)
   await ui.find('button', 'Applying…').props.onClick(); assert.equal(calls, 1)
   finish({ resolution: { status: 'waiting_on_albi' } }); await submit; await ui.flush()
   assert.match(ui.text(), /Waiting on Albi/)
+})
+
+test('dialog effects focus, announce retained failure, trap from container, and return focus', async () => {
+  const ui = await mount(base, async () => { throw Error('Provider unavailable') })
+  ui.find('button', 'Use HubSpot for all').props.onClick(); await ui.flush()
+  const trigger = ui.find('button', 'Review resolution')
+  trigger.dom.focus()
+  trigger.props.onClick(); await ui.flush()
+  let dialog = ui.nodes().find(node => node.props?.role === 'dialog')
+  assert.equal(ui.documentState.activeElement, ui.find('button', 'Cancel').dom)
+  await ui.find('button', 'Confirm resolution').props.onClick(); await ui.flush()
+  dialog = ui.nodes().find(node => node.props?.role === 'dialog')
+  assert.equal(ui.nodes(dialog).some(node => node.props?.role === 'alert' && JSON.stringify(node.children).includes('Provider unavailable')), true)
+  assert.equal(ui.documentState.activeElement, ui.find('button', 'Retry resolution').dom)
+  ui.documentState.activeElement = dialog.children[0].dom
+  let prevented = false
+  dialog.props.onKeyDown({ key: 'Tab', shiftKey: true, preventDefault() { prevented = true } })
+  assert.equal(prevented, true)
+  assert.equal(ui.documentState.activeElement, ui.find('button', 'Cancel').dom)
+  ui.find('button', 'Cancel').props.onClick(); await ui.flush()
+  assert.equal(ui.documentState.activeElement, trigger.dom)
 })
 
 test('confirmation traps Tab in both directions and Escape returns to the decision', async () => {

@@ -1,6 +1,9 @@
+import { isDeepStrictEqual } from 'node:util'
 import { getH2AReviewReason } from '../../../shared/h2aReviewReasons.js'
 import { buildAlbiRecordUrl } from '../../../shared/h2aProviderLinks.js'
 import { resolveContactType } from './options.js'
+import { decideContactMatch, decideOrganizationMatch } from './match.js'
+import { safeReviewSnapshot } from './review.js'
 
 const providerId = value => typeof value === 'string' && /^[1-9]\d{0,99}$/.test(value)
 const record = value => value && typeof value === 'object' && !Array.isArray(value)
@@ -80,10 +83,19 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
       return { ...unavailable, organizationOptions }
     }
 
-    if (actions.includes('create_albi') && row.recheck_outcome === 'safe_to_create' &&
+    if (actions.includes('create_albi') && row.status === 'needs_review' &&
       Array.isArray(row.candidate_snapshots) && row.candidate_snapshots.length === 0 && associated.length <= 1 &&
       !mappings[row.object_type === 'contacts' ? 'contacts' : 'organizations'].some(item =>
         item?.portal_id === row.portal_id && mappedSource(item) === row.source_id)) {
+      if (!isDeepStrictEqual(safeReviewSnapshot(sourceRows[0], row.object_type), row.source_snapshot)) return unavailable
+      const candidates = row.object_type === 'contacts' ? await all(args => reads.albiRead.listContacts(args))
+        : await all(args => reads.albiRead.listOrganizations(args))
+      if (!candidates) return unavailable
+      const match = (row.object_type === 'contacts' ? decideContactMatch : decideOrganizationMatch)({
+        source: sourceRows[0], candidates, portalId: row.portal_id,
+        mappings: mappings[row.object_type === 'contacts' ? 'contacts' : 'organizations'],
+      })
+      if (match.action !== 'create') return unavailable
       const props = sourceRows[0].properties
       const nameReady = row.object_type === 'contacts' ? Boolean(String(props.firstname ?? '').trim() && String(props.lastname ?? '').trim())
         : Boolean(String(props.name ?? '').trim())
@@ -102,8 +114,10 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
       const options = row.object_type === 'contacts' ? mappings.options : mappings.options.filter(item =>
         (item?.mapping_kind ?? item?.mappingKind) === 'default_organization_type' && (item?.source_key ?? item?.sourceKey) === 'default')
         .map(item => ({ ...item, mapping_kind: 'default_contact_type' }))
-      const typeReady = resolveContactType({ mappings: options, inheritFromOrganization: associated.length === 1,
-        organizationTypeId }).action === 'resolved'
+      const type = resolveContactType({ mappings: options, inheritFromOrganization: associated.length === 1,
+        organizationTypeId })
+      const typeReady = type.action === 'resolved' && providerId(type.contactTypeId) &&
+        Number.isSafeInteger(Number(type.contactTypeId))
       return { ...unavailable, createReadiness: { ready: nameReady && organizationReady && typeReady } }
     }
   } catch { /* A failed read cannot become an actionable projection. */ }

@@ -27,6 +27,7 @@ export default function SampleReviewResolution({ item, busy = false, onResolve }
   const submitLock = useRef(false)
   const dialogRef = useRef(null)
   const cancelRef = useRef(null)
+  const confirmRef = useRef(null)
   const sectionRef = useRef(null)
   const previousFocus = useRef(null)
   const fields = review.resolutionFields
@@ -57,7 +58,11 @@ export default function SampleReviewResolution({ item, busy = false, onResolve }
     }
   }, [confirmation])
 
-  useEffect(() => { if (confirmation && effectiveBusy) dialogRef.current?.focus() }, [confirmation, effectiveBusy])
+  useEffect(() => {
+    if (!confirmation) return
+    if (effectiveBusy) dialogRef.current?.focus()
+    else if (message.startsWith('Resolution failed')) confirmRef.current?.focus()
+  }, [confirmation, effectiveBusy, message])
 
   function changed(nextChoices, nextCandidate, nextOrganization, nextApproval) {
     setChoices(nextChoices); setCandidateId(nextCandidate); setOrganizationSourceId(nextOrganization); setApproveAssociation(false); setApproveManyToOne(nextApproval)
@@ -122,13 +127,14 @@ export default function SampleReviewResolution({ item, busy = false, onResolve }
     const controls = [...(dialogRef.current?.querySelectorAll('button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex="-1"])') ?? [])]
     const first = controls[0], last = controls.at(-1)
     if (!first) { event.preventDefault(); dialogRef.current?.focus() }
-    else if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
-    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
+    else if (event.shiftKey && (document.activeElement === first || document.activeElement === dialogRef.current || !controls.includes(document.activeElement))) { event.preventDefault(); last.focus() }
+    else if (!event.shiftKey && (document.activeElement === last || document.activeElement === dialogRef.current || !controls.includes(document.activeElement))) { event.preventDefault(); first.focus() }
   }
 
   const events = resolution?.events ?? []
   const manualTasks = resolution?.status === 'waiting_on_albi'
     ? [...events].reverse().find(event => event.manualTasks?.length)?.manualTasks ?? [] : []
+  const feedback = message && <p className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900" role={/failed|changed|cannot|Choose/.test(message) ? 'alert' : 'status'}>{message}</p>
   return <section ref={sectionRef} tabIndex={-1} className="border-t border-gray-200 pt-5 outline-none" aria-labelledby="sample-review-resolution-title">
     <div className="flex flex-wrap items-center justify-between gap-2">
       <h4 id="sample-review-resolution-title" className="text-sm font-semibold text-gray-900">Resolve this record</h4>
@@ -173,7 +179,7 @@ export default function SampleReviewResolution({ item, busy = false, onResolve }
         <button type="button" className={`${primary} mt-3`} disabled={effectiveBusy || !selectedOrganization || !selectedOrganization.associated && !approveAssociation} onClick={() => open('choose_organization')}>Choose organization</button></>
         : <p className="mt-2 text-xs text-amber-800">Fresh server association evidence is unavailable. Recheck or reload this record before choosing an organization.</p>}</div>}
 
-    {message && <p className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900" role={/failed|changed|cannot|Choose/.test(message) ? 'alert' : 'status'}>{message}</p>}
+    {!confirmation && feedback}
     {resolution && <section className="mt-5 border-t border-gray-200 pt-4" aria-label="Resolution progress and audit"><h5 className="text-sm font-semibold text-gray-900">Resolution progress</h5>
       <p className="mt-1 text-sm font-medium text-gray-800" role="status">{resolution.statusLabel}</p>
       {manualTasks.map((task, index) => <div key={`${task.targetId}-${index}`} className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3"><p className="text-sm font-semibold text-amber-900">Manual Albi task</p>
@@ -184,14 +190,15 @@ export default function SampleReviewResolution({ item, busy = false, onResolve }
     </section>}
 
     {confirmation && <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-gray-950/45 px-4 py-4 sm:items-center" role="dialog" aria-modal="true" aria-labelledby="sample-resolution-confirm-title" onKeyDown={onDialogKeyDown}>
-      <div ref={dialogRef} tabIndex={-1} aria-busy={effectiveBusy} className="max-h-[calc(100vh-2rem)] w-full max-w-lg overflow-y-auto rounded-xl bg-white p-5 shadow-xl outline-none">
+      <div ref={dialogRef} tabIndex={-1} className="max-h-[calc(100vh-2rem)] w-full max-w-lg overflow-y-auto rounded-xl bg-white p-5 shadow-xl outline-none">
         <h3 id="sample-resolution-confirm-title" className="text-lg font-semibold text-gray-900">Confirm resolution</h3>
         <p className="mt-2 text-sm text-gray-700">Review what will change for HubSpot record {review.sourceId}.</p>
+        {feedback}
         <div className="mt-4 grid gap-3 sm:grid-cols-2"><section className="rounded-lg border border-blue-200 bg-blue-50 p-3"><h4 className="text-sm font-semibold text-blue-900">Updates HubSpot now</h4>{confirmation.preview.hubspotWrites.length ? <ul className="mt-2 space-y-1 text-xs text-blue-900">{confirmation.preview.hubspotWrites.map(write => <li key={write.field}>{write.field}: {display(write.value)}</li>)}</ul> : <p className="mt-2 text-xs text-blue-800">None</p>}</section>
           <section className="rounded-lg border border-amber-200 bg-amber-50 p-3"><h4 className="text-sm font-semibold text-amber-900">You’ll update this in Albi</h4>{confirmation.preview.albiTasks.length ? <ul className="mt-2 space-y-1 text-xs text-amber-900">{confirmation.preview.albiTasks.map(task => <li key={task.field}>{task.field}: {display(task.value)}</li>)}</ul> : <p className="mt-2 text-xs text-amber-800">None</p>}</section></div>
         {confirmation.preview.mapping && <p className="mt-3 rounded-lg bg-gray-50 p-3 text-sm text-gray-800">{confirmation.preview.mapping.createAlbi ? 'Creates an Albi record and saves its mapping.' : `Saves a mapping to Albi record ${confirmation.preview.mapping.targetId}.`}</p>}
         {confirmation.preview.association && <p className="mt-3 rounded-lg bg-gray-50 p-3 text-sm text-gray-800">Saves HubSpot organization {confirmation.preview.association.organizationSourceId} as context. {confirmation.preview.association.addHubSpotAssociation ? 'Adds HubSpot association. ' : ''}Existing HubSpot associations will not be removed.</p>}
-        <div className="mt-5 flex flex-row-reverse flex-wrap gap-2"><button type="button" className={primary} disabled={effectiveBusy} onClick={submit}>{effectiveBusy ? 'Applying…' : message.startsWith('Resolution failed') ? 'Retry resolution' : 'Confirm resolution'}</button>
+        <div className="mt-5 flex flex-row-reverse flex-wrap gap-2" aria-busy={effectiveBusy}><button ref={confirmRef} type="button" className={primary} disabled={effectiveBusy} onClick={submit}>{effectiveBusy ? 'Applying…' : message.startsWith('Resolution failed') ? 'Retry resolution' : 'Confirm resolution'}</button>
           <button ref={cancelRef} type="button" className={secondary} disabled={effectiveBusy} onClick={() => setConfirmation(null)}>Cancel</button></div>
       </div></div>}
   </section>

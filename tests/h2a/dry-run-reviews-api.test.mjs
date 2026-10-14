@@ -2,6 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createDryRunReviewHandler } from '../../netlify/functions/h2a-dry-run-reviews.js'
 import { H2AAuthError } from '../../netlify/functions/_h2a/auth.js'
+import { presentSampleReviewItem } from '../../src/features/hubspotToAlbi/sampleReview.js'
+import { mountSampleReviewResolution } from './ui-render-fixture.mjs'
 
 const reviewId = '00000000-0000-4000-8000-000000000001'
 const stamp = '2026-10-12T10:00:00.123456Z'
@@ -96,6 +98,32 @@ test('detail projects organization choices only after live server association re
     currentOrganizationTargetId: '50', associated: true,
     contactUrl: 'https://app.albiware.com/Relationships/Contact/20',
     organizationUrl: 'https://app.albiware.com/Relationships/Organization/40' })
+})
+
+test('reviewable no-match detail reaches a create decision only through fresh server evidence and presentation', async () => {
+  const f = fixture()
+  f.options.env = { H2A_REVIEW_RESOLUTION_MODE: 'admins' }
+  f.options.requireRequest = async () => ({ companyId: 'authorized-company', role: 'admin', isSuperAdmin: false })
+  f.row.reason = 'no_match'; f.row.candidate_snapshots = []; f.row.recheck_outcome = null
+  f.row.source_snapshot = { id: '10', firstName: 'A', lastName: 'Person', email: 'a@example.com' }
+  f.repository.getMappings = async () => ({ contacts: [], organizations: [], options: [{ mapping_kind: 'default_contact_type',
+    albi_id: '12', confirmed: true }] })
+  f.options.makeClients = async () => ({ hubspot: {
+    getContacts: async () => [{ id: '10', properties: { firstname: 'A', lastname: 'Person', email: 'a@example.com' } }],
+    getCompanies: async () => [],
+    getAssociations: async () => [{ fromId: '10', toObjectType: 'companies', toIds: [] }],
+  }, albi: {
+    listContacts: async () => ({ records: [], cursor: null }),
+    listOrganizations: async () => ({ records: [], cursor: null }),
+  } })
+  const response = await createDryRunReviewHandler(f.options)(get({ reviewId }))
+  assert.equal(response.statusCode, 200)
+  const item = JSON.parse(response.body).item
+  assert.equal(item.status, 'needs_review')
+  assert.deepEqual(item.createReadiness, { ready: true })
+  assert.equal(presentSampleReviewItem(item).actions.includes('create_albi'), true)
+  const ui = await mountSampleReviewResolution(item, async () => ({ resolution: { status: 'ready_to_recheck' } }))
+  assert.equal(ui.find('button', 'Create in Albi') != null, true)
 })
 
 test('missing and cross-tenant detail is a fixed non-enumerating 404', async () => {

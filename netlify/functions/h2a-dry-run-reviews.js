@@ -69,7 +69,7 @@ async function detail(repository, companyId, runId, row, auth, options, config) 
   const actions = getH2AReviewReason(row.reason).actions
   let resolutionOptions = { organizationOptions: [], createReadiness: { ready: false } }
   if (resolutionCapability.canResolve && row.status === 'needs_review' &&
-    (actions.includes('choose_organization') || actions.includes('create_albi') && row.recheck_outcome === 'safe_to_create' &&
+    (actions.includes('choose_organization') || actions.includes('create_albi') &&
       Array.isArray(row.candidate_snapshots) && row.candidate_snapshots.length === 0)) {
     try {
       const clients = options.makeClients ? await options.makeClients(companyId) : await createH2AProviderClients({
