@@ -171,11 +171,13 @@ function result(action, reason, targetId = null, evidence = [], proposedChanges 
   return { action, targetId, reason, evidence, proposedChanges }
 }
 
-function ownershipConflict(sourceId, targetId, mappings = []) {
+function ownershipConflict(sourceId, targetId, mappings = [], portalId = null) {
   return mappings.some((mapping) => {
     if (mappedTargetId(mapping) !== String(targetId)) return false
     const ownerId = mappedSourceId(mapping)
-    return sourceId === null || ownerId === null || ownerId !== String(sourceId)
+    const ownerPortalId = mapping.portal_id ?? mapping.portalId
+    return sourceId === null || ownerId === null || ownerId !== String(sourceId) ||
+      portalId !== null && ownerPortalId !== undefined && String(ownerPortalId) !== String(portalId)
   })
 }
 
@@ -185,8 +187,10 @@ function resolveMapping(input, entityType, source, candidates) {
   const targetId = mappedTargetId(mapping) ?? idOf(mapping)
   const sourceId = identityId(input, source)
   const mappingSourceId = mappedSourceId(mapping)
+  const mappingPortalId = mapping.portal_id ?? mapping.portalId
   if (!targetId || sourceId === null || mappingSourceId === null || mappingSourceId !== sourceId ||
-      ownershipConflict(sourceId, targetId, input.mappings ?? input.existingMappings ?? [])) {
+      input.portalId != null && mappingPortalId !== undefined && String(mappingPortalId) !== String(input.portalId) ||
+      ownershipConflict(sourceId, targetId, input.mappings ?? input.existingMappings ?? [], input.portalId ?? null)) {
     return result('conflict', 'target_already_mapped', targetId)
   }
   const candidate = candidates.find((item) => idOf(item) === targetId)
@@ -277,7 +281,7 @@ export function selectReviewCandidates(input = {}, decision = {}, entityType = '
 }
 
 function matchDecisionConflict(sourceId, targetId, input) {
-  return ownershipConflict(sourceId, targetId, input.mappings ?? input.existingMappings ?? [])
+  return ownershipConflict(sourceId, targetId, input.mappings ?? input.existingMappings ?? [], input.portalId ?? null)
 }
 
 export function decideContactMatch(input = {}) {

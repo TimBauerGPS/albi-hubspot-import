@@ -120,6 +120,15 @@ test('link plans use the current reviewed candidate and require explicit many-to
   assert.throws(() => plan(input), TypeError)
 })
 
+test('link planner treats equal numeric IDs in different portals as different source owners', () => {
+  const input = fieldsInput(); input.review.reason = 'multiple_candidates'; input.portalId = '123'
+  input.decision = { action: 'link_existing', candidateId: '2590478' }
+  input.mappings = [{ portal_id: '456', hubspot_id: '42', albi_contact_id: '2590478' }]
+  assert.throws(() => plan(input), TypeError)
+  input.decision.approveManyToOne = true
+  assert.equal(plan(input).mapping.approveManyToOne, true)
+})
+
 const createInput = objectType => ({ review: { objectType, sourceId: '42', reason: 'no_match', candidateSnapshots: [] },
   hubspot: { id: '42', properties: objectType === 'contacts' ? { firstname: 'A', lastname: 'B', email: 'a@example.com', phone: '5551112222' }
     : { name: 'Company', phone: '5551112222' } }, decision: { action: 'create_albi' },

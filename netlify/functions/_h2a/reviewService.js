@@ -120,7 +120,6 @@ function associations(records, sourceId) {
   return [...new Set(row.toIds)]
 }
 
-const scopedMappings = (rows, portalId, sourceId) => rows.filter(row => row.portal_id === portalId || row.hubspot_id !== sourceId)
 function organizationContext(evaluation, candidates, mappings, sourceId, portalId, options) {
   if (evaluation.outcome === 'safe_to_link') {
     const mapped = mappings.find(row => row.portal_id === portalId && row.hubspot_id === sourceId)
@@ -174,8 +173,8 @@ export async function recheckDryRunReview(deps, { companyId, reviewId, actorId, 
       const candidates = await listAll(deps, row.object_type === 'contacts' ? args => albi.listContacts(args) : args => albi.listOrganizations(args), deadline)
       const mappings = await bounded(deps, () => repository.getMappings(companyId), deadline)
       if (!mappings || !['contacts', 'organizations', 'options'].every(key => Array.isArray(mappings[key]))) malformed('review')
-      if (row.object_type === 'companies') evaluation = evaluateOrganizationReview({ source, candidates,
-        mappings: scopedMappings(mappings.organizations, row.portal_id, row.source_id), optionMappings: mappings.options })
+      if (row.object_type === 'companies') evaluation = evaluateOrganizationReview({ source, candidates, portalId: row.portal_id,
+        mappings: mappings.organizations, optionMappings: mappings.options })
       else {
         let organization = null
         if (associatedCompanyIds.length === 1) {
@@ -184,13 +183,13 @@ export async function recheckDryRunReview(deps, { companyId, reviewId, actorId, 
           if (!company) organization = { outcome: 'needs_review' }
           else {
             const organizations = await listAll(deps, args => albi.listOrganizations(args), deadline)
-            const result = evaluateOrganizationReview({ source: company, candidates: organizations,
-              mappings: scopedMappings(mappings.organizations, row.portal_id, id), optionMappings: mappings.options })
+            const result = evaluateOrganizationReview({ source: company, candidates: organizations, portalId: row.portal_id,
+              mappings: mappings.organizations, optionMappings: mappings.options })
             organization = organizationContext(result, organizations, mappings.organizations, id, row.portal_id, mappings.options)
           }
         }
-        evaluation = evaluateContactReview({ source, candidates, associatedCompanyIds, organization,
-          mappings: scopedMappings(mappings.contacts, row.portal_id, row.source_id), optionMappings: mappings.options })
+        evaluation = evaluateContactReview({ source, candidates, associatedCompanyIds, organization, portalId: row.portal_id,
+          mappings: mappings.contacts, optionMappings: mappings.options })
         // Samples may have used activity company context when direct associations
         // were empty. That context is intentionally not retained; only a fresh
         // sample can prove it resolved. Refresh safe evidence without clearing it.

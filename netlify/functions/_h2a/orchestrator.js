@@ -84,12 +84,6 @@ function option(mappings, kind) {
   return resolved.action === 'resolved' ? resolved.contactTypeId : null
 }
 
-function reviewMappings(mappings, portalId, sourceId) {
-  // The evaluator's existing-mapping lookup uses source ID; do not let another
-  // portal's same-numbered source act as this source's mapping.
-  return mappings.filter(row => row.portal_id === portalId || row.hubspot_id !== sourceId)
-}
-
 function actionTarget(evaluation, candidates, mapping, targetKey) {
   if (evaluation.reason === 'existing_mapping' && mapping?.[targetKey]) return text(mapping[targetKey])
   // Evaluator IDs are diagnostic strings capped at 500 characters. Recover the
@@ -148,8 +142,8 @@ async function conflict(deps, ctx, data) {
 async function resolveOrganization(deps, ctx, source) {
   const sourceId = idOf(source)
   const { companyId, portalId, mappings, indexes, runId } = ctx
-  const evaluation = evaluateOrganizationReview({ source, candidates: indexes.organizations,
-    mappings: reviewMappings(mappings.organizations, portalId, sourceId), optionMappings: mappings.options })
+  const evaluation = evaluateOrganizationReview({ source, candidates: indexes.organizations, portalId,
+    mappings: mappings.organizations, optionMappings: mappings.options })
   if (evaluation.outcome === 'needs_review') {
     await conflict(deps, ctx, { objectType: 'companies', sourceId, type: evaluation.conflictType, source, ...evaluation })
     return { id: sourceId, action: 'conflict', outcome: evaluation.outcome,
@@ -197,8 +191,8 @@ async function resolveOrganization(deps, ctx, source) {
 async function resolveContact(deps, ctx, source, organization, associatedCompanyIds = []) {
   const sourceId = idOf(source)
   const { companyId, portalId, mappings, indexes, runId } = ctx
-  const evaluation = evaluateContactReview({ source, candidates: indexes.contacts,
-    mappings: reviewMappings(mappings.contacts, portalId, sourceId), optionMappings: mappings.options,
+  const evaluation = evaluateContactReview({ source, candidates: indexes.contacts, portalId,
+    mappings: mappings.contacts, optionMappings: mappings.options,
     associatedCompanyIds, organization })
   if (evaluation.outcome === 'needs_review') {
     await conflict(deps, ctx, { objectType: 'contacts', sourceId, type: evaluation.conflictType, source, ...evaluation })

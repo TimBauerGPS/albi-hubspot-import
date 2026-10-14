@@ -3,7 +3,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { ApiError, isRecord, malformed } from './http.js'
 import { H2AReviewError, resolveReviewSample } from './reviewService.js'
 import { buildReviewResolutionPlan, hashResolutionDecision, normalizeResolutionDecision, safeResolutionEventDetails,
-  safeResolutionExecutionContext, RESOLUTION_EVENT_LIMIT } from './reviewResolution.js'
+  safeResolutionExecutionContext, resolutionCanonicalField, RESOLUTION_EVENT_LIMIT } from './reviewResolution.js'
 import { safeReviewSnapshot } from './review.js'
 import { decideContactMatch, decideOrganizationMatch } from './match.js'
 import { normalizePhone } from './normalize.js'
@@ -21,8 +21,8 @@ export function createReviewResolutionCapabilities(repository) {
     claimReviewResolution: repository.claimReviewResolution.bind(repository),
     finishReviewResolution: repository.finishReviewResolution.bind(repository),
     appendReviewResolutionEvent: repository.appendReviewResolutionEvent.bind(repository),
-    saveContactMapping: (companyId, row) => repository.saveMapping(companyId, 'contact', row),
-    saveOrganizationMapping: (companyId, row) => repository.saveMapping(companyId, 'organization', row),
+    saveContactMapping: (companyId, row, approveManyToOne = false) => repository.saveMapping(companyId, 'contact', row, { approveManyToOne }),
+    saveOrganizationMapping: (companyId, row, approveManyToOne = false) => repository.saveMapping(companyId, 'organization', row, { approveManyToOne }),
     upsertContactOrganizationChoice: repository.upsertContactOrganizationChoice.bind(repository),
   })
 }
@@ -111,8 +111,8 @@ async function evidence(deps, clients, row, decision, deadline) {
   for (const id of organizationSources) {
     const company = await sourceRead(deps, clients, 'companies', id, deadline)
     if (!company) continue
-    const rows = scopedMappings(mappings.organizations, row.portal_id, id)
-    const matched = decideOrganizationMatch({ source: company, candidates: organizations, mappings: rows,
+    const rows = mappings.organizations
+    const matched = decideOrganizationMatch({ source: company, candidates: organizations, mappings: rows, portalId: row.portal_id,
       existingMapping: rows.find(mapping => mapping.hubspot_id === id && mapping.portal_id === row.portal_id) })
     if (matched.action !== 'link') continue
     const target = organizations.find(item => item.id === matched.targetId)
@@ -122,8 +122,8 @@ async function evidence(deps, clients, row, decision, deadline) {
   }
   let targetId = decision.candidateId ?? (row.candidate_snapshots?.length === 1 ? row.candidate_snapshots[0].id : null)
   if (decision.action === 'choose_organization') {
-    const rows = scopedMappings(mappings.contacts, row.portal_id, row.source_id)
-    const match = decideContactMatch({ source, candidates, mappings: rows,
+    const rows = mappings.contacts
+    const match = decideContactMatch({ source, candidates, mappings: rows, portalId: row.portal_id,
       existingMapping: rows.find(mapping => mapping.portal_id === row.portal_id && mapping.hubspot_id === row.source_id) })
     if (match.action === 'link') targetId = match.targetId
     else if (match.action !== 'create') stale()
@@ -132,8 +132,6 @@ async function evidence(deps, clients, row, decision, deadline) {
     associatedCompanyIds, organizations: organizationEvidence }
 }
 
-// Preserve other-source ownership across every portal while selecting this portal's own mapping.
-const scopedMappings = (rows, portalId, sourceId) => rows.filter(row => row.portal_id === portalId || row.hubspot_id !== sourceId)
 function planEvidence(row, decision, current, hubspot, albi) {
   return { review: { objectType: row.object_type, sourceId: row.source_id, portalId: row.portal_id,
     reason: row.reason, candidateSnapshots: row.candidate_snapshots, proposedChanges: row.proposed_changes },
@@ -162,9 +160,9 @@ function assertComparison(row, current, plan, replay) {
     // Allow only the exact intended write result to differ from the captured source.
     const expectedSource = row.source_snapshot
     for (const [key, value] of Object.entries(plan.verification.properties)) {
-      if ((source.properties[key] ?? '') !== value) continue
-      const canonical = safeReviewSnapshot({ properties: { [key]: value } }, row.object_type)
-      const field = Object.keys(canonical)[0] ?? ({ address2: 'address2' }[key])
+      if (!Object.hasOwn(source.properties, key)) stale()
+      if ((source.properties[key] === null ? '' : source.properties[key]) !== value) continue
+      const field = resolutionCanonicalField(row.object_type, key)
       if (field) source.properties[key] = expectedSource[field] ?? ''
     }
   }
@@ -183,9 +181,9 @@ function propertiesMatch(source, properties) {
 
 function exactCreateTarget(row, plan, current) {
   const verify = plan.verification.create
-  const rows = scopedMappings(row.object_type === 'contacts' ? current.mappings.contacts : current.mappings.organizations, row.portal_id, row.source_id)
+  const rows = row.object_type === 'contacts' ? current.mappings.contacts : current.mappings.organizations
   const match = (row.object_type === 'contacts' ? decideContactMatch : decideOrganizationMatch)({ source: { id: row.source_id, ...row.source_snapshot },
-    candidates: current.candidates, mappings: rows })
+    candidates: current.candidates, mappings: rows, portalId: row.portal_id })
   if (match.action !== 'link') return null
   const matches = current.candidates.filter(item => item.id === match.targetId)
   if (matches.length !== 1) return null
@@ -205,7 +203,7 @@ async function saveLocal(caps, row, plan, actorId, targetId = plan.mapping?.targ
     if (!targetId) malformed('resolution')
     await caps[row.object_type === 'contacts' ? 'saveContactMapping' : 'saveOrganizationMapping'](row.company_id,
       { portal_id: row.portal_id, hubspot_id: row.source_id,
-        [row.object_type === 'contacts' ? 'albi_contact_id' : 'albi_organization_id']: targetId, match_method: 'reviewed', reviewed_by: actorId })
+        [row.object_type === 'contacts' ? 'albi_contact_id' : 'albi_organization_id']: targetId, match_method: 'reviewed', reviewed_by: actorId }, plan.mapping.approveManyToOne)
   }
   if (plan.organizationChoice) {
     const result = await caps.upsertContactOrganizationChoice(row.company_id, { portalId: row.portal_id, ...plan.organizationChoice, actorId })
@@ -303,7 +301,7 @@ async function runClaim(deps, input, saved, context) {
       else {
         // A new create cannot override newly appeared or contradictory identity evidence.
         const matched = (row.object_type === 'contacts' ? decideContactMatch : decideOrganizationMatch)({ source: current.source,
-          candidates: current.candidates, mappings: scopedMappings(row.object_type === 'contacts' ? current.mappings.contacts : current.mappings.organizations, row.portal_id, row.source_id) })
+          candidates: current.candidates, mappings: row.object_type === 'contacts' ? current.mappings.contacts : current.mappings.organizations, portalId: row.portal_id })
         if (matched.action !== 'create') stale()
       }
     } else if (plan.verification.properties) reconciled = propertiesMatch(current.source, plan.verification.properties)

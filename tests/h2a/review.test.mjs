@@ -13,6 +13,13 @@ const organizationType = { mapping_kind: 'default_organization_type', source_key
 const cleanContact = { id: 'albi-1', firstName: 'A', lastName: 'Person', email: 'a@example.com' }
 const cleanCompany = { id: 'albi-2', name: 'Allied', domain: 'allied.example' }
 
+test('production evaluation recognizes same-numbered foreign-portal target ownership', () => {
+  const source = { ...contact, id: '42' }
+  const result = evaluateContactReview({ source, candidates: [cleanContact], portalId: '123',
+    mappings: [{ portal_id: '456', hubspot_id: '42', albi_contact_id: 'albi-1' }] })
+  assert.equal(result.outcome, 'needs_review'); assert.equal(result.reason, 'target_already_mapped')
+})
+
 const cases = [
   ['ambiguous email and phone', evaluateContactReview, { source: { ...contact, properties: { ...contact.properties, phone: '5551112222' } }, candidates: [cleanContact, { id: 'albi-phone', phoneNumber: '5551112222' }] }, 'email_phone_disagree', 'contact_match'],
   ['contact name only', evaluateContactReview, { source: contact, candidates: [{ id: 'name', firstName: 'A', lastName: 'Person' }] }, 'name_only_candidate', 'contact_match'],

@@ -164,6 +164,13 @@ test('fails closed on target ownership when the current source ID is missing', (
   assert.equal(result.reason, 'target_already_mapped')
 })
 
+test('an explicit existing mapping must belong to the full portal and source identity', () => {
+  const result = decideContactMatch({ source: { id: '42', email: 'jane@example.com' }, portalId: '123',
+    candidates: [contact('20', { email: 'jane@example.com' })],
+    existingMapping: { portal_id: '456', hubspot_id: '42', albi_contact_id: '20' } })
+  assert.equal(result.action, 'conflict'); assert.equal(result.reason, 'target_already_mapped')
+})
+
 test('matches directly from HubSpot adapter properties and Albi contact fields', () => {
   const result = decideContactMatch({
     sourceContact: { id: 'hs-1', properties: {

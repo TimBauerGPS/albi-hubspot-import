@@ -765,8 +765,19 @@ test('saveMapping uses the atomic tenant RPC and returns its same-target replay 
   assert.equal(result, mapping)
   assert.deepEqual(calls, [{ name: 'h2a_save_mapping', args: { p_company_id: 'company-1', p_portal_id: '123',
     p_object_type: 'contacts', p_source_id: '42', p_target_id: '7', p_match_method: 'automatic',
-    p_reviewed_by: null, p_now: calls[0].args.p_now } }])
+    p_reviewed_by: null, p_now: calls[0].args.p_now, p_approve_many_to_one: false } }])
   assert.equal(Number.isNaN(Date.parse(calls[0].args.p_now)), false)
+})
+
+test('mapping RPC receives explicit reviewed approval and maps atomic ownership rejection to a fixed code', async () => {
+  const calls = []
+  const repository = createH2ARepository({ from: () => { throw Error('unexpected table access') }, rpc: async (name, args) => {
+    calls.push(args); return { data: { error: 'many_to_one_required', raw: 'secret' }, error: null }
+  } })
+  for (const approveManyToOne of [false, true]) await assert.rejects(repository.saveMapping('company-1', 'contact',
+    { portal_id: '123', hubspot_id: '42', albi_contact_id: '20', match_method: 'reviewed', reviewed_by: ACTOR_ID },
+    { approveManyToOne }), error => error.code === 'many_to_one_required' && !error.message.includes('secret'))
+  assert.deepEqual(calls.map(args => args.p_approve_many_to_one), [false, true])
 })
 
 test('saveMapping rejects a competing source target returned by the atomic RPC', async () => {

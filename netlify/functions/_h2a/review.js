@@ -117,8 +117,9 @@ export function safeReviewChanges(value, objectType) {
   return changes
 }
 
-function mappingForReview(mappings, sourceId) {
-  return array(mappings).find(mapping => identity(mapping?.sourceId ?? mapping?.hubspotId ?? mapping?.hubspot_id) === sourceId)
+function mappingForReview(mappings, sourceId, portalId) {
+  return array(mappings).find(mapping => identity(mapping?.sourceId ?? mapping?.hubspotId ?? mapping?.hubspot_id) === sourceId &&
+    (portalId === null || (mapping.portal_id ?? mapping.portalId ?? portalId) === portalId))
 }
 
 function defaultOption(mappings, kind) {
@@ -146,9 +147,9 @@ function reviewResult(outcome, conflictType, decision, candidates, entityType) {
   }
 }
 
-export function evaluateOrganizationReview({ source, candidates = [], mappings = [], optionMappings = [] } = {}) {
+export function evaluateOrganizationReview({ source, candidates = [], mappings = [], optionMappings = [], portalId = null } = {}) {
   const sourceId = identity(valueOf(source, ['id'], true))
-  const input = { source, sourceId, candidates, existingMapping: mappingForReview(mappings, sourceId), mappings }
+  const input = { source, sourceId, candidates, existingMapping: mappingForReview(mappings, sourceId, portalId), mappings, portalId }
   const decision = decideOrganizationMatch(input)
   const related = selectReviewCandidates(input, decision, 'organization')
   const conflict = (type, result = decision, selected = related) => reviewResult('needs_review', type, result, selected, 'organization')
@@ -164,11 +165,11 @@ export function evaluateOrganizationReview({ source, candidates = [], mappings =
   return reviewResult('safe_to_create', '', decision, [], 'organization')
 }
 
-export function evaluateContactReview({ source, candidates = [], mappings = [], optionMappings = [], associatedCompanyIds = [], organization = null } = {}) {
+export function evaluateContactReview({ source, candidates = [], mappings = [], optionMappings = [], associatedCompanyIds = [], organization = null, portalId = null } = {}) {
   const conflict = (type, result, selected = []) => reviewResult('needs_review', type, result, selected, 'contact')
   if (associatedCompanyIds.length > 1) return conflict('association', { reason: 'multiple_associated_organizations' })
   const sourceId = identity(valueOf(source, ['id'], true))
-  const input = { source, sourceId, candidates, existingMapping: mappingForReview(mappings, sourceId), mappings }
+  const input = { source, sourceId, candidates, existingMapping: mappingForReview(mappings, sourceId, portalId), mappings, portalId }
   const decision = decideContactMatch(input)
   const related = selectReviewCandidates(input, decision, 'contact')
   if (decision.action === 'conflict') return conflict('contact_match', decision, related)

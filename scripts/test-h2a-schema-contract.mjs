@@ -7,6 +7,7 @@ const schemaUrl = new URL('../supabase/h2a-schema.sql', import.meta.url)
 const sampleMigrationUrl = new URL('../supabase/h2a-dry-run-samples.sql', import.meta.url)
 const reviewMigrationUrl = new URL('../supabase/h2a-dry-run-review-workflow.sql', import.meta.url)
 const resolutionMigrationUrl = new URL('../supabase/h2a-review-resolutions.sql', import.meta.url)
+const mappingOwnershipMigrationUrl = new URL('../supabase/h2a-mapping-target-ownership.sql', import.meta.url)
 const requiredTables = [
   'h2a_company_config', 'h2a_option_mappings', 'h2a_sync_runs',
   'h2a_cursors', 'h2a_backfill_windows', 'h2a_contact_mappings',
@@ -474,8 +475,8 @@ test('conflict resolution is an atomic tenant-scoped CAS that appends audit, map
   assert.match(body, /pg_advisory_xact_lock/)
   assert.match(body, /many_to_one_required/)
   const sourceIdentityLock = body.indexOf("'source',\n        v_conflict.object_type, v_conflict.source_id")
-  const contactTargetLock = body.indexOf("'contact', v_target_id")
-  const organizationTargetLock = body.indexOf("'organization', v_target_id")
+  const contactTargetLock = body.indexOf("'target', v_conflict.object_type, v_target_id")
+  const organizationTargetLock = contactTargetLock
   assert.ok(sourceIdentityLock >= 0, 'source identity lock must include the HubSpot source ID')
   assert.ok(contactTargetLock > sourceIdentityLock, 'contact target lock must follow the source lock')
   assert.ok(organizationTargetLock > sourceIdentityLock, 'organization target lock must follow the source lock')
@@ -514,6 +515,32 @@ test('generic mapping saves share source locking, preserve target identity, and 
   const repository = readFileSync(new URL('../netlify/functions/_h2a/repository.js', import.meta.url), 'utf8')
   assert.match(repository, /rpc\('h2a_save_mapping'/)
   assert.doesNotMatch(repository, /from\(table\)\.upsert/)
+})
+
+test('mapping ownership is tenant-wide, source-then-target serialized, and requires explicit reviewed approval', () => {
+  assert.ok(existsSync(mappingOwnershipMigrationUrl), 'deployable mapping ownership migration must exist')
+  const migration = readFileSync(mappingOwnershipMigrationUrl, 'utf8').replace(/--[^\n]*/g, '').toLowerCase()
+  for (const sql of [readSchema(), migration]) {
+    const save = functionBody(sql, 'h2a_save_mapping'), resolve = functionBody(sql, 'h2a_resolve_conflict')
+    assert.match(sql, /p_approve_many_to_one boolean default false/)
+    const sourceLock = save.indexOf("p_portal_id, 'source'")
+    const targetLock = save.indexOf("p_company_id::text, 'target', p_object_type, p_target_id")
+    assert.ok(sourceLock >= 0 && targetLock > sourceLock)
+    assert.ok(targetLock < save.indexOf('select * into v_contact'))
+    for (const [table, target] of [['h2a_contact_mappings', 'albi_contact_id'], ['h2a_organization_mappings', 'albi_organization_id']]) {
+      assert.match(save, new RegExp(`from public\\.${table} m where m\\.company_id = p_company_id\\s+and m\\.${target} = p_target_id\\s+and \\(m\\.portal_id <> p_portal_id or m\\.hubspot_id <> p_source_id\\)`))
+      assert.match(resolve, new RegExp(`and m\\.${target} = v_target_id and \\(m\\.portal_id <> v_conflict\\.portal_id or m\\.hubspot_id <> v_conflict\\.source_id\\)`))
+      assert.ok(save.indexOf('many_to_one_required') < save.indexOf(`insert into public.${table}`))
+    }
+    assert.match(save, /p_approve_many_to_one and p_match_method <> 'reviewed'/)
+    assert.match(resolve, /p_company_id::text, 'target', v_conflict\.object_type, v_target_id/)
+    assert.match(sql, /revoke execute on function public\.h2a_save_mapping\(uuid, text, text, text, text, text, uuid, timestamptz, boolean\) from public, anon, authenticated/)
+  }
+  assert.match(migration, /drop function if exists public\.h2a_save_mapping\(uuid, text, text, text, text, text, uuid, timestamptz\)/)
+  for (const name of ['h2a_save_mapping', 'h2a_resolve_conflict']) {
+    const normalize = value => value.replace(/\s+/g, ' ').trim()
+    assert.equal(normalize(functionBody(readSchema(), name)), normalize(functionBody(migration, name)))
+  }
 })
 
 test('targeted resume dispatch claims are fenced and remain retryable until accepted', () => {

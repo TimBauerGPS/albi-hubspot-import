@@ -56,7 +56,16 @@ function fixture() {
     },
     appendReviewResolutionEvent: async (_company, _id, args) => { calls.push('context'); events.push(args); return args },
     listReviewResolutionEvents: async () => events.map(args => ({ event_type: args.eventType, sanitized_details: args.details })),
-    saveMapping: async (_company, kind, value) => { calls.push('mapping'); mappings[kind === 'contact' ? 'contacts' : 'organizations'].push(value) },
+    saveMapping: async (_company, kind, value, options = {}) => {
+      if (f.beforeMapping) f.beforeMapping()
+      const rows = mappings[kind === 'contact' ? 'contacts' : 'organizations']
+      const key = kind === 'contact' ? 'albi_contact_id' : 'albi_organization_id'
+      if (f.enforceOwnership && rows.some(other => other[key] === value[key] &&
+        (other.portal_id !== value.portal_id || other.hubspot_id !== value.hubspot_id)) && options.approveManyToOne !== true) {
+        throw Object.assign(Error('many-to-one approval required'), { code: 'many_to_one_required' })
+      }
+      calls.push('mapping'); rows.push(value)
+    },
     upsertContactOrganizationChoice: async (_company, args) => { calls.push('choice'); f.choice = { hubspot_company_id: args.organizationSourceId }; return { choice: f.choice } },
     getContactOrganizationChoice: async () => f.choice ?? null,
     appendDryRunReviewEvent: async () => ({ id: 'event' }),
@@ -414,4 +423,52 @@ test('intent retry before context persistence still rejects a changed raw provid
   f.target.email = ' albi@example.com '
   await assert.rejects(executeReviewResolution(f.deps, input), error => error.statusCode === 409)
   assert.deepEqual(mutations(f), [])
+})
+
+test('same numeric source in another portal is another owner requiring explicit approval', async () => {
+  const f = fixture(); f.row.reason = 'multiple_candidates'; f.row.conflict_type = 'contact_match'
+  f.mappings.contacts.push({ portal_id: '456', hubspot_id: '42', albi_contact_id: '20' })
+  const result = await executeReviewResolution(f.deps, { ...input, decision: { action: 'link_existing', candidateId: '20' } })
+  assert.equal(result.resolution.status, 'failed'); assert.equal(f.calls.includes('mapping'), false)
+})
+
+for (const approved of [false, true]) test(`ownership race at mapping save respects explicit approval=${approved}`, async () => {
+  const f = fixture(); f.enforceOwnership = true; f.row.reason = 'multiple_candidates'; f.row.conflict_type = 'contact_match'
+  f.beforeMapping = () => f.mappings.contacts.push({ portal_id: '456', hubspot_id: '42', albi_contact_id: '20' })
+  const result = await executeReviewResolution(f.deps, { ...input, decision: { action: 'link_existing', candidateId: '20', approveManyToOne: approved } })
+  assert.equal(result.resolution.status, approved ? 'ready_to_recheck' : 'failed')
+  assert.equal(f.mappings.contacts.filter(row => row.portal_id === '123').length, approved ? 1 : 0)
+})
+
+test('accepted blank phone PATCH reconciles after finalization crash and production recheck clears', async () => {
+  const f = fixture(); f.source.properties.email = f.target.email; f.row.source_snapshot.email = f.target.email
+  f.target.phoneNumber = ''; delete f.row.candidate_snapshots[0].phoneNumber
+  f.row.proposed_changes.conflicts = { phoneNumber: { current: null, proposed: '5551112222' } }
+  const clearInput = { ...input, decision: { action: 'resolve_fields', fieldChoices: { phoneNumber: 'albi' } } }
+  f.crashFinish = true
+  await assert.rejects(executeReviewResolution(f.deps, clearInput))
+  assert.equal(f.source.properties.phone, '')
+  f.crashFinish = false; f.intent.lease_owner = null
+  const result = await executeReviewResolution(f.deps, clearInput)
+  assert.equal(result.resolution.status, 'ready_to_recheck'); assert.equal(f.events.at(-1).eventType, 'provider_reconciled')
+  assert.deepEqual(mutations(f), [['PATCH', { phone: '' }]])
+  const rechecked = await recheckDryRunReview(f.deps, input)
+  assert.equal(rechecked.review.status, 'cleared'); assert.equal(f.intent.status, 'completed')
+})
+
+test('missing intended phone after a crash is not proof of an accepted blank', async () => {
+  const f = fixture(); f.target.phoneNumber = ''; delete f.row.candidate_snapshots[0].phoneNumber
+  f.row.proposed_changes.conflicts.phoneNumber = { current: null, proposed: '5551112222' }
+  const clearInput = { ...input, decision: { action: 'resolve_fields', fieldChoices: { phoneNumber: 'albi' } } }
+  f.crashFinish = true; await assert.rejects(executeReviewResolution(f.deps, clearInput))
+  f.crashFinish = false; f.intent.lease_owner = null; delete f.source.properties.phone
+  await assert.rejects(executeReviewResolution(f.deps, clearInput), error => error.statusCode === 409)
+  assert.equal(mutations(f).length, 1)
+})
+
+test('ambiguous create cannot adopt a target owned by equal source ID in another portal', async () => {
+  const f = fixture(), createInput = asCreate(f); f.writeError = new ApiError('transient', { code: 'timeout' })
+  f.mappings.contacts.push({ portal_id: '456', hubspot_id: '42', albi_contact_id: '30' })
+  const result = await executeReviewResolution(f.deps, createInput)
+  assert.equal(result.resolution.status, 'failed'); assert.equal(f.mappings.contacts.filter(row => row.portal_id === '123').length, 0)
 })

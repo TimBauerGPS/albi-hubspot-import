@@ -89,6 +89,9 @@ const FIELD_METADATA = {
   companies: { name: { hubspot: 'name', albi: ['name', 'companyName'] },
     domain: { hubspot: 'domain', albi: ['domain', 'website', 'websiteUrl'] }, ...SHARED_FIELD_METADATA },
 }
+export function resolutionCanonicalField(objectType, providerProperty) {
+  return Object.entries(FIELD_METADATA[objectType] ?? {}).find(([, metadata]) => metadata.hubspot === providerProperty)?.[0] ?? null
+}
 const invalidPlan = () => { throw new TypeError('Invalid resolution plan evidence') }
 const positiveId = value => { if (!isResolutionProviderId(value)) invalidPlan(); return value }
 const list = value => value === undefined ? [] : Array.isArray(value) ? value : invalidPlan()
@@ -142,6 +145,8 @@ function mappingRows(input, portalId) {
   })
 }
 const mappingSource = row => row.hubspot_id ?? row.sourceId ?? row.hubspotId
+const sameMappingSource = (row, sourceId, portalId) => mappingSource(row) === sourceId &&
+  (row.portal_id ?? row.portalId ?? portalId) === portalId
 const mappingTarget = (row, type) => row[type === 'contacts' ? 'albi_contact_id' : 'albi_organization_id'] ?? row.targetId
 
 function selectedOrganization(input, sourceId) {
@@ -227,7 +232,7 @@ export function buildReviewResolutionPlan(input) {
     if (decision.candidateId !== albi.id) invalidPlan()
     const mappings = mappingRows(input, portalId)
     if (mappings.some(row => mappingSource(row) === sourceId && mappingTarget(row, type) !== albi.id) ||
-      list(input.mappings).some(row => mappingSource(row) !== sourceId && mappingTarget(row, type) === albi.id) && !decision.approveManyToOne) invalidPlan()
+      list(input.mappings).some(row => !sameMappingSource(row, sourceId, portalId) && mappingTarget(row, type) === albi.id) && !decision.approveManyToOne) invalidPlan()
     result.mapping = { objectType: type, sourceId, targetId: albi.id, approveManyToOne: decision.approveManyToOne === true }
   } else if (decision.action === 'create_albi') {
     if (mappingRows(input, portalId).some(row => mappingSource(row) === sourceId)) invalidPlan()
