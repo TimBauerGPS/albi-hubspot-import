@@ -177,6 +177,7 @@ function makeReviewSelfTestFixture() {
       initial_start_locked_at: '2026-10-01T00:00:00.000Z' }],
     h2a_sync_runs: runs, h2a_dry_run_reviews: [row], h2a_dry_run_review_events: events,
     h2a_contact_mappings: [], h2a_organization_mappings: [], h2a_option_mappings: [], h2a_execution_leases: [],
+    h2a_contact_organization_choices: [], h2a_dry_run_review_resolutions: [],
   }
   const fixture = { companyId, reviewId, row, runs, dispatched: [], mutationAccesses: 0, providerFailure: false }
   // Only the external storage boundary is doubled. Real auth, repository queries,

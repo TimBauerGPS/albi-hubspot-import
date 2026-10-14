@@ -165,10 +165,31 @@ export function evaluateOrganizationReview({ source, candidates = [], mappings =
   return reviewResult('safe_to_create', '', decision, [], 'organization')
 }
 
-export function evaluateContactReview({ source, candidates = [], mappings = [], optionMappings = [], associatedCompanyIds = [], organization = null, portalId = null } = {}) {
+export function selectReviewedOrganizationContext({ associatedCompanyIds = [], choice = null, availableCompanies = [],
+  companyId = null, portalId = null, contactId = null } = {}) {
+  const ids = new Set(array(associatedCompanyIds).map(identity).filter(Boolean))
+  const selected = identity(object(choice).hubspot_company_id)
+  const applicable = [['company_id', companyId], ['portal_id', portalId], ['hubspot_contact_id', contactId]]
+    .every(([field, expected]) => expected === null || !owns(choice, field) || identity(choice[field]) === identity(expected))
+  if (selected && applicable && ids.has(selected) && array(availableCompanies)
+    .some(company => company?.archived !== true && identity(company?.id) === selected)) {
+    return { status: 'selected', companyId: selected }
+  }
+  return { status: ids.size === 1 ? 'single' : 'ambiguous', companyId: ids.size === 1 ? [...ids][0] : null }
+}
+
+export function evaluateContactReview({ source, candidates = [], mappings = [], optionMappings = [], associatedCompanyIds = [],
+  organization = null, organizationChoice = null, availableCompanies = [], companyId = null, portalId = null } = {}) {
   const conflict = (type, result, selected = []) => reviewResult('needs_review', type, result, selected, 'contact')
-  if (associatedCompanyIds.length > 1) return conflict('association', { reason: 'multiple_associated_organizations' })
   const sourceId = identity(valueOf(source, ['id'], true))
+  const context = selectReviewedOrganizationContext({ associatedCompanyIds, choice: organizationChoice, availableCompanies,
+    companyId, portalId, contactId: sourceId })
+  if (context.status === 'ambiguous' && new Set(associatedCompanyIds.map(String)).size > 1) {
+    return conflict('association', { reason: 'multiple_associated_organizations' })
+  }
+  if (context.status === 'selected' && !['safe_to_link', 'safe_to_create'].includes(organization?.outcome)) {
+    return conflict('association', { reason: 'organization_unresolved' })
+  }
   const input = { source, sourceId, candidates, existingMapping: mappingForReview(mappings, sourceId, portalId), mappings, portalId }
   const decision = decideContactMatch(input)
   const related = selectReviewCandidates(input, decision, 'contact')

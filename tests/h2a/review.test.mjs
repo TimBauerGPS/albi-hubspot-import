@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import * as review from '../../netlify/functions/_h2a/review.js'
 import {
   evaluateContactReview, evaluateOrganizationReview, safeReviewSnapshot, safeReviewCandidates,
   safeReviewEvidence, safeReviewChanges, projectReviewRow, projectReviewEvent,
@@ -12,6 +13,51 @@ const contactType = { mapping_kind: 'default_contact_type', source_key: 'default
 const organizationType = { mapping_kind: 'default_organization_type', source_key: 'default', albi_id: 'ot-1', confirmed_at: '2026-10-12T00:00:00Z' }
 const cleanContact = { id: 'albi-1', firstName: 'A', lastName: 'Person', email: 'a@example.com' }
 const cleanCompany = { id: 'albi-2', name: 'Allied', domain: 'allied.example' }
+
+const reviewedChoice = { company_id: 'tenant', portal_id: '123', hubspot_contact_id: 'hs-1', hubspot_company_id: '11' }
+const reviewedContext = { associatedCompanyIds: ['11', '12'], choice: reviewedChoice,
+  availableCompanies: [{ id: '11' }, { id: '12' }], companyId: 'tenant', portalId: '123', contactId: 'hs-1' }
+
+test('reviewed organization selector chooses one existing direct company without changing associations', () => {
+  assert.equal(typeof review.selectReviewedOrganizationContext, 'function')
+  const input = structuredClone(reviewedContext)
+  assert.deepEqual(review.selectReviewedOrganizationContext(input), { status: 'selected', companyId: '11' })
+  assert.deepEqual(review.selectReviewedOrganizationContext({ associatedCompanyIds: ['11', '12'], choice: reviewedChoice,
+    availableCompanies: [{ id: '11' }] }), { status: 'selected', companyId: '11' })
+  assert.deepEqual(input, reviewedContext)
+  assert.deepEqual(review.selectReviewedOrganizationContext({ associatedCompanyIds: [11, '11'], availableCompanies: [] }),
+    { status: 'single', companyId: '11' })
+})
+
+for (const [name, override] of [
+  ['missing choice', { choice: null }], ['missing company', { availableCompanies: [{ id: '12' }] }],
+  ['deleted company', { availableCompanies: [{ id: '11', archived: true }] }],
+  ['cross-tenant', { choice: { ...reviewedChoice, company_id: 'other' } }],
+  ['wrong portal', { choice: { ...reviewedChoice, portal_id: '456' } }],
+  ['wrong contact', { choice: { ...reviewedChoice, hubspot_contact_id: 'other' } }],
+  ['no longer associated', { choice: { ...reviewedChoice, hubspot_company_id: '13' }, availableCompanies: [{ id: '13' }] }],
+  ['malformed choice', { choice: { ...reviewedChoice, hubspot_company_id: {} } }],
+]) test(`review evaluation ignores ${name} and preserves organization ambiguity`, () => {
+  const context = { ...reviewedContext, ...override }
+  const result = evaluateContactReview({ ...context, organizationChoice: context.choice, source: contact,
+    candidates: [cleanContact], organization: { outcome: 'safe_to_link', targetId: 'albi-2' } })
+  assert.equal(result.outcome, 'needs_review')
+  assert.equal(result.reason, 'multiple_associated_organizations')
+})
+
+test('reviewed context permits safe evaluation but cannot bypass organization or contact safeguards', () => {
+  const args = { ...reviewedContext, organizationChoice: reviewedChoice, source: contact,
+    candidates: [{ ...cleanContact, organizationId: 'albi-2' }], organization: { outcome: 'safe_to_link', targetId: 'albi-2' } }
+  assert.equal(evaluateContactReview(args).outcome, 'safe_to_link')
+  assert.equal(evaluateContactReview({ ...args, organization: null }).reason, 'organization_unresolved')
+  assert.equal(evaluateContactReview({ ...args, organization: { outcome: 'needs_review' } }).reason, 'organization_unresolved')
+  assert.equal(evaluateContactReview({ ...args, candidates: [{ ...cleanContact, firstName: 'Other' }] }).reason, 'nonblank_field_difference')
+  assert.equal(evaluateContactReview({ ...args, candidates: [cleanContact] }).reason, 'albi_contact_association_contract_unverified')
+  assert.equal(evaluateContactReview({ ...args, mappings: [{ portal_id: '456', hubspot_id: 'hs-1', albi_contact_id: 'albi-1' }] }).reason,
+    'target_already_mapped')
+  assert.equal(evaluateContactReview({ ...args, candidates: [], organization: { outcome: 'safe_to_link', targetId: 'albi-2' } }).reason,
+    'contact_type_confirmation_required')
+})
 
 test('production evaluation recognizes same-numbered foreign-portal target ownership', () => {
   const source = { ...contact, id: '42' }

@@ -126,6 +126,39 @@ test('recheck responds with safe detail and diagnostic progress without changing
   assert.deepEqual(f.calls.find(call => call[0] === 'clients'), ['clients', 'authorized-company'])
 })
 
+test('production recheck composition exposes the scoped choice and reconciliation without provider mutation capabilities', async () => {
+  const f = fixture()
+  f.row.reason = 'multiple_associated_organizations'; f.row.conflict_type = 'association'
+  Object.assign(f.repository, {
+    getContactOrganizationChoice: async (...args) => {
+      assert.deepEqual(args, ['authorized-company', '123', '10'])
+      return { company_id: 'authorized-company', portal_id: '123', hubspot_contact_id: '10', hubspot_company_id: '11' }
+    },
+    getCurrentReviewResolution: async () => null,
+    claimReviewResolution: async () => { throw Error('no resolution to claim') },
+    finishReviewResolution: async () => { throw Error('no resolution to finish') },
+    applyDryRunRecheck: async (_company, payload) => ({ review: { ...f.row, status: payload.status, recheck_outcome: payload.outcome } }),
+  })
+  f.options.makeClients = async () => {
+    const hubspot = {
+      getContacts: async () => [{ id: '10', properties: { firstname: 'A', lastname: 'Person', email: 'a@example.com' } }],
+      getCompanies: async () => [{ id: '11', properties: { name: 'Allied', domain: 'allied.example' } }],
+      getAssociations: async () => [{ fromId: '10', toObjectType: 'companies', toIds: ['11', '12'] }],
+    }
+    const albi = {
+      listContacts: async () => ({ records: [{ id: '20', firstName: 'A', lastName: 'Person', email: 'a@example.com', organizationId: '30' }], cursor: null }),
+      listOrganizations: async () => ({ records: [{ id: '30', name: 'Allied', domain: 'allied.example' }], cursor: null }),
+    }
+    for (const object of [hubspot, albi, f.repository]) for (const name of ['removeAssociation', 'removeContactCompanyAssociation', 'updateAlbiContact', 'associateContact']) {
+      Object.defineProperty(object, name, { get() { throw Error(`Forbidden capability: ${name}`) } })
+    }
+    return { hubspot, albi }
+  }
+  const response = await createDryRunReviewHandler(f.options)({ httpMethod: 'POST', body: JSON.stringify({ reviewId, expectedUpdatedAt: stamp }) })
+  assert.equal(response.statusCode, 200)
+  assert.equal(JSON.parse(response.body).item.recheckOutcome, 'safe_to_link')
+})
+
 test('POST rejects browser-controlled provider identifiers and conflicting selectors', async () => {
   const f = fixture()
   for (const extra of [{ sourceId: '11' }, { runId: 'old-run' }, { candidateId: '22' }, { objectType: 'companies' }]) {

@@ -246,6 +246,65 @@ test('ambiguous HubSpot organizations remain an association review', async () =>
   assert.equal(f.applied[0][1].conflictType, 'association')
 })
 
+function reviewedOrganizationFixture() {
+  const f = fixture({ contacts: [{ id: '20', firstName: 'A', lastName: 'Person', email: 'a@example.com', organizationId: '30' }],
+    organizations: [{ id: '30', name: 'Allied', domain: 'allied.example' }] })
+  f.row.reason = 'multiple_associated_organizations'; f.row.conflict_type = 'association'
+  f.choice = { company_id: 'tenant-1', portal_id: '123', hubspot_contact_id: '10', hubspot_company_id: '11' }
+  f.associatedIds = ['11', '12']
+  f.deps.repository.getContactOrganizationChoice = async (...args) => {
+    assert.deepEqual(args, ['tenant-1', '123', '10'])
+    return f.choice
+  }
+  f.deps.hubspotRead.getAssociations = async () => [{ fromId: '10', toObjectType: 'companies', toIds: f.associatedIds }]
+  f.deps.hubspotRead.getCompanies = async ids => ids.map(id => ({ id, properties: { name: 'Allied', domain: 'allied.example' } }))
+  for (const object of [f.deps.hubspotRead, f.deps.albiRead]) for (const name of ['removeAssociation', 'removeContactCompanyAssociation', 'updateAlbiContact']) {
+    Object.defineProperty(object, name, { get() { throw Error(`Forbidden capability: ${name}`) } })
+  }
+  return f
+}
+
+test('reviewed recheck keeps both direct associations and clears using the selected current company', async () => {
+  const f = reviewedOrganizationFixture()
+  await recheckDryRunReview(f.deps, input)
+  assert.equal(f.applied[0][1].outcome, 'safe_to_link')
+  assert.deepEqual(f.associatedIds, ['11', '12'])
+})
+
+for (const invalid of ['missing', 'deleted', 'cross-tenant', 'wrong portal', 'wrong contact', 'no longer associated']) {
+  test(`reviewed recheck ignores ${invalid} choice and retains ordinary ambiguity`, async () => {
+    const f = reviewedOrganizationFixture()
+    if (invalid === 'missing') f.deps.hubspotRead.getCompanies = async () => []
+    if (invalid === 'deleted') f.deps.hubspotRead.getCompanies = async () => [{ id: '11', archived: true, properties: {} }]
+    if (invalid === 'cross-tenant') f.choice.company_id = 'other'
+    if (invalid === 'wrong portal') f.choice.portal_id = '456'
+    if (invalid === 'wrong contact') f.choice.hubspot_contact_id = '99'
+    if (invalid === 'no longer associated') f.choice.hubspot_company_id = '13'
+    await recheckDryRunReview(f.deps, input)
+    assert.equal(f.applied[0][1].outcome, 'still_needs_review')
+    assert.equal(f.applied[0][1].reason, 'multiple_associated_organizations')
+  })
+}
+
+test('saved association addition becomes eligible only when the next direct association read includes it', async () => {
+  const f = reviewedOrganizationFixture()
+  f.choice.hubspot_company_id = '13'
+  await recheckDryRunReview(f.deps, input)
+  assert.equal(f.applied[0][1].reason, 'multiple_associated_organizations')
+  f.associatedIds.push('13')
+  await recheckDryRunReview(f.deps, input)
+  assert.equal(f.applied[1][1].outcome, 'safe_to_link')
+  assert.deepEqual(f.associatedIds, ['11', '12', '13'])
+})
+
+test('reviewed company requiring field review cannot clear an otherwise exact contact link', async () => {
+  const f = reviewedOrganizationFixture()
+  f.deps.albiRead.listOrganizations = async () => ({ records: [{ id: '30', name: 'Other', domain: 'allied.example' }], cursor: null })
+  await recheckDryRunReview(f.deps, input)
+  assert.equal(f.applied[0][1].outcome, 'still_needs_review')
+  assert.equal(f.applied[0][1].reason, 'organization_unresolved')
+})
+
 for (const reason of ['multiple_associated_organizations', 'albi_contact_association_contract_unverified',
   'association_contract_unverified', 'organization_unresolved']) {
   test(`empty direct associations retain the existing ${reason} classification with current safe evidence`, async () => {

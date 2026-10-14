@@ -1,6 +1,6 @@
 import { ApiError, isRecord, malformed } from './http.js'
 import { assertReviewClassification, evaluateContactReview, evaluateOrganizationReview,
-  safeReviewSnapshot, safeReviewCandidates, safeReviewEvidence, safeReviewChanges } from './review.js'
+  selectReviewedOrganizationContext, safeReviewSnapshot, safeReviewCandidates, safeReviewEvidence, safeReviewChanges } from './review.js'
 import { resolveContactType } from './options.js'
 
 export class H2AReviewError extends Error {
@@ -162,13 +162,13 @@ export async function recheckDryRunReview(deps, { companyId, reviewId, actorId, 
     source = exactSource(await read(deps, () => row.object_type === 'contacts' ? hubspot.getContacts([row.source_id]) : hubspot.getCompanies([row.source_id]), deadline), row.source_id)
     if (!source) evaluation = { outcome: 'source_missing', evidence: [], candidates: [], proposedChanges: {} }
     else {
-      let associatedCompanyIds = row.object_type === 'contacts' ? associations(await read(deps, () => hubspot.getAssociations({
+      const associatedCompanyIds = row.object_type === 'contacts' ? associations(await read(deps, () => hubspot.getAssociations({
         objectType: 'contacts', objectIds: [row.source_id], toObjectTypes: ['companies'],
       }), deadline), row.source_id) : []
       const resolutionRepository = deps.resolutionRepository ?? repository
+      let organizationChoice = null
       if (row.object_type === 'contacts' && typeof resolutionRepository.getContactOrganizationChoice === 'function') {
-        const choice = await bounded(deps, () => resolutionRepository.getContactOrganizationChoice(companyId, row.portal_id, row.source_id), deadline)
-        if (choice && associatedCompanyIds.includes(choice.hubspot_company_id)) associatedCompanyIds = [choice.hubspot_company_id]
+        organizationChoice = await bounded(deps, () => resolutionRepository.getContactOrganizationChoice(companyId, row.portal_id, row.source_id), deadline)
       }
       const candidates = await listAll(deps, row.object_type === 'contacts' ? args => albi.listContacts(args) : args => albi.listOrganizations(args), deadline)
       const mappings = await bounded(deps, () => repository.getMappings(companyId), deadline)
@@ -177,18 +177,25 @@ export async function recheckDryRunReview(deps, { companyId, reviewId, actorId, 
         mappings: mappings.organizations, optionMappings: mappings.options })
       else {
         let organization = null
-        if (associatedCompanyIds.length === 1) {
-          const id = associatedCompanyIds[0]
+        const availableCompanies = []
+        // First choose a possible source to read; only the actual company read
+        // below can authorize a reviewed context in the evaluator.
+        const context = selectReviewedOrganizationContext({ associatedCompanyIds, choice: organizationChoice,
+          availableCompanies: associatedCompanyIds.map(id => ({ id })), companyId, portalId: row.portal_id, contactId: row.source_id })
+        if (context.companyId) {
+          const id = context.companyId
           const company = exactSource(await read(deps, () => hubspot.getCompanies([id]), deadline), id)
-          if (!company) organization = { outcome: 'needs_review' }
+          if (!company || company.archived === true) organization = { outcome: 'needs_review' }
           else {
+            availableCompanies.push(company)
             const organizations = await listAll(deps, args => albi.listOrganizations(args), deadline)
             const result = evaluateOrganizationReview({ source: company, candidates: organizations, portalId: row.portal_id,
               mappings: mappings.organizations, optionMappings: mappings.options })
             organization = organizationContext(result, organizations, mappings.organizations, id, row.portal_id, mappings.options)
           }
         }
-        evaluation = evaluateContactReview({ source, candidates, associatedCompanyIds, organization, portalId: row.portal_id,
+        evaluation = evaluateContactReview({ source, candidates, associatedCompanyIds, organization, organizationChoice, availableCompanies,
+          companyId, portalId: row.portal_id,
           mappings: mappings.contacts, optionMappings: mappings.options })
         // Samples may have used activity company context when direct associations
         // were empty. That context is intentionally not retained; only a fresh

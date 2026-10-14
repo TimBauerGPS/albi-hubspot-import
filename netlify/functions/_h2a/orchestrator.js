@@ -3,7 +3,7 @@ import { HUBSPOT_ACTIVITY_TYPES, SAMPLE_LIMIT_PER_TYPE } from './constants.js'
 import { pacificBusinessDate, pacificStartOfDate } from './time.js'
 import { advanceCheckpoint, compareBoundary, planBackfillWindows, readStartWithOverlap } from './checkpoints.js'
 import { evaluateContactReview, evaluateOrganizationReview, safeReviewSnapshot, safeReviewCandidates,
-  safeReviewEvidence, safeReviewChanges } from './review.js'
+  selectReviewedOrganizationContext, safeReviewEvidence, safeReviewChanges } from './review.js'
 import { resolveActivityTargets, buildAlbiActivity } from './activity.js'
 import { resolveActivityType, resolveContactType } from './options.js'
 import { reserveDelivery, completeDelivery } from './deliveries.js'
@@ -188,12 +188,12 @@ async function resolveOrganization(deps, ctx, source) {
   return { id: sourceId, action: 'link', outcome: 'safe_to_link', targetId, organizationTypeId: String(orgTypeId) }
 }
 
-async function resolveContact(deps, ctx, source, organization, associatedCompanyIds = []) {
+async function resolveContact(deps, ctx, source, organization, associatedCompanyIds = [], organizationChoice = null, availableCompanies = []) {
   const sourceId = idOf(source)
   const { companyId, portalId, mappings, indexes, runId } = ctx
   const evaluation = evaluateContactReview({ source, candidates: indexes.contacts, portalId,
     mappings: mappings.contacts, optionMappings: mappings.options,
-    associatedCompanyIds, organization })
+    associatedCompanyIds, organization, organizationChoice, availableCompanies, companyId })
   if (evaluation.outcome === 'needs_review') {
     await conflict(deps, ctx, { objectType: 'contacts', sourceId, type: evaluation.conflictType, source, ...evaluation })
     return { id: sourceId, action: 'conflict', reason: evaluation.conflictType === 'contact_fields'
@@ -297,10 +297,24 @@ async function processActivity(deps, ctx, activity, deadline) {
     try {
       const linkedIds = contactCompanyLinks.find(row => row.fromId === id)?.toIds ?? []
       const associatedIds = linkedIds.length ? linkedIds : companyIds
-      const organization = associatedIds.length === 1
-        ? organizationBySourceId.get(associatedIds[0]) ?? { id: associatedIds[0], action: 'conflict', reason: 'missing_hubspot_company' }
+      const choiceKey = JSON.stringify([portalId, id])
+      if (!ctx.organizationChoices.has(choiceKey)) {
+        const repository = deps.resolutionRepository ?? deps.repository
+        // Cache the read itself so failures also remain fail closed without
+        // repeatedly querying the same scoped contact during this run.
+        ctx.organizationChoices.set(choiceKey, Promise.resolve().then(() => typeof repository.getContactOrganizationChoice === 'function'
+          ? repository.getContactOrganizationChoice(companyId, portalId, id) : null))
+      }
+      const choice = await ctx.organizationChoices.get(choiceKey)
+      // Activity company context is still a fallback, but it cannot establish
+      // the direct association required for a saved reviewed choice.
+      const organizationChoice = linkedIds.length ? choice : null
+      const context = selectReviewedOrganizationContext({ associatedCompanyIds: associatedIds, choice: organizationChoice,
+        availableCompanies: companies, companyId, portalId, contactId: id })
+      const organization = context.companyId
+        ? organizationBySourceId.get(context.companyId) ?? { id: context.companyId, action: 'conflict', reason: 'missing_hubspot_company' }
         : null
-      contactsResolved.push(await resolveContact(deps, ctx, source, organization, associatedIds))
+      contactsResolved.push(await resolveContact(deps, ctx, source, organization, associatedIds, organizationChoice, companies))
     } catch (error) {
       if (error instanceof ReviewCaptureError) throw error
       await recordOnce(deps.repository, companyId, runId, { portal_id: portalId, object_type: 'contacts', source_id: idOf(source),
@@ -409,6 +423,7 @@ export async function runCompanySync(deps, input = {}) {
     ctx = { companyId, runId: run.id, portalId: config.portal_id, mode, mappings, indexes, sampleLimitPerType,
       reviewCaptureVersion: run.mode === 'dry_run' ? run.review_capture_version : null,
       capturedReviewIdentities: new Set(),
+      organizationChoices: new Map(),
       owners: new Map(owners.map(owner => [String(owner.id), owner])), activity: null, newConflictCount: 0 }
     if (input.resumeId) {
       const intent = await repo.getConflictResume(companyId, input.resumeId)

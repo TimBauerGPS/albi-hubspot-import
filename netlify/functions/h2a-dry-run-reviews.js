@@ -2,6 +2,7 @@ import { H2AAuthError, requireH2ARequest } from './_h2a/auth.js'
 import { createH2ARepository } from './_h2a/repository.js'
 import { createH2AProviderClients, readOnlyH2ACapabilities } from './_h2a/providerClients.js'
 import { H2AReviewError, createReviewRepositoryCapabilities, recheckDryRunReview, resolveReviewSample, reviewProgress } from './_h2a/reviewService.js'
+import { createReviewReconciliationCapabilities } from './_h2a/reviewResolutionService.js'
 import { REVIEW_REASONS, projectReviewRow, projectReviewEvent } from './_h2a/review.js'
 import { ApiError } from './_h2a/http.js'
 
@@ -74,7 +75,10 @@ export function createDryRunReviewHandler(options = {}) {
       const repository = options.repository ?? createH2ARepository(auth.supabase)
       const companyId = auth.companyId
       if (isRecheck) {
-        const result = await recheckDryRunReview({ repository: createReviewRepositoryCapabilities(repository), now: options.now, clockMs: options.clockMs,
+        const resolutionRepository = ['getCurrentReviewResolution', 'claimReviewResolution', 'finishReviewResolution', 'getContactOrganizationChoice']
+          .every(method => typeof repository[method] === 'function') ? createReviewReconciliationCapabilities(repository) : undefined
+        const result = await recheckDryRunReview({ repository: createReviewRepositoryCapabilities(repository), resolutionRepository,
+          now: options.now, clockMs: options.clockMs,
           sleep: options.sleep, deadlineMs: options.deadlineMs, getReadClients: async (_companyId, config, { signal }) => {
             const clients = options.makeClients ? await options.makeClients(companyId) : await createH2AProviderClients({
               companyId, repository, keyring: options.keyring, env: options.env, fetch: async (url, init) => {

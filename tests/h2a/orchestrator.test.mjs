@@ -685,6 +685,105 @@ test('contact association chooses its own organization when activity has several
   assert.equal(contactPayload.organizationId, '100')
 })
 
+function reviewedSyncFixture() {
+  const deps = liveFixture({ companyIds: ['20', '21'], albiOrganizations: [
+    { id: '100', name: 'Company20', phoneNumber: '4155550123' },
+    { id: '101', name: 'Company21', phoneNumber: '4155550123' },
+  ] })
+  deps.mappings.organizations.push({ portal_id: '123', hubspot_id: '20', albi_organization_id: '100' },
+    { portal_id: '123', hubspot_id: '21', albi_organization_id: '101' })
+  deps.choice = { company_id: 'c1', portal_id: '123', hubspot_contact_id: '10', hubspot_company_id: '21' }
+  deps.directIds = ['20', '21']; deps.choiceReads = []
+  deps.repository.getContactOrganizationChoice = async (...args) => { deps.choiceReads.push(args); return deps.choice }
+  deps.hubspot.getAssociations = async ({ objectType }) => objectType === 'contacts'
+    ? [{ fromId: '10', toObjectType: 'companies', toIds: deps.directIds }]
+    : [{ toObjectType: 'contacts', toIds: ['10'] }, { toObjectType: 'companies', toIds: ['20', '21'] }]
+  deps.albi.createContact = async payload => { deps.contactPayload = payload; return { id: '200' } }
+  for (const object of [deps.hubspot, deps.albi]) for (const name of ['removeAssociation', 'removeContactCompanyAssociation', 'updateContact', 'associateContact']) {
+    Object.defineProperty(object, name, { get() { throw Error(`Forbidden capability: ${name}`) } })
+  }
+  return deps
+}
+
+test('broad sync uses tenant-scoped reviewed context, preserves associations, and caches portal plus contact choices', async () => {
+  const deps = reviewedSyncFixture()
+  deps.hubspot.listActivities = async ({ objectType }) => ({ records: objectType === 'calls' ? [
+    { id: '50', occurredAt: '2026-10-02T12:00:00Z', objectType: 'calls', properties: {} },
+    { id: '51', occurredAt: '2026-10-02T12:01:00Z', objectType: 'calls', properties: {} },
+  ] : [], after: null })
+  await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
+  assert.equal(deps.contactPayload?.organizationId, '101')
+  assert.deepEqual(deps.directIds, ['20', '21'])
+  assert.deepEqual(deps.choiceReads, [['c1', '123', '10']])
+  assert.equal(deps.events.includes('conflict:multiple_associated_organizations'), false)
+})
+
+test('a failed reviewed choice lookup is cached and never permits contact processing', async () => {
+  const deps = reviewedSyncFixture()
+  let reads = 0
+  deps.repository.getContactOrganizationChoice = async () => { reads++; throw Error('choice storage unavailable') }
+  deps.hubspot.listActivities = async ({ objectType }) => ({ records: objectType === 'calls' ? [
+    { id: '50', occurredAt: '2026-10-02T12:00:00Z', objectType: 'calls', properties: {} },
+    { id: '51', occurredAt: '2026-10-02T12:01:00Z', objectType: 'calls', properties: {} },
+  ] : [], after: null })
+  await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
+  assert.equal(reads, 1)
+  assert.equal(deps.contactPayload, undefined)
+  assert.ok(deps.items.some(item => item.object_type === 'contacts' && item.outcome === 'failed'))
+})
+
+test('broad sync permits an explicitly added company only after a new direct association read contains it', async () => {
+  const deps = reviewedSyncFixture()
+  let associationReads = 0
+  deps.hubspot.getAssociations = async ({ objectType }) => {
+    if (objectType !== 'contacts') return [{ toObjectType: 'contacts', toIds: ['10'] }, { toObjectType: 'companies', toIds: ['20', '21'] }]
+    associationReads++
+    return [{ fromId: '10', toObjectType: 'companies', toIds: associationReads === 1 ? ['20', '22'] : ['20', '21', '22'] }]
+  }
+  deps.hubspot.listActivities = async ({ objectType }) => ({ records: objectType === 'calls' ? [
+    { id: '50', occurredAt: '2026-10-02T12:00:00Z', objectType: 'calls', properties: {} },
+    { id: '51', occurredAt: '2026-10-02T12:01:00Z', objectType: 'calls', properties: {} },
+  ] : [], after: null })
+  deps.albi.createContact = async payload => {
+    assert.equal(associationReads, 2)
+    deps.contactPayload = payload
+    return { id: '200' }
+  }
+  await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
+  assert.ok(deps.events.includes('conflict:multiple_associated_organizations'))
+  assert.equal(deps.contactPayload?.organizationId, '101')
+  assert.deepEqual(deps.choiceReads, [['c1', '123', '10']])
+})
+
+for (const invalid of ['absent', 'missing', 'deleted', 'cross-tenant', 'wrong portal', 'wrong contact', 'no longer associated', 'activity only']) {
+  test(`broad sync ignores ${invalid} organization choice`, async () => {
+    const deps = reviewedSyncFixture()
+    if (invalid === 'absent') deps.choice = null
+    if (invalid === 'missing') deps.hubspot.getCompanies = async () => [{ id: '20', properties: { name: 'Company20', phone: '4155550123' } }]
+    if (invalid === 'deleted') deps.hubspot.getCompanies = async () => [
+      { id: '20', properties: { name: 'Company20', phone: '4155550123' } }, { id: '21', archived: true, properties: {} }]
+    if (invalid === 'cross-tenant') deps.choice.company_id = 'other'
+    if (invalid === 'wrong portal') deps.choice.portal_id = '456'
+    if (invalid === 'wrong contact') deps.choice.hubspot_contact_id = '99'
+    if (invalid === 'no longer associated') deps.choice.hubspot_company_id = '22'
+    if (invalid === 'activity only') deps.directIds = []
+    await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
+    assert.equal(deps.contactPayload, undefined)
+    assert.ok(deps.events.includes('conflict:multiple_associated_organizations'))
+  })
+}
+
+test('reviewed broad context cannot bypass organization field review', async () => {
+  const deps = reviewedSyncFixture()
+  deps.albi.listOrganizations = async () => ({ records: [
+    { id: '100', name: 'Company20', phoneNumber: '4155550123' },
+    { id: '101', name: 'Other', phoneNumber: '4155550123' },
+  ], cursor: null })
+  await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
+  assert.equal(deps.contactPayload, undefined)
+  assert.ok(deps.events.includes('conflict:organization_unresolved'))
+})
+
 test('missing association records are reviewed instead of falling back to an organization activity', async () => {
   const deps = liveFixture()
   deps.hubspot.getContacts = async () => []
