@@ -59,6 +59,22 @@ test('reviewed context permits safe evaluation but cannot bypass organization or
     'contact_type_confirmation_required')
 })
 
+for (const organization of [{ outcome: 'safe_to_create', targetId: null }, { outcome: 'safe_to_link', targetId: null }]) {
+  test(`reviewed ${organization.outcome} company without a resolved target cannot clear an existing contact`, () => {
+    const result = evaluateContactReview({ ...reviewedContext, organizationChoice: reviewedChoice, source: contact,
+      candidates: [{ ...cleanContact, organizationId: organization.outcome === 'safe_to_create' ? 'old-org' : null }], organization })
+    assert.equal(result.outcome, 'needs_review')
+    assert.equal(result.reason, 'albi_contact_association_contract_unverified')
+    assert.equal(result.conflictType, 'association')
+  })
+}
+
+test('reviewed company creation remains eligible when the contact is genuinely new', () => {
+  const result = evaluateContactReview({ ...reviewedContext, organizationChoice: reviewedChoice, source: contact,
+    candidates: [], organization: { outcome: 'safe_to_create', targetId: null }, optionMappings: [contactType] })
+  assert.equal(result.outcome, 'safe_to_create')
+})
+
 test('production evaluation recognizes same-numbered foreign-portal target ownership', () => {
   const source = { ...contact, id: '42' }
   const result = evaluateContactReview({ source, candidates: [cleanContact], portalId: '123',

@@ -198,7 +198,11 @@ export function evaluateContactReview({ source, candidates = [], mappings = [], 
     if (hasChanges(decision.proposedChanges)) return conflict('contact_fields', { ...decision,
       reason: Object.keys(decision.proposedChanges.updates).length ? 'albi_contact_update_contract_unverified' : 'nonblank_field_difference' }, related)
     const target = candidates.find(candidate => identity(valueOf(candidate, ['id', 'targetId', 'albiId'], true)) === decision.targetId)
-    if (organization?.outcome === 'safe_to_link' && target && identity(valueOf(target, ['organizationId'])) !== identity(organization.targetId)) {
+    const organizationTargetId = identity(organization?.targetId)
+    // Existing contacts require a resolved organization target; a proposed
+    // organization creation cannot establish their current association.
+    if (organization?.outcome === 'safe_to_create' || organization?.outcome === 'safe_to_link' &&
+      (!organizationTargetId || target && identity(valueOf(target, ['organizationId'])) !== organizationTargetId)) {
       return conflict('association', { ...decision, reason: 'albi_contact_association_contract_unverified' }, related)
     }
     return reviewResult('safe_to_link', '', decision, related, 'contact')

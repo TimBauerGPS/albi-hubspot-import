@@ -305,6 +305,22 @@ test('reviewed company requiring field review cannot clear an otherwise exact co
   assert.equal(f.applied[0][1].reason, 'organization_unresolved')
 })
 
+for (const existing of [true, false]) test(`reviewed company needing creation ${existing ? 'cannot clear an existing contact' : 'permits a new contact'}`, async () => {
+  const f = reviewedOrganizationFixture()
+  f.deps.repository.getMappings = async () => ({ contacts: [], organizations: [], options: [
+    { mapping_kind: 'default_organization_type', source_key: 'default', albi_id: '8', confirmed: true },
+    { mapping_kind: 'default_contact_type', source_key: 'default', albi_id: '7', confirmed: true },
+  ] })
+  f.deps.albiRead.listOrganizations = async () => ({ records: [], cursor: null })
+  if (!existing) f.deps.albiRead.listContacts = async () => ({ records: [], cursor: null })
+  await recheckDryRunReview(f.deps, input)
+  const payload = f.applied[0][1]
+  assert.equal(payload.outcome, existing ? 'still_needs_review' : 'safe_to_create')
+  assert.equal(payload.status, existing ? 'needs_review' : 'cleared')
+  if (existing) assert.equal(payload.reason, 'albi_contact_association_contract_unverified')
+  assert.deepEqual(f.associatedIds, ['11', '12'])
+})
+
 for (const reason of ['multiple_associated_organizations', 'albi_contact_association_contract_unverified',
   'association_contract_unverified', 'organization_unresolved']) {
   test(`empty direct associations retain the existing ${reason} classification with current safe evidence`, async () => {

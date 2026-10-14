@@ -784,6 +784,23 @@ test('reviewed broad context cannot bypass organization field review', async () 
   assert.ok(deps.events.includes('conflict:organization_unresolved'))
 })
 
+for (const existing of [true, false]) test(`reviewed dry-run company creation ${existing ? 'cannot preview an existing contact link' : 'permits new contact creation'}`, async () => {
+  const deps = reviewedSyncFixture()
+  deps.repository.getConfig = async () => ({ state: 'dry_run', portal_id: '123', selected_start_date: '2026-10-01', preflight_status: 'valid' })
+  deps.mappings.organizations.length = 0
+  deps.albi.listOrganizations = async () => ({ records: [], cursor: null })
+  deps.albi.listContacts = async () => ({ records: existing ? [{ id: '200', firstName: 'First10', lastName: 'Last10',
+    email: '10@example.com', organizationId: 'old-org' }] : [], cursor: null })
+  await runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'manual' })
+  const item = deps.items.find(item => item.object_type === 'contacts' && item.source_id === '10')
+  assert.equal(item.sanitized_details.proposedAction, existing ? 'review_conflict' : 'create_contact')
+  if (existing) assert.equal(item.sanitized_details.reason, 'albi_contact_association_contract_unverified')
+  assert.ok(deps.items.some(item => item.object_type === 'companies' && item.source_id === '21' &&
+    item.sanitized_details.proposedAction === 'create_organization'))
+  assert.equal(deps.contactPayload, undefined)
+  assert.deepEqual(deps.directIds, ['20', '21'])
+})
+
 test('missing association records are reviewed instead of falling back to an organization activity', async () => {
   const deps = liveFixture()
   deps.hubspot.getContacts = async () => []
