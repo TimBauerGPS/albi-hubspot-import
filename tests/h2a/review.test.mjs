@@ -251,8 +251,17 @@ test('list projection constructs the exact summary shape from safe source identi
     displayName: 'A Person', identity: { email: 'a@example.com', phone: '5551112222', organizationName: 'Allied', domain: null }, lastRecheckedAt: null, createdAt: 'created', updatedAt: 'updated' })
 })
 
+test('only detailed review projection exposes a validated portal for fixed-origin links', () => {
+  assert.equal(projectReviewRow({ ...row, portal_id: '123' }, { detail: true }).portalId, '123')
+  assert.equal(Object.hasOwn(projectReviewRow({ ...row, portal_id: '123' }), 'portalId'), false)
+  for (const portal_id of ['https://evil.test', '01', '0', '12/34', '', null, 123]) {
+    assert.equal(projectReviewRow({ ...row, portal_id }, { detail: true }).portalId, null)
+  }
+})
+
 test('detail projection independently re-sanitizes stored JSON into the exact detail shape', () => {
   assert.deepEqual(projectReviewRow(row, { detail: true }), { id: 'review', runId: 'run', objectType: 'contacts', sourceId: 'hs', reason: 'name_only_candidate', conflictType: 'contact_match', status: 'needs_review', recheckOutcome: null,
+    portalId: null,
     sourceSnapshot: { id: 'hs', firstName: 'A', lastName: 'Person', email: 'a@example.com', phoneNumber: '5551112222', organizationName: 'Allied' },
     candidateSnapshots: [{ id: 'albi', firstName: 'A' }], matchEvidence: ['email'],
     proposedChanges: { updates: { jobTitle: 'Owner' }, conflicts: {}, unchanged: ['email'] }, lastRecheckedAt: null, lastRecheckedBy: null, createdAt: 'created', updatedAt: 'updated' })

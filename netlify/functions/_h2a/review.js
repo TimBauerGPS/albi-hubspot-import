@@ -227,6 +227,7 @@ export function projectReviewRow(row, { detail = false } = {}) {
     status: STATUSES.has(stored.status) ? stored.status : null, recheckOutcome: REVIEW_OUTCOMES.has(stored.recheck_outcome) ? stored.recheck_outcome : null,
   }
   if (detail) {
+    projected.portalId = typeof stored.portal_id === 'string' && /^[1-9]\d{0,99}$/.test(stored.portal_id) ? stored.portal_id : null
     projected.sourceSnapshot = source
     projected.candidateSnapshots = safeReviewCandidates(stored.candidate_snapshots, objectType)
     projected.matchEvidence = safeReviewEvidence(stored.match_evidence)

@@ -56,6 +56,7 @@ test('detail exposes allowlisted snapshots and projected events under current ru
   assert.equal(JSON.parse(response.body).item.sourceSnapshot.email, 'a@example.com')
   assert.equal(JSON.stringify(response).includes('secret'), false)
   assert.equal(JSON.parse(response.body).item.events[0].details.category, 'auth')
+  assert.equal(JSON.parse(response.body).item.portalId, '123')
   assert.deepEqual(JSON.parse(response.body).item.resolutionCapability,
     { enabled: false, mode: 'disabled', canResolve: false, hubspotWrites: 'verified_when_first_used' })
   assert.equal(JSON.parse(response.body).item.resolution, null)

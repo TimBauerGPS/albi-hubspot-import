@@ -1,6 +1,87 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { buildResolutionRequest, presentReviewResolution, buildResolutionConfirmation } from '../../src/features/hubspotToAlbi/sampleReviewResolution.js'
 import { presentReviewBreakdown } from '../../src/features/hubspotToAlbi/reviewBreakdown.js'
+
+const resolutionRequest = { reviewId: '00000000-0000-4000-8000-000000000001', expectedUpdatedAt: '2026-10-12T12:00:00.000Z',
+  clientRequestId: '00000000-0000-4000-8000-000000000002', action: 'link_existing', candidateId: '2590478', approveManyToOne: false }
+
+test('resolution requests preserve explicit approvals and retry identity and reject payload leakage', () => {
+  assert.deepEqual(buildResolutionRequest(resolutionRequest), resolutionRequest)
+  assert.deepEqual(buildResolutionRequest(resolutionRequest), resolutionRequest)
+  for (const extra of [{ sourceSnapshot: { email: 'SECRET' } }, { url: 'https://evil.test' }, { portalId: '12' },
+    { fieldChoices: { email: 'albi' } }, { approveManyToOne: null }, { candidateId: 'javascript:1' },
+    { clientRequestId: '' }, { expectedUpdatedAt: '2026-02-30T12:00:00Z' }]) {
+    assert.throws(() => buildResolutionRequest({ ...resolutionRequest, ...extra }), TypeError)
+  }
+  assert.throws(() => buildResolutionRequest({ ...resolutionRequest, action: 'choose_organization', candidateId: undefined,
+    approveManyToOne: undefined, organizationSourceId: '22', addHubSpotAssociation: false }), TypeError)
+  const { candidateId, approveManyToOne, ...base } = resolutionRequest
+  assert.deepEqual(buildResolutionRequest({ ...base, action: 'choose_organization', organizationSourceId: '22', addHubSpotAssociation: false }),
+    { ...base, action: 'choose_organization', organizationSourceId: '22', addHubSpotAssociation: false })
+})
+
+test('resolution presentation rebuilds audit and manual tasks with fixed copy and generated links', () => {
+  const presented = presentReviewResolution({ id: resolutionRequest.reviewId, objectType: 'contacts', portalId: '12', sourceId: '34',
+    action: 'resolve_fields', status: 'waiting_on_albi', decision: { action: 'resolve_fields', fieldChoices: { email: 'hubspot', token: 'SECRET' } },
+    providerOutcomeCode: 'authorization_rejected', message: 'SECRET', url: 'https://evil.test', credentials: 'SECRET',
+    events: [{ eventType: 'waiting_on_albi', details: { message: 'SECRET', executionContext: { token: 'SECRET' },
+      manualTasks: [{ provider: 'albi', objectType: 'contacts', targetId: '2590478', url: 'https://evil.test',
+        fields: [{ field: 'email', value: null }, { field: 'phoneNumber', value: '' }, { field: 'token', value: 'SECRET' }] }] } }] })
+  assert.equal(presented.statusLabel, 'Waiting on Albi')
+  assert.equal(presented.outcomeLabel, 'Authentication or write scope rejected')
+  assert.equal(presented.hubspotUrl, 'https://app.hubspot.com/contacts/12/record/0-1/34')
+  assert.deepEqual(presented.events[0].manualTasks[0].fields, [{ field: 'email', label: 'Email', value: null }, { field: 'phoneNumber', label: 'Phone', value: '' }])
+  assert.equal(presented.events[0].manualTasks[0].url, 'https://app.albiware.com/Relationships/Contact/2590478')
+  assert.equal(JSON.stringify(presented).includes('SECRET'), false)
+  assert.equal(JSON.stringify(presented).includes('evil.test'), false)
+  assert.equal(presentReviewResolution({ status: 'SECRET', providerOutcomeCode: 'SECRET' }).statusLabel, 'Unknown resolution status')
+  assert.equal(presentReviewResolution(null), null)
+})
+
+test('confirmation separates mixed writes and manual tasks and retains explicit clearing values', () => {
+  const review = presentSampleReviewItem({ reason: 'nonblank_field_difference', objectType: 'contacts', sourceId: '34',
+    sourceSnapshot: { email: 'hs@example.com', phoneNumber: '5551112222' }, candidateSnapshots: [{ id: '2590478' }],
+    proposedChanges: { conflicts: { email: { proposed: 'hs@example.com', current: 'albi@example.com' },
+      phoneNumber: { proposed: '5551112222', current: '5553334444' }, city: { proposed: 'London', current: null } } } })
+  assert.deepEqual(buildResolutionConfirmation({ review, decision: { action: 'resolve_fields', fieldChoices: { email: 'albi', phoneNumber: 'hubspot' } } }), {
+    hubspotWrites: [{ field: 'Email', value: 'albi@example.com' }],
+    albiTasks: [{ field: 'Phone', value: '5551112222', url: 'https://app.albiware.com/Relationships/Contact/2590478' }], mapping: null, association: null,
+  })
+  assert.deepEqual(buildResolutionConfirmation({ review, decision: { action: 'resolve_fields', fieldChoices: { city: 'albi' } } }).hubspotWrites,
+    [{ field: 'City', value: null }])
+  assert.throws(() => buildResolutionConfirmation({ review, decision: { action: 'resolve_fields', fieldChoices: { id: 'albi' } } }), TypeError)
+  assert.throws(() => buildResolutionConfirmation({ review, decision: { action: 'link_existing', candidateId: '2590478' } }), TypeError)
+})
+
+test('identity and organization confirmation name the consequence without trusting incoming links', () => {
+  const review = presentSampleReviewItem({ objectType: 'companies', reason: 'name_only_candidate', sourceId: '34', portalId: '12',
+    candidateSnapshots: [{ id: '2590478', url: 'https://evil.test' }] })
+  assert.deepEqual(buildResolutionConfirmation({ review, decision: { action: 'link_existing', candidateId: '2590478', approveManyToOne: true } }), {
+    hubspotWrites: [], albiTasks: [], mapping: { objectType: 'companies', sourceId: '34', targetId: '2590478', approveManyToOne: true,
+      url: 'https://app.albiware.com/Relationships/Organization/2590478' }, association: null,
+  })
+  assert.deepEqual(buildResolutionConfirmation({ review, decision: { action: 'create_albi' } }).mapping,
+    { objectType: 'companies', sourceId: '34', targetId: null, createAlbi: true })
+  assert.throws(() => buildResolutionConfirmation({ review, decision: { action: 'link_existing', candidateId: '999' } }), TypeError)
+  const contact = presentSampleReviewItem({ objectType: 'contacts', reason: 'multiple_associated_organizations', sourceId: '34', portalId: '12' })
+  assert.deepEqual(buildResolutionConfirmation({ review: contact, decision: { action: 'choose_organization', organizationSourceId: '22', addHubSpotAssociation: false } }).association,
+    { contactId: '34', organizationSourceId: '22', addHubSpotAssociation: false, url: 'https://app.hubspot.com/contacts/12/record/0-2/22' })
+  assert.equal(buildResolutionConfirmation({ review: contact, decision: { action: 'choose_organization', organizationSourceId: '22', addHubSpotAssociation: true } }).association.addHubSpotAssociation, true)
+})
+
+test('unavailable field evidence cannot imply a clearing write and unsafe IDs never make links', () => {
+  const review = presentSampleReviewItem({ objectType: 'contacts', reason: 'nonblank_field_difference', sourceId: 'javascript:1', portalId: 'https://evil.test',
+    candidateSnapshots: [{ id: '2590478' }], proposedChanges: { conflicts: { email: { proposed: 'hs@example.com' } } },
+    resolutionCapability: { enabled: true, mode: 'SECRET', canResolve: true, hubspotWrites: 'SECRET' } })
+  assert.deepEqual(review.resolutionFields, [])
+  assert.equal(review.hubspotUrl, null)
+  assert.deepEqual(review.resolutionCapability, { enabled: false, mode: 'disabled', canResolve: false, hubspotWrites: 'verified_when_first_used' })
+  assert.throws(() => buildResolutionConfirmation({ review, decision: { action: 'resolve_fields', fieldChoices: { email: 'albi' } } }), TypeError)
+  assert.deepEqual(presentReviewResolution({ events: [{ eventType: 'SECRET', details: { manualTasks: [
+    { provider: 'albi', objectType: 'contacts', targetId: 'javascript:1', fields: [{ field: 'email', value: 'ok' }] },
+  ] } }] }).events[0].manualTasks, [])
+})
 
 test('breakdown retains the queue label for formerly collapsed review reasons', () => {
   const breakdown = presentReviewBreakdown({ mode: 'dry_run', sampleLimitPerType: 10, totals: { requires_review: 1 },

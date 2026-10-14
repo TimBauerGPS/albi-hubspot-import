@@ -4,6 +4,46 @@ import test from 'node:test'
 
 const session = { access_token: 'supabase-session-token' }
 
+test('resolution client sends the exact tenant decision body and preserves request ID across retries', async () => {
+  const { getH2ADryRunReviewResolution, resolveH2ADryRunReview } = await import('../../src/lib/hubspotToAlbi.js')
+  const input = { reviewId: '00000000-0000-4000-8000-000000000001', expectedUpdatedAt: '2026-10-12T12:00:00Z',
+    clientRequestId: '00000000-0000-4000-8000-000000000002', action: 'link_existing', candidateId: '2590478', approveManyToOne: false }
+  const signal = new AbortController().signal
+  const calls = await captureRequests(async () => {
+    await getH2ADryRunReviewResolution(session, 'company-1', input.reviewId, { signal })
+    await resolveH2ADryRunReview(session, 'company-1', input, { signal })
+    await resolveH2ADryRunReview(session, 'company-1', input, { signal })
+    for (const extra of [{ sourceSnapshot: { email: 'SECRET' } }, { url: 'https://evil.test' }, { sourceId: '34' }, { companyId: 'attacker' }]) {
+      await assert.rejects(async () => resolveH2ADryRunReview(session, 'company-1', { ...input, ...extra }), TypeError)
+    }
+  })
+  assert.equal(calls.length, 3)
+  assert.equal(calls[0].url, '/.netlify/functions/h2a-dry-run-review-resolutions?companyId=company-1&reviewId=00000000-0000-4000-8000-000000000001')
+  for (const call of calls) {
+    assert.equal(call.options.headers.Authorization, 'Bearer supabase-session-token')
+    assert.equal(call.options.signal, signal)
+  }
+  for (const call of calls.slice(1)) {
+    assert.equal(call.url, '/.netlify/functions/h2a-dry-run-review-resolutions')
+    assert.deepEqual(JSON.parse(call.options.body), { ...input, companyId: 'company-1' })
+  }
+})
+
+test('resolution errors expose fixed actionable copy and never expose provider details', async () => {
+  const { getH2ADryRunReviewResolution } = await import('../../src/lib/hubspotToAlbi.js')
+  const originalFetch = globalThis.fetch
+  try {
+    for (const message of ['Invalid resolution request.', 'Invalid resolution decision.', 'Review resolution is unavailable.',
+      'Super administrator access is required.', 'This sample review changed. Refresh and confirm the resolution again.', 'Unable to resolve this sample review.']) {
+      globalThis.fetch = async () => response({ error: message }, { status: 409 })
+      await assert.rejects(() => getH2ADryRunReviewResolution(session, 'company-1', '00000000-0000-4000-8000-000000000001'), error => error.message === message)
+    }
+    globalThis.fetch = async () => response({ error: 'provider credential SECRET' }, { status: 500 })
+    await assert.rejects(() => getH2ADryRunReviewResolution(session, 'company-1', '00000000-0000-4000-8000-000000000001'),
+      error => error.message === 'HubSpot to Albi is temporarily unavailable. Try again.')
+  } finally { globalThis.fetch = originalFetch }
+})
+
 function response(body, { status = 200, contentType = 'application/json' } = {}) {
   return new Response(typeof body === 'string' ? body : JSON.stringify(body), {
     status,

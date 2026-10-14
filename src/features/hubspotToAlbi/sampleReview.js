@@ -1,4 +1,6 @@
 import { getH2AReviewReason, H2A_REVIEW_GUIDANCE, listH2AReviewReasonOptions } from '../../../shared/h2aReviewReasons.js'
+import { buildAlbiRecordUrl, buildHubSpotRecordUrl } from '../../../shared/h2aProviderLinks.js'
+import { RESOLUTION_FIELDS, resolutionDisplayValue, presentReviewResolution, presentResolutionCapability } from './sampleReviewResolution.js'
 
 export const SAMPLE_REVIEW_GUIDANCE = H2A_REVIEW_GUIDANCE
 export const SAMPLE_REVIEW_REASON_OPTIONS = listH2AReviewReasonOptions()
@@ -64,14 +66,31 @@ export function presentSampleReviewItem(item) {
     return { id: snapshot.id ?? 'Not provided', snapshot, comparisons: comparisons(source, snapshot) }
   })
   const displayName = source.fullName ?? [source.firstName, source.lastName].filter(Boolean).join(' ') ?? source.name ?? ''
+  const objectType = ['contacts', 'companies'].includes(input.objectType) ? input.objectType : 'contacts'
+  const changes = safeRecord(input.proposedChanges), conflicts = safeRecord(changes.conflicts), updates = safeRecord(changes.updates)
+  const resolutionFields = RESOLUTION_FIELDS[objectType].flatMap(key => {
+    const conflict = safeRecord(conflicts[key])
+    // A missing value is unknown, not an implicit request to clear a property.
+    const hubspot = Object.hasOwn(conflict, 'proposed') ? resolutionDisplayValue(conflict.proposed)
+      : Object.hasOwn(updates, key) ? resolutionDisplayValue(updates[key]) : undefined
+    const albi = Object.hasOwn(conflict, 'current') ? resolutionDisplayValue(conflict.current)
+      : candidates.length === 1 && Object.hasOwn(candidates[0].snapshot, key) ? candidates[0].snapshot[key] : undefined
+    return hubspot !== undefined && albi !== undefined && hubspot !== albi
+      ? [{ key, label: SOURCE_FIELDS.find(([field]) => field === key)[1], hubspot, albi }] : []
+  })
+  const portalId = typeof input.portalId === 'string' && /^[1-9]\d{0,99}$/.test(input.portalId) ? input.portalId : null
   return {
-    id: safeScalar(input.id), runId: safeScalar(input.runId), objectType: ['contacts', 'companies'].includes(input.objectType) ? input.objectType : 'contacts',
+    id: safeScalar(input.id), runId: safeScalar(input.runId), objectType,
     sourceId: safeScalar(input.sourceId) ?? source.id ?? 'Not provided', reason,
     reasonLabel: copy.label, guidance: copy.guidance,
     status: STATUSES.has(input.status) ? input.status : 'needs_review',
     displayName: displayName || source.name || 'Not provided', source,
     candidates, matchEvidence: Array.isArray(input.matchEvidence) ? [...new Set(input.matchEvidence.filter(value => EVIDENCE.has(value)))] : [],
     proposedChanges: safeChanges(input.proposedChanges),
+    resolutionFields, actions: input.status === 'needs_review' || input.status === undefined ? [...copy.actions] : [],
+    portalId, hubspotUrl: buildHubSpotRecordUrl(portalId, objectType, input.sourceId ?? source.id),
+    candidateLinks: candidates.map(candidate => ({ id: candidate.id, url: buildAlbiRecordUrl(objectType, candidate.id) })),
+    resolution: presentReviewResolution(input.resolution), resolutionCapability: presentResolutionCapability(input.resolutionCapability),
     lastRecheckedAt: safeScalar(input.lastRecheckedAt), createdAt: safeScalar(input.createdAt), updatedAt: safeScalar(input.updatedAt),
   }
 }

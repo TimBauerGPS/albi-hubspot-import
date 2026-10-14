@@ -1,3 +1,5 @@
+import { buildResolutionRequest } from '../features/hubspotToAlbi/sampleReviewResolution.js'
+
 const FUNCTION_BASE = '/.netlify/functions'
 const SAFE_ERROR_CODES = Object.freeze({
   DUPLICATE_OPTION_MAPPING: 'Duplicate option mapping.',
@@ -7,6 +9,12 @@ const SAFE_ERROR_CODES = Object.freeze({
   INVALID_OPTION_MAPPING_SOURCE: 'Invalid option mapping source.',
 })
 const SAFE_SERVER_MESSAGES = Object.freeze({
+  'Invalid resolution request.': 'Invalid resolution request.',
+  'Invalid resolution decision.': 'Invalid resolution decision.',
+  'Review resolution is unavailable.': 'Review resolution is unavailable.',
+  'Super administrator access is required.': 'Super administrator access is required.',
+  'This sample review changed. Refresh and confirm the resolution again.': 'This sample review changed. Refresh and confirm the resolution again.',
+  'Unable to resolve this sample review.': 'Unable to resolve this sample review.',
   'A dry run is required before live activation.': 'A dry run is required before live activation.',
   'A completed dry run is required before live activation.': 'A completed dry run is required before live activation.',
   'A conflict ID is required.': 'A conflict ID is required.',
@@ -222,6 +230,25 @@ export function recheckH2ADryRunReview(session, companyId, input = {}, { signal 
     method: 'POST', companyId,
     body: { reviewId: input?.reviewId, expectedUpdatedAt: input?.expectedUpdatedAt }, signal,
   })
+}
+
+function resolutionCompany(companyId) {
+  if (companyId !== undefined && companyId !== null && (typeof companyId !== 'string' || !companyId.trim() || companyId.length > 200)) {
+    throw new TypeError('A single company selector is required.')
+  }
+  return companyId
+}
+
+export function getH2ADryRunReviewResolution(session, companyId, reviewId, { signal } = {}) {
+  if (typeof reviewId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(reviewId)) {
+    throw new TypeError('Invalid resolution request.')
+  }
+  return request(session, 'h2a-dry-run-review-resolutions', { companyId: resolutionCompany(companyId), query: { reviewId }, signal })
+}
+
+export function resolveH2ADryRunReview(session, companyId, input, { signal } = {}) {
+  return request(session, 'h2a-dry-run-review-resolutions', { method: 'POST', companyId: resolutionCompany(companyId),
+    body: buildResolutionRequest(input), signal })
 }
 
 export function resolveH2AConflict(session, companyId, resolution, { signal } = {}) {
