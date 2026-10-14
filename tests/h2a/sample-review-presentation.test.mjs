@@ -2,6 +2,31 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { buildResolutionRequest, presentReviewResolution, buildResolutionConfirmation } from '../../src/features/hubspotToAlbi/sampleReviewResolution.js'
 import { presentReviewBreakdown } from '../../src/features/hubspotToAlbi/reviewBreakdown.js'
+import { projectReviewRow } from '../../netlify/functions/_h2a/review.js'
+
+test('server-to-browser confirmation distinguishes missing evidence from an explicit clearing value', () => {
+  const stored = { object_type: 'contacts', source_id: '34', reason: 'nonblank_field_difference', status: 'needs_review',
+    source_snapshot: { email: 'hs@example.com' }, candidate_snapshots: [{ id: '2590478', email: 'snapshot@example.com' }],
+    proposed_changes: { conflicts: { email: { proposed: 'hs@example.com', token: 'SECRET' }, token: { current: 'SECRET' } } } }
+  const projected = projectReviewRow(stored, { detail: true })
+  assert.deepEqual(projected.proposedChanges.conflicts.email, { proposed: 'hs@example.com' })
+  const missing = presentSampleReviewItem(projected)
+  assert.deepEqual(missing.resolutionFields, [])
+  assert.throws(() => buildResolutionConfirmation({ review: missing,
+    decision: { action: 'resolve_fields', fieldChoices: { email: 'albi' } } }), TypeError)
+  stored.proposed_changes.conflicts.email.current = null
+  const explicit = presentSampleReviewItem(projectReviewRow(stored, { detail: true }))
+  assert.deepEqual(explicit.resolutionFields, [{ key: 'email', label: 'Email', hubspot: 'hs@example.com', albi: null }])
+  assert.deepEqual(buildResolutionConfirmation({ review: explicit,
+    decision: { action: 'resolve_fields', fieldChoices: { email: 'albi' } } }).hubspotWrites, [{ field: 'Email', value: null }])
+  assert.equal(JSON.stringify(explicit).includes('SECRET'), false)
+  stored.proposed_changes.conflicts.email.current = { token: 'SECRET' }
+  const malformed = presentSampleReviewItem(projectReviewRow(stored, { detail: true }))
+  assert.deepEqual(malformed.resolutionFields, [])
+  assert.equal(JSON.stringify(malformed).includes('SECRET'), false)
+  delete stored.proposed_changes.conflicts.email.proposed
+  assert.deepEqual(presentSampleReviewItem(projectReviewRow(stored, { detail: true })).resolutionFields, [])
+})
 
 const resolutionRequest = { reviewId: '00000000-0000-4000-8000-000000000001', expectedUpdatedAt: '2026-10-12T12:00:00.000Z',
   clientRequestId: '00000000-0000-4000-8000-000000000002', action: 'link_existing', candidateId: '2590478', approveManyToOne: false }

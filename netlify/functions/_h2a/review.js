@@ -108,7 +108,10 @@ export function safeReviewChanges(value, objectType) {
     if (owns(input.conflicts, field)) {
       const comparison = object(input.conflicts[field])
       if (owns(comparison, 'current') || owns(comparison, 'proposed')) {
-        changes.conflicts[field] = { current: scalar(comparison.current), proposed: scalar(comparison.proposed) }
+        // Missing evidence is unknown, distinct from an explicitly captured blank.
+        changes.conflicts[field] = Object.fromEntries(['current', 'proposed'].filter(key => owns(comparison, key) &&
+          (comparison[key] === null || scalar(comparison[key]) !== null))
+          .map(key => [key, scalar(comparison[key])]))
         if (owns(comparison, 'reason')) changes.conflicts[field].reason = displayReason(comparison.reason)
       }
     }

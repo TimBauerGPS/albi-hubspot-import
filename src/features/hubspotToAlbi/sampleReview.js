@@ -71,6 +71,7 @@ export function presentSampleReviewItem(item) {
   const resolutionFields = RESOLUTION_FIELDS[objectType].flatMap(key => {
     const conflict = safeRecord(conflicts[key])
     // A missing value is unknown, not an implicit request to clear a property.
+    if (Object.hasOwn(conflicts, key) && (!Object.hasOwn(conflict, 'proposed') || !Object.hasOwn(conflict, 'current'))) return []
     const hubspot = Object.hasOwn(conflict, 'proposed') ? resolutionDisplayValue(conflict.proposed)
       : Object.hasOwn(updates, key) ? resolutionDisplayValue(updates[key]) : undefined
     const albi = Object.hasOwn(conflict, 'current') ? resolutionDisplayValue(conflict.current)

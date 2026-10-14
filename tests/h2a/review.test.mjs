@@ -215,7 +215,7 @@ test('field comparison and evidence projectors use fixed keys and reasons', () =
       email: { current: { body: 'BODY' }, proposed: 'a@example.com', reason: 'SECRET' }, notes: { proposed: 'BODY' } },
     unchanged: ['firstName', 'apiKey', { body: 'BODY' }], raw: 'SECRET' }, 'contacts'), {
     updates: { firstName: 'A' }, conflicts: { phoneNumber: { current: '123', proposed: '456', reason: 'extension_not_supported' },
-      email: { current: null, proposed: 'a@example.com', reason: 'other_review_reason' } }, unchanged: ['firstName'],
+      email: { proposed: 'a@example.com', reason: 'other_review_reason' } }, unchanged: ['firstName'],
   })
   assert.deepEqual(safeReviewEvidence({ evidence: ['email', 'phone', 'BODY', { token: 'SECRET' }, 'email'], apiKey: 'SECRET' }), ['email', 'phone'])
 })
