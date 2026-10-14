@@ -2,6 +2,8 @@
 
 Status: implementation and local contracts are ready for controlled pilot verification. Live activation is blocked until the Albi and Supabase gates in this document are closed. No live HubSpot, Albi, or database verification is claimed by this runbook.
 
+The in-app review resolution SQL remains unapplied, and rollout remains disabled. This checkout does not apply SQL, change environment variables, deploy, push, activate sync, or make live provider writes.
+
 | Gate | Current evidence | Status |
 |---|---|---|
 | Local automation | H2A unit/contracts, static schema contract, deterministic smoke/review handler fixtures, build, and non-live importer regression scripts | Verified locally; no provider/database evidence |
@@ -54,14 +56,21 @@ Credential-free deterministic check (always selects local fixtures, even if prov
 npm run test:h2a:e2e
 ```
 
+Invoking `node scripts/test-h2a-end-to-end.mjs` without flags also selects fixtures. Provider access requires the explicit `--provider-smoke` flag; `--self-test` takes precedence when both flags are supplied. The default path performs zero network requests and zero provider mutations.
+
 The self-test also executes the production sample-review and run handlers, authorization, projections, repository queries, matching evaluator, and recheck service against in-memory storage and provider fixtures. It rejects member list/detail requests, accepts company admins, strips injected credentials/activity content/provider errors, proves recheck cannot access provider or sync write capabilities, preserves original sample totals, rejects full from an individually cleared old sample, and accepts full only after a fresh completed sample with zero captured rows. Its diagnostic RPC fixture does not prove database transactions, grants, RLS, or concurrency.
 
+The resolution fixture executes the production planner and resolution service: one exact HubSpot field PATCH occurs after durable intent, lease, and execution-context storage, followed by read-after-write verification. A timeout after the fixture applies that PATCH is reconciled by reads, and rerunning the intent makes no repeated write. It also checks manual Albi field tasks and fixed contact/organization deep links without an Albi update, plus a reviewed mapping and an already-associated organization choice without provider mutation or live dispatch. These are fixture contracts only. Actual HubSpot pilot writes use the application's durable resolution flow; this script has no standalone live HubSpot resolution-write driver.
+
 Provider read-only mode requires `H2A_TEST_HUBSPOT_TOKEN` and `H2A_TEST_ALBI_KEY`. It performs authenticated reads only: HubSpot portal identity, seven-day activity searches for all five supported object types, up to five sample association traversals per type, and Albi option/contact/organization/activity reads. It reports only capability names, counts, safe short ID suffixes, and a planned prefix; it never prints credentials, headers, raw provider bodies, activity bodies, or full provider IDs. Without either credential, it exits successfully and lists only the missing variable names.
+
+After separate provider-access approval, select that path with `node scripts/test-h2a-end-to-end.mjs --provider-smoke`. Leave both write flags unset for reads only.
 
 The write path requires all of the following:
 
 - Both test credentials above, connected to an explicitly isolated pilot portal and Albi sandbox/test tenant.
 - `H2A_ALLOW_SANDBOX_WRITES=true`.
+- `H2A_ALLOW_HUBSPOT_REVIEW_WRITES=true` (exact lowercase value) as the additional review-write acknowledgement. Either write flag requests guarded mode: all acknowledgements must pass before constructing provider clients or making any provider request. This acknowledgement does not enable application rollout.
 - `H2A_SANDBOX_ISOLATION_ACK=I_CONFIRM_THIS_IS_AN_ISOLATED_ALBI_SANDBOX` after the operator has checked the Albi tenant and credentials.
 - `H2A_ALBI_ACTIVITY_CONTRACT_ACK=I_VERIFIED_ALBI_ACTIVITY_MARKER_READBACK` only after the operator has verified `source`/`sourceId` and the exact `Source: HubSpot meeting <id>` marker readback in that sandbox.
 - A stable `H2A_SMOKE_RUN_ID` (4–48 letters, digits, underscores, or hyphens). Reuse the same value for retry verification. Never set provider URL overrides; adapters use fixed official hosts.
@@ -116,6 +125,21 @@ Implementation verification does not authorize migration application, deployment
 
 After approved migration/deployment, perform authenticated browser smoke with the Allied super admin: confirm the historical empty state, run the approved bounded sample, inspect filters/full approved contact and organization fields/comparisons/fixed guidance, recheck an unresolved item, and confirm it remains open. With separate authorization for a safe test-record correction directly in the provider, recheck the correction and confirm it clears without a provider write from this app. Switch company during list/detail/recheck requests and verify no prior-company values flash. Check keyboard interaction and desktop/tablet/mobile layouts; verify full stays hidden/disabled until a subsequent completed zero-row sample. Browser smoke does not include a production full dry run or live activation unless separately authorized.
 
+## In-app review resolution rollout (after separate deployment approval)
+
+Both new deployable files, `supabase/h2a-review-resolutions.sql` and `supabase/h2a-mapping-target-ownership.sql`, remain unapplied. `supabase/h2a-schema.sql` is the canonical mirror, not an additional incremental migration to apply over an existing installation.
+
+1. Validate prerequisites and reruns in disposable Supabase first. On an existing H2A installation, the exact approved migration order is `supabase/h2a-dry-run-review-workflow.sql` (existing prerequisite), then `supabase/h2a-review-resolutions.sql`, then `supabase/h2a-mapping-target-ownership.sql`, then the reviewed application/functions deployment. Verify the base H2A schema and shared `companies`, `company_members`, and `super_admins` already exist. Keep live sync disabled and `H2A_REVIEW_RESOLUTION_MODE=disabled` throughout schema and code deployment. An unset or unknown mode also fails closed to disabled.
+2. Verify service-only resolution/choice tables and RPC grants, current-sample/CAS fencing, lease expiry/reclaim, decision replay, and the source/target mapping-ownership races in the disposable database. Repeat the mapping-writer versus conflict-resolver races with different portals and identical numeric source IDs; many-to-one ownership requires explicit reviewed approval. Static tests and fixture storage do not prove these database checks.
+3. Confirm the HubSpot private-app token has `crm.objects.contacts.write` and `crm.objects.companies.write`, in addition to existing read/account/association scopes. Contact/company field PATCH and explicit contact-company association addition are the only HubSpot review mutations. Connection checks perform no probe write. Settings starts at **Verified when first used** (`verified_when_first_used`); only a durable `provider_applied` outcome event newer than the current credential timestamp proves availability. Reads, reconciliation, Albi creates, rechecks, and old outcomes do not prove HubSpot write scopes. A fresh authorization rejection shows **Authentication or write scope rejected**; correct the token/scopes and retry through the retained intent, never by deleting it.
+4. After explicit pilot approval, set the server-only `H2A_REVIEW_RESOLUTION_MODE=super_admin` and deploy the approved configuration. Start with one approved company, one contact, and one organization in an isolated portal/tenant. Ordinary company admins must remain unable to resolve during this stage; membership and shared `super_admins` remain the role source of truth. The sandbox verification requires both existing sandbox acknowledgements and exact `H2A_ALLOW_HUBSPOT_REVIEW_WRITES=true`; no unacknowledged provider request or write is allowed.
+5. In Sample Review, inspect current values, choose each field's source, and review the complete confirmation before saving. Verify one approved contact/company field write using read-after-write and durable audit events. For an ambiguous provider outcome, reconcile the same intent before any retry; verify no repeated applied write. Linking an existing record saves a reviewed tenant mapping; selecting an already-associated organization saves the choice without dispatching live work. Adding a HubSpot association requires explicit confirmation and never removes another association. Albi creation uses only supported confirmed type mappings and verifies the created record before saving its mapping.
+6. Existing Albi fields/reassociation require manual tasks. Use the direct links `https://app.albiware.com/Relationships/Contact/<id>` and `https://app.albiware.com/Relationships/Organization/<id>` provided by the app, apply the approved values there, then **Recheck this record**. The wrapper has no supported general update or reassociation method. `waiting_on_albi` and `ready_to_recheck` are intermediate intent states; they are not cleared review rows. Keep audit details and original sample totals intact.
+7. Require a clean pilot audit (actor/company/review/decision, intent before write, one operation, sanitized provider outcome, no dispatch/cursor movement), complete all manual tasks, recheck, then run a fresh bounded verification sample. Full dry run still requires that latest completed sample after the start-date lock have `review_capture_version = 1` and zero captured rows. Cleared old rows still count and cannot qualify. Review full dry-run totals and the existing activation gates separately.
+8. Only after the clean audit and fresh sample, and separate expansion approval, change `H2A_REVIEW_RESOLUTION_MODE=admins`. Confirm company-admin access remains restricted to its own tenant, members cannot resolve, and super admins remain tenant-scoped by the selected company. Repeat the one-contact/one-organization audit for the expanded pilot before broader use.
+
+Rollback: set `H2A_REVIEW_RESOLUTION_MODE=disabled` and deploy the approved configuration to stop new in-app resolution mutations; disable company sync separately if scheduled work must stop. This does not reverse provider writes, created Albi records, HubSpot associations, reviewed mappings, or organization choices, and it does not delete resolution intents/audit events. Preserve all intents, outcome evidence, and leases for authorized reconciliation after recovery. Do not drop resolution storage or reset delivery/cursor state to force a retry. Provider corrections require separate reviewed manual action.
+
 ## Manual recovery and disablement
 
 - A failed or paused run is resumed through the existing admin Run now / retry path after reviewing its sanitized status and item outcomes. Do not reset cursors or delete delivery rows to force a retry.
@@ -148,3 +172,15 @@ Start `npm run dev:local` only with a local disposable database and non-producti
 ## Verification record for this checkout
 
 Safe local gates are `npm run test:h2a`, `npm run test:h2a:schema`, `npm run test:h2a:e2e`, `npm run build`, and non-live importer regression scripts. The sample-review implementation verification performs no provider access or database deployment. The following remain unverified: provider-authenticated reads, isolated provider writes, actual API response/pagination semantics, disposable SQL parsing, migration reruns, RLS/grants, Supabase advisors, transaction/concurrency races, local unauthenticated function responses, and authenticated browser interaction. Applying the migration, deploying the reviewed commit, and authenticated sample-review browser smoke are deferred pending separate user deployment approval. Record exact commands and outputs in the task report; do not describe static tests or in-memory fixtures as live evidence.
+
+For review-resolution release evidence, run each command separately in this exact order and require exit code zero:
+
+```sh
+npm run test:h2a
+npm run test:h2a:schema
+npm run test:h2a:e2e
+npm run build
+git diff --check
+```
+
+The existing Browserslist-age and bundle chunk-size warnings may remain; new errors block release. The review-resolution migration files remain unapplied after these local checks, and rollout stays disabled until the approved sequence above.

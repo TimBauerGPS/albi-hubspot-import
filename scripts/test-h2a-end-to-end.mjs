@@ -10,6 +10,9 @@ import { makeDeliveryKey, makeSourceMarker } from '../netlify/functions/_h2a/key
 import { createDryRunReviewHandler } from '../netlify/functions/h2a-dry-run-reviews.js'
 import { createRunHandler } from '../netlify/functions/h2a-run.js'
 import { createH2ARepository } from '../netlify/functions/_h2a/repository.js'
+import { ApiError } from '../netlify/functions/_h2a/http.js'
+import { buildReviewResolutionPlan } from '../netlify/functions/_h2a/reviewResolution.js'
+import { executeReviewResolution } from '../netlify/functions/_h2a/reviewResolutionService.js'
 
 const ISOLATION_ACK = 'I_CONFIRM_THIS_IS_AN_ISOLATED_ALBI_SANDBOX'
 const ACTIVITY_CONTRACT_ACK = 'I_VERIFIED_ALBI_ACTIVITY_MARKER_READBACK'
@@ -28,6 +31,7 @@ export function missingSmokeEnvironment(env = process.env) {
 export function smokeWriteBlockers(env = process.env, capabilities = null) {
   const blockers = []
   if (env.H2A_ALLOW_SANDBOX_WRITES !== 'true') blockers.push('H2A_ALLOW_SANDBOX_WRITES=true is required')
+  if (env.H2A_ALLOW_HUBSPOT_REVIEW_WRITES !== 'true') blockers.push('H2A_ALLOW_HUBSPOT_REVIEW_WRITES=true is required')
   if (env.H2A_SANDBOX_ISOLATION_ACK !== ISOLATION_ACK) blockers.push(`H2A_SANDBOX_ISOLATION_ACK=${ISOLATION_ACK} is required`)
   if (env.H2A_ALBI_ACTIVITY_CONTRACT_ACK !== ACTIVITY_CONTRACT_ACK) blockers.push(`H2A_ALBI_ACTIVITY_CONTRACT_ACK=${ACTIVITY_CONTRACT_ACK} is required after sandbox marker-readback verification`)
   if (!/^[A-Za-z0-9_-]{4,48}$/.test(env.H2A_SMOKE_RUN_ID ?? '')) blockers.push('H2A_SMOKE_RUN_ID with 4–48 letters, digits, underscores, or hyphens is required for repeatable records')
@@ -331,6 +335,155 @@ async function runReviewSelfTest(log) {
   log(`H2A sample review self-test passed: ${checks} response checks; member/admin authorization, safe projections, read-only recheck, immutable totals, and fresh zero-row full-run gate.`)
 }
 
+function makeResolutionSelfTestFixture() {
+  const stamp = '2026-10-13T12:00:00Z'
+  const calls = [], events = [], mappings = { contacts: [], organizations: [], options: [] }
+  const source = { id: '42', properties: { firstname: 'Fixture', lastname: 'Person', email: 'hubspot@example.test' } }
+  const target = { id: '20', firstName: 'Fixture', lastName: 'Person', email: 'albi@example.test' }
+  const row = { id: '00000000-0000-4000-8000-000000000003', company_id: 'fixture-company', run_id: 'sample',
+    portal_id: '123', object_type: 'contacts', source_id: '42', updated_at: stamp, status: 'needs_review',
+    reason: 'nonblank_field_difference', conflict_type: 'contact_fields',
+    source_snapshot: { id: '42', firstName: 'Fixture', lastName: 'Person', email: 'hubspot@example.test' },
+    candidate_snapshots: [structuredClone(target)], proposed_changes: {
+      conflicts: { email: { current: 'albi@example.test', proposed: 'hubspot@example.test' } }, updates: {} } }
+  const f = { calls, events, mappings, source, target, row, intent: null, associations: [], organizations: [] }
+  // Double storage and provider boundaries only; the production planner, lease
+  // orchestration, immutable execution context, readback, and replay all execute.
+  const repository = {
+    getConfig: async () => ({ portal_id: '123', initial_start_locked_at: stamp }),
+    getCurrentReviewSample: async () => ({ id: 'sample', review_capture_version: 1 }),
+    getLatestCompletedSampleDryRun: async () => ({ id: 'sample', review_capture_version: 1 }),
+    getDryRunReview: async () => structuredClone(row),
+    getMappings: async () => structuredClone(mappings),
+    createReviewResolution: async (companyId, args) => {
+      assert.equal(companyId, row.company_id)
+      if (f.intent) return { resolution: structuredClone(f.intent), created: false }
+      assert.equal(args.expectedUpdatedAt, stamp)
+      calls.push('intent')
+      f.intent = { id: '00000000-0000-4000-8000-000000000002', company_id: companyId, review_id: row.id,
+        run_id: row.run_id, portal_id: row.portal_id, object_type: row.object_type, source_id: row.source_id,
+        expected_review_updated_at: stamp, decision: structuredClone(args.decision), action: args.decision.action,
+        client_request_id: args.clientRequestId, status: 'pending', execution_phase: null }
+      return { resolution: structuredClone(f.intent), created: true }
+    },
+    claimReviewResolution: async (_company, id, owner) => {
+      assert.equal(id, f.intent.id)
+      assert.equal(f.intent.lease_owner ?? null, null)
+      calls.push('claim')
+      f.intent.execution_phase = ['waiting_on_albi', 'ready_to_recheck'].includes(f.intent.status) ? f.intent.status : 'applying'
+      Object.assign(f.intent, { status: 'applying', lease_owner: owner, lease_expires_at: '2099-10-13T12:00:00Z' })
+      return { resolution: structuredClone(f.intent) }
+    },
+    finishReviewResolution: async (_company, _id, owner, args) => {
+      assert.equal(owner, f.intent.lease_owner)
+      calls.push('finish')
+      Object.assign(f.intent, { status: args.status, execution_phase: null, lease_owner: null })
+      events.push(args)
+      return { resolution: structuredClone(f.intent) }
+    },
+    appendReviewResolutionEvent: async (_company, _id, args) => { calls.push('context'); events.push(args) },
+    listReviewResolutionEvents: async () => events.map(args => ({ event_type: args.eventType, sanitized_details: args.details })),
+    saveMapping: async (companyId, kind, value) => {
+      assert.equal(companyId, row.company_id); assert.equal(kind, 'contact')
+      calls.push('mapping'); mappings.contacts.push(structuredClone(value))
+    },
+    upsertContactOrganizationChoice: async (companyId, args) => {
+      assert.equal(companyId, row.company_id)
+      calls.push('choice'); f.choice = { hubspot_company_id: args.organizationSourceId }
+      return { choice: f.choice }
+    },
+  }
+  const hubspotRead = {
+    getContacts: async ids => { assert.deepEqual(ids, ['42']); calls.push('read-source'); return [structuredClone(source)] },
+    getCompanies: async ids => ids.map(id => ({ id, properties: { name: 'Fixture Organization' } })),
+    getAssociations: async () => [{ fromId: '42', toObjectType: 'companies', toIds: [...f.associations] }],
+  }
+  const albiRead = {
+    listContacts: async () => ({ records: [structuredClone(target)], cursor: null }),
+    listOrganizations: async () => ({ records: structuredClone(f.organizations), cursor: null }),
+  }
+  const hubspotWrite = { updateContact: async (id, properties) => {
+    assert.equal(id, '42'); assert.equal(f.intent.status, 'applying')
+    assert.ok(f.intent.lease_owner)
+    assert.deepEqual(properties, { email: 'albi@example.test' })
+    calls.push('PATCH'); Object.assign(source.properties, properties)
+    if (f.ambiguous) throw new ApiError('transient', { code: 'timeout' })
+    return { id, properties }
+  } }
+  for (const object of [repository, hubspotWrite, albiRead]) for (const name of
+    ['dispatch', 'saveCursor', 'reserveDelivery', 'updateContact', 'updateOrganization', 'associateContact']) {
+    if (object === hubspotWrite && name === 'updateContact') continue
+    Object.defineProperty(object, name, { get() { throw Error(`Forbidden resolution capability: ${name}`) } })
+  }
+  f.deps = { repository, hubspotRead, albiRead, hubspotWrite, albiWrite: {}, now: () => new Date(stamp) }
+  f.input = { companyId: row.company_id, reviewId: row.id, actorId: '00000000-0000-4000-8000-000000000001',
+    expectedUpdatedAt: stamp, clientRequestId: '00000000-0000-4000-8000-000000000004',
+    decision: { action: 'resolve_fields', fieldChoices: { email: 'albi' } } }
+  f.plan = () => buildReviewResolutionPlan({ review: { objectType: row.object_type, sourceId: row.source_id,
+    reason: row.reason, candidateSnapshots: row.candidate_snapshots, proposedChanges: row.proposed_changes },
+    hubspot: source, albi: target, decision: f.input.decision })
+  return f
+}
+
+async function runResolutionSelfTest(log) {
+  const writes = f => f.calls.filter(call => call === 'PATCH').length
+  const normal = makeResolutionSelfTestFixture()
+  assert.deepEqual(normal.plan().providerOperation, { provider: 'hubspot', operation: 'updateContact', id: '42',
+    properties: { email: 'albi@example.test' } })
+  const fieldResult = await executeReviewResolution(normal.deps, normal.input)
+  assert.equal(fieldResult.resolution.status, 'ready_to_recheck')
+  assert.equal(writes(normal), 1)
+  assert.equal(normal.source.properties.email, 'albi@example.test')
+  assert.ok(normal.calls.indexOf('intent') < normal.calls.indexOf('claim'))
+  assert.ok(normal.calls.indexOf('claim') < normal.calls.indexOf('context'))
+  assert.ok(normal.calls.indexOf('context') < normal.calls.indexOf('PATCH'))
+  const readAfterWrite = normal.calls.lastIndexOf('read-source') > normal.calls.indexOf('PATCH')
+  assert.equal(readAfterWrite, true)
+  const ambiguous = makeResolutionSelfTestFixture(); ambiguous.ambiguous = true
+  await executeReviewResolution(ambiguous.deps, ambiguous.input)
+  assert.equal(ambiguous.events.at(-1).eventType, 'provider_reconciled')
+  const ambiguousResult = await executeReviewResolution(ambiguous.deps, ambiguous.input)
+  assert.equal(ambiguousResult.resolution.status, 'ready_to_recheck')
+  assert.equal(writes(ambiguous), 1, 'timeout plus rerun never repeats an applied PATCH')
+  const manual = makeResolutionSelfTestFixture(); manual.input.decision.fieldChoices.email = 'hubspot'
+  const contactLink = manual.plan().manualTasks[0].url
+  const manualResult = await executeReviewResolution(manual.deps, manual.input)
+  assert.equal(manualResult.resolution.status, 'waiting_on_albi')
+  assert.equal(manual.events.at(-1).details.manualTasks[0].fields[0].value, 'hubspot@example.test')
+  const organizationLink = buildReviewResolutionPlan({ review: { objectType: 'companies', sourceId: '99',
+    reason: 'organization_fields_require_review', candidateSnapshots: [{ id: '50' }], proposedChanges: { conflicts: { name: {} } } },
+    hubspot: { id: '99', properties: { name: 'HubSpot Organization' } }, albi: { id: '50', name: 'Albi Organization' },
+    decision: { action: 'resolve_fields', fieldChoices: { name: 'hubspot' } } }).manualTasks[0].url
+  const mapping = makeResolutionSelfTestFixture(); mapping.row.reason = 'multiple_candidates'
+  mapping.row.conflict_type = 'contact_match'; mapping.input.decision = { action: 'link_existing', candidateId: '20' }
+  assert.equal((await executeReviewResolution(mapping.deps, mapping.input)).resolution.status, 'ready_to_recheck')
+  assert.deepEqual(mapping.mappings.contacts, [{ portal_id: '123', hubspot_id: '42', albi_contact_id: '20',
+    match_method: 'reviewed', reviewed_by: mapping.input.actorId }])
+  const choice = makeResolutionSelfTestFixture(); choice.row.reason = 'multiple_associated_organizations'
+  choice.row.conflict_type = 'association'; choice.row.candidate_snapshots = []
+  choice.source.properties.email = choice.target.email; choice.row.source_snapshot.email = choice.target.email
+  choice.target.organizationId = '50'; choice.associations = ['98', '99']
+  choice.organizations = [{ id: '50', name: 'Fixture Organization' }]
+  choice.mappings.organizations = [{ portal_id: '123', hubspot_id: '99', albi_organization_id: '50' }]
+  choice.input.decision = { action: 'choose_organization', organizationSourceId: '99' }
+  assert.equal((await executeReviewResolution(choice.deps, choice.input)).resolution.status, 'ready_to_recheck')
+  assert.equal(choice.choice.hubspot_company_id, '99')
+  for (const fixture of [manual, mapping, choice]) assert.equal(writes(fixture), 0)
+  assert.equal(contactLink, 'https://app.albiware.com/Relationships/Contact/20')
+  assert.equal(organizationLink, 'https://app.albiware.com/Relationships/Organization/50')
+  const summary = {
+    fieldWrite: { status: fieldResult.resolution.status, writes: writes(normal), readAfterWrite },
+    ambiguous: { status: ambiguousResult.resolution.status, writes: writes(ambiguous),
+      event: ambiguous.events.find(event => event.eventType === 'provider_reconciled')?.eventType },
+    manual: { status: manualResult.resolution.status, writes: writes(manual), links: [contactLink, organizationLink] },
+    mapping: { targetId: mapping.mappings.contacts[0]?.albi_contact_id, writes: writes(mapping) },
+    organizationChoice: { sourceId: choice.choice?.hubspot_company_id, writes: writes(choice) },
+    dispatches: 0,
+  }
+  log('H2A resolution self-test passed (fixtures only): one field PATCH after intent/lease/context, read-after-write, ambiguous response reconciled without repeat, direct Albi manual links without updates, reviewed mapping and organization choice without dispatch; zero provider transport.')
+  return summary
+}
+
 export async function runSelfTest({ log = output } = {}) {
   assert.deepEqual(missingSmokeEnvironment({}), REQUIRED_PROVIDER_CREDENTIALS)
   assert.equal(cleanId('123456789'), '6789')
@@ -345,13 +498,15 @@ export async function runSelfTest({ log = output } = {}) {
   assert.deepEqual(fixture.counts(), { organizations: 0, contacts: 0, activities: 0 }, 'read-only plan does not create provider records')
 
   const writeEnv = { ...env, H2A_ALLOW_SANDBOX_WRITES: 'true', H2A_SANDBOX_ISOLATION_ACK: ISOLATION_ACK,
+    H2A_ALLOW_HUBSPOT_REVIEW_WRITES: 'true',
     H2A_ALBI_ACTIVITY_CONTRACT_ACK: ACTIVITY_CONTRACT_ACK }
   await runSmoke(writeEnv, { makeClients, log })
   await runSmoke(writeEnv, { makeClients, log })
   assert.deepEqual(fixture.counts(), { organizations: 1, contacts: 1, activities: 1 }, 'real smoke orchestration creates exactly one of each record across rerun')
   assert.equal(exactMarkerMatches(fixture.activities, makeSourceMarker({ objectType: 'meeting', activityId: 'smoke-self-test-01' })).length, 1)
 
-  for (const missing of ['H2A_SANDBOX_ISOLATION_ACK', 'H2A_ALBI_ACTIVITY_CONTRACT_ACK', 'H2A_SMOKE_RUN_ID']) {
+  for (const missing of ['H2A_ALLOW_SANDBOX_WRITES', 'H2A_ALLOW_HUBSPOT_REVIEW_WRITES',
+    'H2A_SANDBOX_ISOLATION_ACK', 'H2A_ALBI_ACTIVITY_CONTRACT_ACK', 'H2A_SMOKE_RUN_ID']) {
     const invalid = { ...writeEnv }
     delete invalid[missing]
     let transportCalls = 0
@@ -364,6 +519,7 @@ export async function runSelfTest({ log = output } = {}) {
   }
   log('H2A smoke orchestration self-test passed: read-only plan, guarded create and rerun exactly-once, and zero-transport write-guard ordering.')
   await runReviewSelfTest(log)
+  return { resolution: await runResolutionSelfTest(log) }
 }
 
 function makeRunId(env) {
@@ -471,7 +627,7 @@ export async function runSmoke(env = process.env, { makeClients = ({ env: values
     log(`H2A sandbox smoke skipped safely; missing environment variables: ${missing.join(', ')}.`)
     return
   }
-  if (env.H2A_ALLOW_SANDBOX_WRITES === 'true') {
+  if (env.H2A_ALLOW_SANDBOX_WRITES === 'true' || env.H2A_ALLOW_HUBSPOT_REVIEW_WRITES === 'true') {
     const blockers = smokeWriteBlockers(env)
     if (blockers.length) throw new Error(`Sandbox write stopped before any provider request. ${blockers.join('; ')}.`)
   }
@@ -481,14 +637,14 @@ export async function runSmoke(env = process.env, { makeClients = ({ env: values
   const { hubspot, albi } = makeClients({ env, fetch })
   const result = await readAndReport(hubspot, albi, runId, log)
   if (env.H2A_ALLOW_SANDBOX_WRITES !== 'true') {
-    log('Read-only mode complete. No provider writes were attempted. Set both documented sandbox acknowledgements and rerun with an isolated Albi sandbox to enable the guarded write path.')
+    log('Read-only mode complete. No provider writes were attempted. Set all documented sandbox and HubSpot review-write acknowledgements and rerun with an isolated sandbox to enable the guarded write path.')
     return
   }
   await runGuardedWrite(albi, result.account, result.options, env, runId, log)
 }
 
 async function main(env = process.env) {
-  if (process.argv.includes('--self-test')) return runSelfTest()
+  if (process.argv.includes('--self-test') || !process.argv.includes('--provider-smoke')) return runSelfTest()
   await runSmoke(env)
 }
 
