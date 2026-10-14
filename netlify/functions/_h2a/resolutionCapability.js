@@ -13,8 +13,8 @@ export function hubspotWriteReadiness(resolution, events = [], credentialUpdated
   if (!HUBSPOT_ACTIONS.has(resolution?.action) || !Number.isFinite(Date.parse(credentialUpdatedAt))) return 'verified_when_first_used'
   const cutoff = Date.parse(credentialUpdatedAt)
   const fresh = value => Number.isFinite(Date.parse(value)) && Date.parse(value) > cutoff
-  if (fresh(resolution.updated_at) && resolution.provider_outcome_code === 'authorization_rejected') return 'rejected'
-  if (fresh(resolution.updated_at) && resolution.provider_outcome_code === 'provider_applied') return 'available'
+  // Claims and rechecks change resolution.updated_at while retaining an older
+  // outcome code. Only the immutable outcome event dates credential evidence.
   const proof = [...events].filter(event => fresh(event?.created_at)).reverse().find(event => event?.event_type === 'provider_applied' ||
     event?.event_type === 'failed' && event.sanitized_details?.code === 'authorization_rejected')
   return proof?.event_type === 'provider_applied' ? 'available' : proof ? 'rejected' : 'verified_when_first_used'

@@ -214,3 +214,43 @@ test('missing current credential metadata cannot claim write readiness on GET or
     assert.equal(JSON.parse(result.body).resolutionCapability.hubspotWrites, 'verified_when_first_used')
   }
 })
+
+for (const [code, eventType, expected] of [['provider_applied', 'provider_applied', 'available'],
+  ['authorization_rejected', 'failed', 'rejected']]) {
+  test(`a later claim/recheck timestamp cannot refresh old ${code} credential evidence`, async () => {
+    const f = fixture()
+    Object.assign(f.row, { action: 'resolve_fields', updated_at: '2026-10-14T12:00:00Z', provider_outcome_code: code })
+    f.events.splice(0, f.events.length,
+      { event_type: eventType, created_at: '2026-10-14T10:00:00Z', sanitized_details: { code, message: 'secret' } },
+      { event_type: 'claimed', created_at: '2026-10-14T12:00:00Z', sanitized_details: { executionContext: { providerOperation: 'secret' } } },
+      { event_type: 'recheck_requested', created_at: '2026-10-14T12:01:00Z', sanitized_details: { code: 'recheck_requested' } })
+    f.repository.getCredentials = async () => ({ updated_at: '2026-10-14T11:00:00Z' })
+    f.options.executeResolution = async () => ({ resolution: f.row })
+    for (const args of [{}, { method: 'GET', query: { companyId: 'company-a', reviewId } }]) {
+      const result = await f.request(input, args)
+      assert.equal(result.statusCode, 200)
+      assert.equal(JSON.parse(result.body).resolutionCapability.hubspotWrites, 'verified_when_first_used')
+      assert.equal(result.body.includes('secret'), false)
+    }
+  })
+  test(`fresh durable ${code} event supplies readiness independently of lifecycle row timestamp`, async () => {
+    const f = fixture()
+    Object.assign(f.row, { action: 'resolve_fields', updated_at: '2026-10-14T10:00:00Z', provider_outcome_code: code })
+    f.events.splice(0, f.events.length, { event_type: eventType, created_at: '2026-10-14T12:00:00Z', sanitized_details: { code } })
+    f.repository.getCredentials = async () => ({ updated_at: '2026-10-14T11:00:00Z' })
+    const result = await f.request(input, { method: 'GET', query: { reviewId } })
+    assert.equal(result.statusCode, 200)
+    assert.equal(JSON.parse(result.body).resolutionCapability.hubspotWrites, expected)
+  })
+}
+
+test('outcome code without a matching durable event never establishes readiness', async () => {
+  const f = fixture()
+  f.row.action = 'resolve_fields'
+  f.events.length = 0
+  for (const code of ['provider_applied', 'authorization_rejected']) {
+    f.row.provider_outcome_code = code
+    const result = await f.request(input, { method: 'GET', query: { reviewId } })
+    assert.equal(JSON.parse(result.body).resolutionCapability.hubspotWrites, 'verified_when_first_used')
+  }
+})
