@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Link, useOutletContext } from 'react-router-dom'
-import { getH2ADryRunReview, getH2ADryRunReviews, recheckH2ADryRunReview } from '../../lib/hubspotToAlbi'
+import { Link, useLocation, useNavigate, useOutletContext } from 'react-router-dom'
+import { getH2ADryRunReview, getH2ADryRunReviews, recheckH2ADryRunReview, resolveH2ADryRunReview } from '../../lib/hubspotToAlbi'
 import { presentSampleReviewItem, presentSampleReviewProgress, SAMPLE_REVIEW_REASON_OPTIONS } from './sampleReview.js'
+import { presentSampleReviewQueryFilters } from './preflightPresentation.js'
 import SampleReviewDetail from './SampleReviewDetail'
 
 const secondaryButton = 'rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-semibold text-gray-700 transition hover:border-brand-300 hover:bg-brand-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 disabled:cursor-not-allowed disabled:opacity-50'
@@ -24,6 +25,9 @@ function recheckTime(value) {
 
 export default function SampleReviewPage() {
   const { session, companyId, companyName, tenantRevision, completeTenantTransition } = useOutletContext()
+  const location = useLocation()
+  const navigate = useNavigate()
+  const initialQuery = useRef(presentSampleReviewQueryFilters(location.search))
   const tenantKey = `${companyId ?? 'none'}:${tenantRevision}`
   const tenantKeyRef = useRef(tenantKey)
   tenantKeyRef.current = tenantKey
@@ -32,7 +36,7 @@ export default function SampleReviewPage() {
   const controllers = useRef(new Set())
   const recheckLock = useRef(null)
   const [stateTenant, setStateTenant] = useState(tenantKey)
-  const [filters, setFilters] = useState(initialFilters)
+  const [filters, setFilters] = useState(initialQuery.current.filters)
   const [items, setItems] = useState([])
   const [sample, setSample] = useState(null)
   const [progress, setProgress] = useState(null)
@@ -56,6 +60,10 @@ export default function SampleReviewPage() {
     if (!item?.id) return
     setItems(current => current.map(existing => existing.id === item.id ? item : existing))
   }, [])
+
+  useEffect(() => {
+    if (initialQuery.current.invalid) navigate(location.pathname, { replace: true })
+  }, [location.pathname, navigate])
 
   useEffect(() => {
     for (const pending of controllers.current) pending.abort()
@@ -197,6 +205,58 @@ export default function SampleReviewPage() {
     }
   }
 
+  async function handleResolve(decision, clientRequestId, expectedUpdatedAt) {
+    if (!detail?.updatedAt || detail.id !== selectedId || recheckLock.current) return null
+    if (detail.updatedAt !== expectedUpdatedAt) throw Object.assign(new Error('This sample review changed. Review and confirm again.'), { status: 409 })
+    const request = ++requestRevision.current
+    ++detailRevision.current
+    for (const pending of controllers.current) pending.abort()
+    controllers.current.clear()
+    setLoadingMore(false); setDetailLoading(false)
+    const controller = new AbortController()
+    controllers.current.add(controller)
+    recheckLock.current = controller
+    const startedFor = tenantKey
+    const reviewId = detail.id
+    const current = () => !controller.signal.aborted && requestRevision.current === request && tenantKeyRef.current === startedFor
+    setBusyId(reviewId); setActionError(''); setNotice('')
+    try {
+      const result = await resolveH2ADryRunReview(session, companyId,
+        { reviewId, expectedUpdatedAt, clientRequestId, ...decision }, { signal: controller.signal })
+      if (!current()) return null
+      try {
+        const fresh = await getH2ADryRunReview(session, companyId, reviewId, { signal: controller.signal })
+        if (current()) {
+          replaceItem(fresh?.item)
+          if (selectedIdRef.current === reviewId) { ++detailRevision.current; setDetail(fresh?.item ?? null); setDetailLoading(false) }
+        }
+      } catch (refreshCause) {
+        if (current() && refreshCause?.name !== 'AbortError') setActionError('Resolution was saved, but current detail could not be loaded. Retry loading the record.')
+      }
+      return result
+    } catch (cause) {
+      if (!current() || cause?.name === 'AbortError') return null
+      if (cause?.status === 409) {
+        try {
+          const fresh = await getH2ADryRunReview(session, companyId, reviewId, { signal: controller.signal })
+          if (current()) {
+            replaceItem(fresh?.item)
+            if (selectedIdRef.current === reviewId) { ++detailRevision.current; setDetail(fresh?.item ?? null); setDetailLoading(false) }
+          }
+        } catch (refreshCause) {
+          if (current() && refreshCause?.name !== 'AbortError') {
+            setDetail(null); setDetailError('This sample review changed and current detail could not be loaded. Retry loading the record.')
+          }
+        }
+      }
+      throw cause
+    } finally {
+      controllers.current.delete(controller)
+      if (recheckLock.current === controller) recheckLock.current = null
+      if (current()) setBusyId(null)
+    }
+  }
+
   const visible = stateTenant === tenantKey
   const counters = presentSampleReviewProgress(visible ? progress : null)
   const historical = sample && (sample.historical || sample.reviewCaptureVersion !== 1)
@@ -255,7 +315,7 @@ export default function SampleReviewPage() {
               </aside>
               {detailLoading ? <section className="rounded-xl border border-gray-200 bg-white px-5 py-10 text-sm text-gray-600" role="status">Loading selected record…</section>
                 : detailError ? <section className="rounded-xl border border-red-200 bg-red-50 px-5 py-6" role="alert"><h3 className="font-semibold text-red-900">Record could not be loaded</h3><p className="mt-1 text-sm text-red-800">{detailError}</p><button type="button" className={`${secondaryButton} mt-3`} onClick={() => setDetailRetry(value => value + 1)}>Retry loading record</button></section>
-                  : detail?.id === selectedId ? <SampleReviewDetail item={detail} busy={busyId === selectedId} recheckPending={Boolean(busyId)} onRecheck={handleRecheck} />
+                  : detail?.id === selectedId ? <SampleReviewDetail item={detail} busy={busyId === selectedId} recheckPending={Boolean(busyId)} onRecheck={handleRecheck} onResolve={handleResolve} />
                     : <section className="rounded-xl border border-gray-200 bg-white px-5 py-10 text-sm text-gray-600">Select a record to review its evidence.</section>}
             </div>}
       {visible && sample?.reviewCaptureVersion === 1 && !loading && <p className="text-xs leading-5 text-gray-600">Review progress reflects individual rechecks. Original sample run totals remain unchanged.</p>}

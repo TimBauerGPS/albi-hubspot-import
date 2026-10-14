@@ -7,6 +7,8 @@ import { REVIEW_REASONS, projectReviewRow, projectReviewEvent } from './_h2a/rev
 import { ApiError } from './_h2a/http.js'
 import { currentResolutionProjection } from './h2a-dry-run-review-resolutions.js'
 import { projectResolutionCapability } from './_h2a/resolutionCapability.js'
+import { loadReviewResolutionOptions } from './_h2a/reviewResolutionOptions.js'
+import { getH2AReviewReason } from '../../shared/h2aReviewReasons.js'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/
@@ -60,11 +62,26 @@ function request(event) {
     objectType: query.objectType ?? null, reason: query.reason ?? null } }
 }
 
-async function detail(repository, companyId, runId, row, auth, options) {
+async function detail(repository, companyId, runId, row, auth, options, config) {
   const events = await repository.listDryRunReviewEvents(companyId, runId, row.id)
   const projected = await currentResolutionProjection(repository, companyId, row.id, row.portal_id)
+  const resolutionCapability = projectResolutionCapability(auth, (options.env ?? process.env).H2A_REVIEW_RESOLUTION_MODE, projected.hubspotWrites)
+  const actions = getH2AReviewReason(row.reason).actions
+  let resolutionOptions = { organizationOptions: [], createReadiness: { ready: false } }
+  if (resolutionCapability.canResolve && row.status === 'needs_review' &&
+    (actions.includes('choose_organization') || actions.includes('create_albi') && row.recheck_outcome === 'safe_to_create' &&
+      Array.isArray(row.candidate_snapshots) && row.candidate_snapshots.length === 0)) {
+    try {
+      const clients = options.makeClients ? await options.makeClients(companyId) : await createH2AProviderClients({
+        companyId, repository, keyring: options.keyring, env: options.env, fetch: options.fetch })
+      if (options.makeClients || (await clients.hubspot.getAccountInfo()).portalId === config.portal_id) {
+        resolutionOptions = await loadReviewResolutionOptions({ row: { ...row, company_id: companyId }, repository,
+          reads: readOnlyH2ACapabilities(clients) })
+      }
+    } catch { /* The chooser remains disabled when live evidence cannot be read. */ }
+  }
   return { ...projectReviewRow(row, { detail: true }), events: events.map(projectReviewEvent), resolution: projected.resolution,
-    resolutionCapability: projectResolutionCapability(auth, (options.env ?? process.env).H2A_REVIEW_RESOLUTION_MODE, projected.hubspotWrites) }
+    resolutionCapability, ...resolutionOptions }
 }
 
 export function createDryRunReviewHandler(options = {}) {
@@ -94,7 +111,7 @@ export function createDryRunReviewHandler(options = {}) {
             if (!options.makeClients && (await clients.hubspot.getAccountInfo()).portalId !== config.portal_id) throw new ApiError('permission')
             return readOnlyH2ACapabilities(clients)
           } }, { companyId, reviewId: input.reviewId, expectedUpdatedAt: input.expectedUpdatedAt, actorId: auth.userId })
-        return reply(200, { item: await detail(repository, companyId, result.sample.id, result.review, auth, options),
+        return reply(200, { item: await detail(repository, companyId, result.sample.id, result.review, auth, options, result.config),
           progress: await reviewProgress(repository, companyId, result.sample, result.config.initial_start_locked_at) })
       }
       const { config, latest, sample } = await resolveReviewSample(repository, companyId)
@@ -102,7 +119,7 @@ export function createDryRunReviewHandler(options = {}) {
         if (!sample) fail(409, 'Run a new sample to create detailed review data.')
         const row = await repository.getDryRunReview(companyId, sample.id, input.reviewId)
         if (!row) fail(404, 'Sample review item not found.')
-        return reply(200, { item: await detail(repository, companyId, sample.id, row, auth, options) })
+        return reply(200, { item: await detail(repository, companyId, sample.id, row, auth, options, config) })
       }
       const metadata = latest ? { id: latest.id, createdAt: latest.created_at, finishedAt: latest.finished_at,
         reviewCaptureVersion: latest.review_capture_version === 1 ? 1 : null, historical: latest.review_capture_version !== 1 } : null

@@ -3,6 +3,31 @@ import vm from 'node:vm'
 import { transformSync } from 'esbuild'
 import { createElement, Fragment } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { presentSampleReviewItem } from '../../src/features/hubspotToAlbi/sampleReview.js'
+import { buildResolutionConfirmation } from '../../src/features/hubspotToAlbi/sampleReviewResolution.js'
+
+export async function mountSampleReviewResolution(item, onResolve) {
+  const source = await readFile(new URL('../../src/features/hubspotToAlbi/SampleReviewResolution.jsx', import.meta.url), 'utf8')
+  const code = transformSync(source.replace(/^import[\s\S]*?from ['"][^'"]+['"]\s*$/gm, '').replace('export default function', 'function'),
+    { loader: 'jsx', jsxFactory: 'h', jsxFragment: 'Fragment' }).code
+  const slots = []; let index = 0, tree, dirty = true, ids = 0
+  const useState = initial => { const slot = index++; if (!(slot in slots)) slots[slot] = typeof initial === 'function' ? initial() : initial
+    return [slots[slot], value => { slots[slot] = typeof value === 'function' ? value(slots[slot]) : value; dirty = true }] }
+  const useRef = initial => { const slot = index++; return slots[slot] ??= { current: initial } }
+  const h = (type, props, ...children) => ({ type: typeof type === 'function' ? type.name : type,
+    props: props ?? {}, children: children.flat(Infinity) })
+  const documentState = { activeElement: null }
+  const Component = vm.runInNewContext(`${code}\nSampleReviewResolution`, { h, Fragment: 'fragment', useState, useRef,
+    useEffect() {}, presentSampleReviewItem, buildResolutionConfirmation,
+    crypto: { randomUUID: () => (++ids === 1 ? 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' : 'dddddddd-dddd-4ddd-8ddd-dddddddddddd') },
+    document: documentState, Date, Intl, Object, Set })
+  const nodes = () => { const all = []; const walk = node => { if (!node || typeof node !== 'object') return; all.push(node); node.children?.forEach(walk) }; walk(tree); return all }
+  const flush = async () => { for (let n = 0; n < 8; n++) { if (dirty) { dirty = false; index = 0; tree = Component({ item, onResolve }) }
+    await Promise.resolve() } }
+  await flush()
+  return { flush, nodes, documentState, text: () => JSON.stringify(tree),
+    find: (type, label) => nodes().find(node => node.type === type && JSON.stringify(node.children).includes(label)) }
+}
 
 // Real page JSX and React rendering; only scheduling and unrelated setup forms are substituted.
 export async function renderWorkflowPage(name, data, bindings, { isAdmin = true } = {}) {

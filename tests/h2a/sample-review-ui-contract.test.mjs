@@ -6,6 +6,7 @@ import { transformSync } from 'esbuild'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import * as presentation from '../../src/features/hubspotToAlbi/sampleReview.js'
+import { presentSampleReviewQueryFilters } from '../../src/features/hubspotToAlbi/preflightPresentation.js'
 
 const pageUrl = new URL('../../src/features/hubspotToAlbi/SampleReviewPage.jsx', import.meta.url)
 const detailUrl = new URL('../../src/features/hubspotToAlbi/SampleReviewDetail.jsx', import.meta.url)
@@ -25,8 +26,9 @@ async function mount(overrides = {}) {
   let index = 0, tree, dirty = true
   const context = { session: { access_token: 'token' }, companyId: 'company-1', companyName: 'Example Co', isAdmin: true,
     tenantRevision: 0, completeTenantTransition: revision => completed.push(revision) }
-  const completed = [], calls = []
-  const clients = Object.fromEntries(['getH2ADryRunReviews', 'getH2ADryRunReview', 'recheckH2ADryRunReview'].map(name => [name, (...args) => {
+  const completed = [], calls = [], navigations = []
+  const navigate = (path, options) => navigations.push({ path, options })
+  const clients = Object.fromEntries(['getH2ADryRunReviews', 'getH2ADryRunReview', 'recheckH2ADryRunReview', 'resolveH2ADryRunReview'].map(name => [name, (...args) => {
     calls.push({ name, args })
     if (overrides[name]) return overrides[name](...args)
     return Promise.resolve(name === 'getH2ADryRunReviews' ? page() : { item: full(args[2]) })
@@ -42,8 +44,10 @@ async function mount(overrides = {}) {
   const h = (type, props, ...children) => ({ type: typeof type === 'function' ? type.name : type, props: props ?? {}, children: children.flat(Infinity) })
   const code = transformSync(source.replace(/^import[\s\S]*?from ['"][^'"]+['"]\s*$/gm, '').replace('export default function', 'function'),
     { loader: 'jsx', jsxFactory: 'h', jsxFragment: 'Fragment' }).code
-  const component = vm.runInNewContext(`${code}\nSampleReviewPage`, { ...presentation, ...clients, h, Fragment: 'fragment',
+  const component = vm.runInNewContext(`${code}\nSampleReviewPage`, { ...presentation, presentSampleReviewQueryFilters, ...clients, h, Fragment: 'fragment',
     useState, useRef, useEffect, useCallback, useOutletContext: () => context, AbortController, Intl, Date, Set, Map,
+    useLocation: () => ({ pathname: '/hubspot-to-albi/sample-review', search: overrides.locationSearch ?? '' }),
+    useNavigate: () => navigate, URLSearchParams,
     Link: function Link() {}, SampleReviewDetail: function SampleReviewDetail() {} })
   async function flush() { for (let attempt = 0; attempt < 12; attempt++) {
     if (dirty) { dirty = false; index = 0; tree = component(); while (pending.length) pending.shift()() }
@@ -51,7 +55,7 @@ async function mount(overrides = {}) {
   } return tree }
   await flush()
   const nodes = () => { const all = []; const walk = node => { if (!node || typeof node !== 'object') return; all.push(node); node.children?.forEach(walk) }; walk(tree); return all }
-  return { context, calls, completed, flush, nodes, text: () => JSON.stringify(tree),
+  return { context, calls, completed, navigations, flush, nodes, text: () => JSON.stringify(tree),
     rerender: () => { dirty = true; return flush() },
     find: (type, text) => nodes().find(node => node.type === type && JSON.stringify(node.children).includes(text)),
     detail: () => nodes().find(node => node.type === 'SampleReviewDetail'),
@@ -61,6 +65,56 @@ async function mount(overrides = {}) {
 test('selectable reasons cannot send the presentation fallback rejected by the API', () => {
   assert.equal(presentation.SAMPLE_REVIEW_REASON_OPTIONS.some(option => option.value === 'other_review_reason'), false)
   assert.equal(presentation.presentSampleReviewItem({ reason: 'unknown-secret' }).reasonLabel, 'Other review reason')
+})
+
+test('Overview reason query initializes only catalog filters and clears invalid parameters', async () => {
+  const valid = await mount({ locationSearch: '?objectType=contacts&reason=nonblank_field_difference' })
+  assert.equal(valid.calls[0].args[2].objectType, 'contacts')
+  assert.equal(valid.calls[0].args[2].reason, 'nonblank_field_difference')
+  valid.unmount()
+  const invalid = await mount({ locationSearch: '?objectType=unsafe&reason=other_review_reason' })
+  assert.equal(invalid.calls[0].args[2].objectType, '')
+  assert.equal(invalid.calls[0].args[2].reason, '')
+  assert.equal(invalid.navigations.at(-1).options.replace, true)
+  invalid.unmount()
+})
+
+test('resolution sends decision only, locks duplicates, and refreshes selected detail', async () => {
+  const pending = deferred(); let details = 0
+  const ui = await mount({ resolveH2ADryRunReview: () => pending.promise,
+    getH2ADryRunReview: (_s, _c, id) => Promise.resolve({ item: { ...full(id), updatedAt: `2026-10-12T12:0${++details}:00.000Z` } }) })
+  const resolve = ui.detail().props.onResolve
+  const action = resolve({ action: 'link_existing', candidateId: '456' }, 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', '2026-10-12T12:01:00.000Z')
+  await ui.flush()
+  const duplicate = resolve({ action: 'link_existing', candidateId: '456' }, 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', '2026-10-12T12:01:00.000Z')
+  await ui.flush()
+  assert.equal(ui.calls.filter(call => call.name === 'resolveH2ADryRunReview').length, 1)
+  assert.equal(ui.detail().props.recheckPending, true)
+  assert.deepEqual(JSON.parse(JSON.stringify(ui.calls.find(call => call.name === 'resolveH2ADryRunReview').args[2])), {
+    reviewId: 'review-1', expectedUpdatedAt: '2026-10-12T12:01:00.000Z', clientRequestId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+    action: 'link_existing', candidateId: '456' })
+  pending.resolve({ resolution: { status: 'ready_to_recheck' } }); await action; await duplicate; await ui.flush()
+  assert.equal(details, 2); assert.equal(ui.detail().props.item.updatedAt, '2026-10-12T12:02:00.000Z')
+  ui.unmount()
+})
+
+test('resolution 409 refreshes current detail before the confirmation can be retried', async () => {
+  let details = 0
+  const ui = await mount({ resolveH2ADryRunReview: () => Promise.reject(Object.assign(new Error('Changed'), { status: 409 })),
+    getH2ADryRunReview: (_s, _c, id) => Promise.resolve({ item: { ...full(id), updatedAt: `2026-10-12T12:0${++details}:00.000Z` } }) })
+  await assert.rejects(ui.detail().props.onResolve({ action: 'link_existing', candidateId: '456' },
+    'cccccccc-cccc-4ccc-8ccc-cccccccccccc', '2026-10-12T12:01:00.000Z'), { status: 409 })
+  await ui.flush()
+  assert.equal(ui.detail().props.item.updatedAt, '2026-10-12T12:02:00.000Z')
+  ui.unmount()
+})
+
+test('an outdated local confirmation is rejected before a mutation request', async () => {
+  const ui = await mount()
+  await assert.rejects(ui.detail().props.onResolve({ action: 'link_existing', candidateId: '456' },
+    'cccccccc-cccc-4ccc-8ccc-cccccccccccc', '2026-10-12T11:00:00.000Z'), { status: 409 })
+  assert.equal(ui.calls.filter(call => call.name === 'resolveH2ADryRunReview').length, 0)
+  ui.unmount()
 })
 
 test('sample review uses centralized requests and accessible wrapping without provider mutation controls', async () => {
@@ -325,11 +379,12 @@ test('a tenant switch aborts recheck and ignores late progress and record change
   assert.doesNotMatch(ui.text(), /Corrections are clear/); assert.deepEqual(ui.completed, [0, 1]); ui.unmount()
 })
 
-test('detail renders full identity, every candidate, fixed audit labels and only the recheck action', async () => {
+test('detail renders full identity, every candidate, fixed audit labels and the resolution panel', async () => {
   const source = await readFile(detailUrl, 'utf8')
   const code = transformSync(source.replace(/^import[\s\S]*?from ['"][^'"]+['"]\s*$/gm, '').replace('export default function', 'function'),
     { loader: 'jsx', jsxFactory: 'h' }).code
-  const Detail = vm.runInNewContext(`${code}\nSampleReviewDetail`, { ...presentation, h: createElement, Intl, Date })
+  const Detail = vm.runInNewContext(`${code}\nSampleReviewDetail`, { ...presentation, h: createElement, Intl, Date,
+    SampleReviewResolution: ({ item }) => createElement('aside', { 'data-review-id': item.id }, 'Resolution panel') })
   const item = { ...full(), sourceSnapshot: { ...full().sourceSnapshot, fullName: '<script>alert(1)</script>',
     email: 'complete-long-direct-email-address@example.com', mobileNumber: '+15559876543', address1: '123 Complete Street', city: 'Example City' },
     candidateSnapshots: [{ id: 'albi-1', email: 'one@example.com' }, { id: 'albi-2', email: 'two@example.com' }],
@@ -337,7 +392,7 @@ test('detail renders full identity, every candidate, fixed audit labels and only
   const html = renderToStaticMarkup(createElement(Detail, { item, recheckPending: false, onRecheck() {} }))
   for (const value of ['complete-long-direct-email-address@example.com', '+15559876543', '123 Complete Street', 'Example City', 'albi-1', 'albi-2', 'one@example.com', 'two@example.com']) assert.ok(html.includes(value), value)
   assert.ok(html.includes('&lt;script&gt;')); assert.equal(html.includes('<script>'), false)
-  assert.equal((html.match(/<button/g) ?? []).length, 1); assert.match(html, /Recheck this record/)
+  assert.match(html, /Recheck this record/); assert.match(html, /Resolution panel/)
   assert.match(html, /Review event/); assert.doesNotMatch(html, /unknown-private|unknown-secret/)
 })
 
@@ -345,7 +400,8 @@ test('detail renders job-title-only differences and labels source job title with
   const source = await readFile(detailUrl, 'utf8')
   const code = transformSync(source.replace(/^import[\s\S]*?from ['"][^'"]+['"]\s*$/gm, '').replace('export default function', 'function'),
     { loader: 'jsx', jsxFactory: 'h' }).code
-  const Detail = vm.runInNewContext(`${code}\nSampleReviewDetail`, { ...presentation, h: createElement, Intl, Date })
+  const Detail = vm.runInNewContext(`${code}\nSampleReviewDetail`, { ...presentation, h: createElement, Intl, Date,
+    SampleReviewResolution: () => null })
   const item = { ...full(), reason: 'nonblank_field_difference', sourceSnapshot: { id: 'hs-1', jobTitle: 'Engineer' },
     candidateSnapshots: [{ id: 'albi-1', jobTitle: 'Manager' }],
     proposedChanges: { conflicts: { jobTitle: { proposed: 'Engineer', current: 'Manager' } } } }

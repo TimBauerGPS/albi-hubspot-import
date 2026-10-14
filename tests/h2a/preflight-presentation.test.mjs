@@ -35,3 +35,11 @@ test('preflight presentation omits unknown scope and unsafe company identity', a
   assert.equal(presentAuthorizedCompany({ id: '../1319', name: 'Allied' }), '')
   assert.equal(presentAuthorizedCompany({ id: '1319', name: 'Allied\u0000' }), '')
 })
+
+test('Overview links initialize only valid sample review catalog filters', async () => {
+  const { presentSampleReviewQueryFilters } = await presentation()
+  assert.deepEqual(presentSampleReviewQueryFilters('?objectType=contacts&reason=nonblank_field_difference'), {
+    filters: { status: '', objectType: 'contacts', reason: 'nonblank_field_difference' }, invalid: false })
+  assert.deepEqual(presentSampleReviewQueryFilters('?objectType=unsafe&reason=other_review_reason'), {
+    filters: { status: '', objectType: '', reason: '' }, invalid: true })
+})

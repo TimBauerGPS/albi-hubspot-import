@@ -1,3 +1,17 @@
+import { listH2AReviewReasonOptions } from '../../../shared/h2aReviewReasons.js'
+
+const reviewReasons = new Set(listH2AReviewReasonOptions().map(option => option.value))
+
+export function presentSampleReviewQueryFilters(search) {
+  const query = new URLSearchParams(typeof search === 'string' ? search : '')
+  const objectType = query.get('objectType')
+  const reason = query.get('reason')
+  const validObject = objectType === null || ['contacts', 'companies'].includes(objectType)
+  const validReason = reason === null || reviewReasons.has(reason)
+  return { filters: { status: '', objectType: validObject ? objectType ?? '' : '', reason: validReason ? reason ?? '' : '' },
+    invalid: !validObject || !validReason }
+}
+
 const DIAGNOSTIC_LABELS = Object.freeze({
   authentication_rejected: 'Authentication rejected',
   permission_denied: 'Permission denied',

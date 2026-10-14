@@ -1,4 +1,5 @@
 import { presentSampleReviewItem, SAMPLE_REVIEW_GUIDANCE } from './sampleReview.js'
+import SampleReviewResolution from './SampleReviewResolution.jsx'
 
 const eventLabels = {
   captured: 'Captured in sample', recheck_started: 'Recheck started', still_needs_review: 'Still needs review',
@@ -35,7 +36,7 @@ function Comparisons({ comparisons }) {
   )
 }
 
-export default function SampleReviewDetail({ item, busy, recheckPending, onRecheck }) {
+export default function SampleReviewDetail({ item, busy, recheckPending, onRecheck, onResolve }) {
   const review = presentSampleReviewItem(item)
   const events = Array.isArray(item?.events) ? item.events : []
   const comparisons = review.candidates.length ? review.candidates : [{ id: null, comparisons: Object.entries(review.source).map(([key, hubspot]) => ({
@@ -86,6 +87,8 @@ export default function SampleReviewDetail({ item, busy, recheckPending, onReche
             <Comparisons comparisons={review.proposedChanges} />
           </section>
         )}
+
+        <SampleReviewResolution item={item} busy={busy} onResolve={onResolve} />
 
         <section className="border-t border-gray-200 pt-4" aria-labelledby="sample-review-recheck-title">
           <h4 id="sample-review-recheck-title" className="text-sm font-semibold text-gray-900">Check your corrections</h4>

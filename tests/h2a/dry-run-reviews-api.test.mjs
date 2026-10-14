@@ -77,6 +77,27 @@ test('review detail mode and durable HubSpot outcomes determine safe capability'
   assert.equal(f.calls.some(call => call[0] === 'clients'), false)
 })
 
+test('detail projects organization choices only after live server association reads', async () => {
+  const f = fixture()
+  f.options.env = { H2A_REVIEW_RESOLUTION_MODE: 'admins' }
+  f.options.requireRequest = async () => ({ companyId: 'authorized-company', role: 'admin', isSuperAdmin: false })
+  f.row.reason = 'organization_unresolved'
+  f.repository.getMappings = async () => ({ contacts: [{ portal_id: '123', hubspot_id: '10', albi_contact_id: '20' }],
+    organizations: [{ portal_id: '123', hubspot_id: '30', albi_organization_id: '40' }], options: [] })
+  f.options.makeClients = async () => ({ hubspot: {
+    getContacts: async () => [{ id: '10', properties: {} }], getCompanies: async () => [{ id: '30', properties: {} }],
+    getAssociations: async () => [{ fromId: '10', toObjectType: 'companies', toIds: ['30'] }],
+  }, albi: {
+    listContacts: async () => ({ records: [{ id: '20', organizationId: '50' }], cursor: null }),
+    listOrganizations: async () => ({ records: [{ id: '40' }], cursor: null }),
+  } })
+  const body = JSON.parse((await createDryRunReviewHandler(f.options)(get({ reviewId }))).body)
+  assert.deepEqual(body.item.organizationOptions[0], { sourceId: '30', targetId: '40', contactTargetId: '20',
+    currentOrganizationTargetId: '50', associated: true,
+    contactUrl: 'https://app.albiware.com/Relationships/Contact/20',
+    organizationUrl: 'https://app.albiware.com/Relationships/Organization/40' })
+})
+
 test('missing and cross-tenant detail is a fixed non-enumerating 404', async () => {
   const f = fixture()
   const response = await f.handler(get({ reviewId: '00000000-0000-4000-8000-000000000099' }))
