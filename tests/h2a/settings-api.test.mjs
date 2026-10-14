@@ -26,7 +26,7 @@ const toRpc = ({ keyVersion, ...rest }) => ({ ...rest, key_version: keyVersion }
 const fromRpc = ({ key_version, ...rest }) => ({ ...rest, keyVersion: key_version })
 
 function fixture({ role = 'admin', superAdmin = false, config = {}, credentials = true, mappings = [], runs = [], failure = null,
-  concurrentConfig = false, rejectArrayEquality = false, reviews = [], reviewCount } = {}) {
+  concurrentConfig = false, rejectArrayEquality = false, reviews = [], reviewCount, resolutionEvents = [] } = {}) {
   const tables = {
     companies: [{ id: 'company-a', name: 'Alpha' }, { id: 'company-b', name: 'Beta' }],
     company_members: [{ user_id: 'user-1', company_id: 'company-a', role }],
@@ -39,6 +39,7 @@ function fixture({ role = 'admin', superAdmin = false, config = {}, credentials 
     }],
     h2a_option_mappings: mappings.map(dbMapping), h2a_backfill_windows: [], h2a_cursors: [],
     h2a_dry_run_reviews: reviews,
+    h2a_dry_run_review_resolution_events: resolutionEvents,
     h2a_sync_runs: runs.map((run, index) => ({
       id: `run-${index + 1}`, company_id: 'company-a', mode: 'dry_run', status: 'completed',
       sample_limit_per_type: null, totals: { dry_run: 7 }, created_at: '2026-10-02T10:00:01.000Z',
@@ -60,7 +61,10 @@ function fixture({ role = 'admin', superAdmin = false, config = {}, credentials 
     from(table) {
       assert.ok(tables[table], `Unexpected public table ${table}`)
       let operation = 'read', values, filters = [], selected = false, ordering = [], rowLimit, countOptions
-      const matches = row => filters.every(([operator, column, value]) => operator === 'eq' ? row[column] === value : row[column] > value)
+      const matches = row => filters.every(([operator, column, value]) => {
+        const field = column.split('.').reduce((item, key) => item?.[key], row)
+        return operator === 'eq' ? field === value : field > value
+      })
       const builder = {
         select(columns, options) { selected = true; countOptions = options; reads.push({ table, columns, options, filters }); return builder },
         eq(column, value) { filters.push(['eq', column, value]); return builder },
@@ -155,6 +159,7 @@ test('member GET returns masks, configuration, mappings and preflight without cr
   assert.equal(result.json.albiApiKeyMask, 'albi********5678')
   assert.equal(result.json.config.state, 'disabled')
   assert.equal(result.json.preflight.status, 'unchecked')
+  assert.equal(result.json.preflight.hubspotWrites, 'verified_when_first_used')
   assert.equal(result.json.optionMappings.length, 7)
   assert.equal(result.json.dryRunReviewReady, false)
   assert.equal(result.json.lastCompletedDryRun, null)
@@ -162,6 +167,44 @@ test('member GET returns masks, configuration, mappings and preflight without cr
   for (const forbidden of [hubspotToken, albiApiKey, 'ciphertext', 'key_version', 'hubspot_envelope', 'albi_envelope']) assert.equal(result.body.includes(forbidden), false)
   assert.equal(result.headers['Cache-Control'], 'no-store')
   assert.equal(f.writes.length, 0)
+})
+
+test('settings read-only preflight cannot claim HubSpot writes from stored scope or readiness fields', async () => {
+  const f = fixture({ config: { preflight_details: { hubspot: { status: 'valid', writes: 'available',
+    rawScopes: ['secret'], authorization: 'secret' } } } })
+  const result = await f.request()
+  assert.equal(result.statusCode, 200)
+  assert.equal(result.json.preflight.hubspotWrites, 'verified_when_first_used')
+  assert.equal(result.json.preflight.details.hubspot.writes, 'verified_when_first_used')
+  assert.equal(result.body.includes('secret'), false)
+})
+
+test('settings derives truthful readiness from durable tenant and portal write events, after credential replacement', async () => {
+  const applied = { company_id: 'company-a', created_at: '2026-10-03T00:00:00Z', event_type: 'provider_applied',
+    sanitized_details: { code: 'provider_applied', rawScope: 'secret' }, resolution: { portal_id: '123', action: 'resolve_fields' } }
+  for (const [event, expected] of [[applied, 'available'],
+    [{ ...applied, company_id: 'company-b' }, 'verified_when_first_used'],
+    [{ ...applied, resolution: { portal_id: '999', action: 'resolve_fields' } }, 'verified_when_first_used'],
+    [{ ...applied, resolution: { portal_id: '123', action: 'create_albi' } }, 'verified_when_first_used'],
+    [{ ...applied, created_at: '2026-10-01T00:00:00Z' }, 'verified_when_first_used'],
+    [{ ...applied, event_type: 'provider_reconciled' }, 'verified_when_first_used'],
+    [{ ...applied, event_type: 'failed', sanitized_details: { code: 'authorization_rejected', message: 'secret' } }, 'rejected']]) {
+    const f = fixture({ config: { portal_id: '123' }, resolutionEvents: [event] })
+    const response = await f.request()
+    assert.equal(response.statusCode, 200)
+    assert.equal(response.json.preflight.hubspotWrites, expected)
+    if (expected === 'rejected') assert.equal(response.json.preflight.writeMessage, 'Authentication or write scope rejected')
+    assert.equal(response.body.includes('secret'), false)
+    assert.equal(f.writes.length, 0)
+  }
+})
+
+test('missing current credentials cannot inherit prior write readiness', async () => {
+  const f = fixture({ credentials: false, config: { portal_id: '123' }, resolutionEvents: [{
+    company_id: 'company-a', created_at: '2026-10-03T00:00:00Z', event_type: 'provider_applied',
+    resolution: { portal_id: '123', action: 'resolve_fields' },
+  }] })
+  assert.equal((await f.request()).json.preflight.hubspotWrites, 'verified_when_first_used')
 })
 
 test('settings exposes only review counters and booleans while all rechecked rows block full readiness', async () => {
@@ -485,7 +528,7 @@ test('preflight read schema drops prefixed envelopes and arbitrary message/error
   const result = await f.request()
   assert.equal(result.statusCode, 200)
   assert.deepEqual(result.json.preflight.details, {
-    hubspot: { status: 'valid', authenticated: true, checks: [{ capability: 'contacts_read', status: 'valid', label: 'HubSpot contact reads' }] },
+    hubspot: { status: 'valid', authenticated: true, writes: 'verified_when_first_used', checks: [{ capability: 'contacts_read', status: 'valid', label: 'HubSpot contact reads' }] },
     albi: { status: 'invalid', authenticated: true, checks: [
       { capability: 'activities_create', status: 'invalid', label: 'Albi activity creation', reason: 'permission_denied' },
       { capability: 'contacts_create', status: 'invalid', label: 'Albi contact creation' },
@@ -521,7 +564,7 @@ test('preflight read schema retains safe checklist and option data while rejecti
   assert.equal(result.statusCode, 200)
   assert.deepEqual(result.json.preflight.details, {
     missing: ['Albi activity creation'],
-    hubspot: { status: 'valid', authenticated: true, checks: [{ capability: 'notes_read', status: 'valid', label: 'HubSpot note reads' }] },
+    hubspot: { status: 'valid', authenticated: true, writes: 'verified_when_first_used', checks: [{ capability: 'notes_read', status: 'valid', label: 'HubSpot note reads' }] },
     albi: {},
     options: {
       contactTypes: [{ id: '101', label: 'Property Manager' }],

@@ -5,6 +5,8 @@ import { H2AReviewError, createReviewRepositoryCapabilities, recheckDryRunReview
 import { createReviewReconciliationCapabilities } from './_h2a/reviewResolutionService.js'
 import { REVIEW_REASONS, projectReviewRow, projectReviewEvent } from './_h2a/review.js'
 import { ApiError } from './_h2a/http.js'
+import { currentResolutionProjection } from './h2a-dry-run-review-resolutions.js'
+import { projectResolutionCapability } from './_h2a/resolutionCapability.js'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/
@@ -58,9 +60,11 @@ function request(event) {
     objectType: query.objectType ?? null, reason: query.reason ?? null } }
 }
 
-async function detail(repository, companyId, runId, row) {
+async function detail(repository, companyId, runId, row, auth, options) {
   const events = await repository.listDryRunReviewEvents(companyId, runId, row.id)
-  return { ...projectReviewRow(row, { detail: true }), events: events.map(projectReviewEvent) }
+  const projected = await currentResolutionProjection(repository, companyId, row.id, row.portal_id)
+  return { ...projectReviewRow(row, { detail: true }), events: events.map(projectReviewEvent), resolution: projected.resolution,
+    resolutionCapability: projectResolutionCapability(auth, (options.env ?? process.env).H2A_REVIEW_RESOLUTION_MODE, projected.hubspotWrites) }
 }
 
 export function createDryRunReviewHandler(options = {}) {
@@ -90,7 +94,7 @@ export function createDryRunReviewHandler(options = {}) {
             if (!options.makeClients && (await clients.hubspot.getAccountInfo()).portalId !== config.portal_id) throw new ApiError('permission')
             return readOnlyH2ACapabilities(clients)
           } }, { companyId, reviewId: input.reviewId, expectedUpdatedAt: input.expectedUpdatedAt, actorId: auth.userId })
-        return reply(200, { item: await detail(repository, companyId, result.sample.id, result.review),
+        return reply(200, { item: await detail(repository, companyId, result.sample.id, result.review, auth, options),
           progress: await reviewProgress(repository, companyId, result.sample, result.config.initial_start_locked_at) })
       }
       const { config, latest, sample } = await resolveReviewSample(repository, companyId)
@@ -98,7 +102,7 @@ export function createDryRunReviewHandler(options = {}) {
         if (!sample) fail(409, 'Run a new sample to create detailed review data.')
         const row = await repository.getDryRunReview(companyId, sample.id, input.reviewId)
         if (!row) fail(404, 'Sample review item not found.')
-        return reply(200, { item: await detail(repository, companyId, sample.id, row) })
+        return reply(200, { item: await detail(repository, companyId, sample.id, row, auth, options) })
       }
       const metadata = latest ? { id: latest.id, createdAt: latest.created_at, finishedAt: latest.finished_at,
         reviewCaptureVersion: latest.review_capture_version === 1 ? 1 : null, historical: latest.review_capture_version !== 1 } : null

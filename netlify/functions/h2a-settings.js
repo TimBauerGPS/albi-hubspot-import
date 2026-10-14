@@ -5,6 +5,7 @@ import { decryptSecret, encryptSecret, loadCredentialKeyring, maskSecret } from 
 import { pacificBusinessDate, pacificStartOfDate } from './_h2a/time.js'
 import { mappingsMatchOptions, safePreflightDetails } from './_h2a/preflight.js'
 import { createH2ARepository } from './_h2a/repository.js'
+import { loadHubspotWriteReadiness, WRITE_AUTH_REJECTION_MESSAGE } from './_h2a/resolutionCapability.js'
 
 const CONFIG_FIELDS = ['company_id', 'state', 'portal_id', 'selected_start_date', 'initial_start_locked_at',
   'preflight_status', 'preflight_checked_at', 'option_confirmation_status', 'options_confirmed_by',
@@ -341,10 +342,14 @@ export function createSettingsHandler(options = {}) {
       const completedSampleDryRun = await getCompletedDryRun({ sample: true })
       const sampleReview = await getSampleReview(completedSampleDryRun)
       const latestSampleDryRun = await getLatestSampleDryRun()
+      const hubspotWrites = await loadHubspotWriteReadiness(supabase, companyId, config, credentials?.updated_at)
+      const preflightDetails = safePreflightDetails(config.preflight_details, protectedValues)
+      if (preflightDetails.hubspot) preflightDetails.hubspot.writes = hubspotWrites
       return response(200, {
         companyId, companyName: context.companyName,
         config: safeConfig, optionMappings: mappings.map(toMapping),
-        preflight: { status: config.preflight_status, details: safePreflightDetails(config.preflight_details, protectedValues), checkedAt: config.preflight_checked_at },
+        preflight: { status: config.preflight_status, details: preflightDetails, checkedAt: config.preflight_checked_at,
+          hubspotWrites, ...(hubspotWrites === 'rejected' ? { writeMessage: WRITE_AUTH_REJECTION_MESSAGE } : {}) },
         hubspotTokenMask: maskSecret(secrets.hubspotToken), albiApiKeyMask: maskSecret(secrets.albiApiKey),
         dryRunReviewReady: Boolean(completedDryRun), lastCompletedDryRun: toCompletedDryRun(completedDryRun),
         lastCompletedSampleDryRun: toCompletedDryRun(completedSampleDryRun),

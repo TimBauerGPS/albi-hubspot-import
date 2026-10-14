@@ -64,6 +64,7 @@ export function safePreflightDetails(value, protectedValues = []) {
     const source = value[provider]
     if (!isRecord(source)) continue
     const safe = {}
+    if (provider === 'hubspot') safe.writes = 'verified_when_first_used'
     if (STATUSES.has(source.status)) safe.status = source.status
     if (typeof source.authenticated === 'boolean') safe.authenticated = source.authenticated
     if (provider === 'albi' && isRecord(source.company) && /^[A-Za-z0-9_-]{1,64}$/.test(source.company.id ?? '') &&
@@ -114,7 +115,7 @@ export function completeConfirmedMappings(mappings, options) {
 }
 
 export async function runPreflight({ hubspot, albi, protectedValues = [] }) {
-  const details = { missing: [], hubspot: { status: 'invalid', authenticated: false, checks: [] }, albi: { status: 'invalid', authenticated: false, checks: [] }, options: {} }
+  const details = { missing: [], hubspot: { status: 'invalid', authenticated: false, checks: [], writes: 'verified_when_first_used' }, albi: { status: 'invalid', authenticated: false, checks: [] }, options: {} }
   let portalId = null
   try {
     const account = await hubspot.getAccountInfo()

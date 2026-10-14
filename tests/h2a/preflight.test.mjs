@@ -39,6 +39,7 @@ function clients({ missing, unavailableGroup, onRead = () => {} } = {}) {
 test('preflight allows activation when required reads pass and writes are informational', async () => {
   const result = await runPreflight(clients())
   assert.equal(result.status, 'valid')
+  assert.equal(result.details.hubspot.writes, 'verified_when_first_used')
   assert.deepEqual(result.details.albi.company, { id: '1319', name: 'Allied Restoration Services Inc' })
   assert.equal(result.details.albi.checks.find(check => check.capability === 'company_access').status, 'valid')
   for (const capability of ['contacts_create', 'organizations_create', 'activities_create']) {

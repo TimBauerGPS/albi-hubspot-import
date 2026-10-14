@@ -12,6 +12,7 @@ function fixture() {
     source_snapshot: { firstName: 'A', lastName: 'Person', email: 'a@example.com', apiKey: 'secret', notes: 'secret' },
     candidate_snapshots: [{ id: '20', firstName: 'A', authorization: 'secret' }] }
   const repository = {
+    getCredentials: async () => ({ updated_at: '2026-10-01T00:00:00Z' }),
     getConfig: async company => { calls.push(['config', company]); return { initial_start_locked_at: '2026-10-01T00:00:00Z', portal_id: '123' } },
     getCurrentReviewSample: async (...args) => { calls.push(['sample', ...args]); return { id: 'server-run', review_capture_version: 1, created_at: stamp, finished_at: stamp } },
     getLatestCompletedSampleDryRun: async (...args) => { calls.push(['latest', ...args]); return { id: 'server-run', review_capture_version: 1, created_at: stamp, finished_at: stamp } },
@@ -55,6 +56,24 @@ test('detail exposes allowlisted snapshots and projected events under current ru
   assert.equal(JSON.parse(response.body).item.sourceSnapshot.email, 'a@example.com')
   assert.equal(JSON.stringify(response).includes('secret'), false)
   assert.equal(JSON.parse(response.body).item.events[0].details.category, 'auth')
+  assert.deepEqual(JSON.parse(response.body).item.resolutionCapability,
+    { enabled: false, mode: 'disabled', canResolve: false, hubspotWrites: 'verified_when_first_used' })
+  assert.equal(JSON.parse(response.body).item.resolution, null)
+})
+
+test('review detail mode and durable HubSpot outcomes determine safe capability', async () => {
+  const f = fixture()
+  f.options.env = { H2A_REVIEW_RESOLUTION_MODE: 'admins' }
+  f.options.requireRequest = async () => ({ companyId: 'authorized-company', role: 'admin', isSuperAdmin: false })
+  f.repository.getCurrentReviewResolution = async () => ({ id: reviewId, action: 'resolve_fields', status: 'completed',
+    provider_outcome_code: 'completed', company_id: 'authorized-company', portal_id: '123' })
+  f.repository.listReviewResolutionEvents = async () => [{ event_type: 'provider_applied', created_at: stamp, sanitized_details: { code: 'provider_applied', message: 'secret' } }]
+  const result = await createDryRunReviewHandler(f.options)(get({ reviewId }))
+  assert.equal(result.statusCode, 200)
+  assert.deepEqual(JSON.parse(result.body).item.resolutionCapability,
+    { enabled: true, mode: 'admins', canResolve: true, hubspotWrites: 'available' })
+  assert.equal(result.body.includes('secret'), false)
+  assert.equal(f.calls.some(call => call[0] === 'clients'), false)
 })
 
 test('missing and cross-tenant detail is a fixed non-enumerating 404', async () => {
