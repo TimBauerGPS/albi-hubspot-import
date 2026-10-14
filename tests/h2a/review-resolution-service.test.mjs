@@ -1,0 +1,417 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { executeReviewResolution, reconcileReviewResolution, createReviewResolutionCapabilities,
+  createReviewReconciliationCapabilities } from '../../netlify/functions/_h2a/reviewResolutionService.js'
+import { recheckDryRunReview, createReviewRepositoryCapabilities } from '../../netlify/functions/_h2a/reviewService.js'
+import { ApiError } from '../../netlify/functions/_h2a/http.js'
+
+const stamp = '2026-10-13T12:00:00Z'
+const actorId = '00000000-0000-4000-8000-000000000001'
+const resolutionId = '00000000-0000-4000-8000-000000000002'
+const input = { companyId: 'tenant', reviewId: '00000000-0000-4000-8000-000000000003', actorId,
+  expectedUpdatedAt: stamp, clientRequestId: '00000000-0000-4000-8000-000000000004',
+  decision: { action: 'resolve_fields', fieldChoices: { email: 'albi' } } }
+
+function fixture() {
+  const calls = [], events = [], mappings = { contacts: [], organizations: [], options: [] }
+  const source = { id: '42', properties: { firstname: 'A', lastname: 'B', email: 'hs@example.com', phone: '5551112222' } }
+  const target = { id: '20', firstName: 'A', lastName: 'B', email: 'albi@example.com', phoneNumber: '5551112222' }
+  const row = { id: input.reviewId, company_id: 'tenant', run_id: 'sample', portal_id: '123', object_type: 'contacts', source_id: '42',
+    updated_at: stamp, status: 'needs_review', reason: 'nonblank_field_difference', conflict_type: 'contact_fields',
+    source_snapshot: { id: '42', firstName: 'A', lastName: 'B', email: 'hs@example.com', phoneNumber: '5551112222' },
+    candidate_snapshots: [structuredClone(target)], proposed_changes: { conflicts: { email: { current: 'albi@example.com', proposed: 'hs@example.com' } }, updates: {} } }
+  const f = { calls, events, mappings, source, target, row, intent: null, latest: 'sample', associations: [], contacts: [target], organizations: [] }
+  const repo = {
+    getConfig: async () => ({ portal_id: '123', initial_start_locked_at: stamp }),
+    getCurrentReviewSample: async () => ({ id: f.latest, review_capture_version: 1 }),
+    getLatestCompletedSampleDryRun: async () => ({ id: f.latest, review_capture_version: 1 }),
+    getDryRunReview: async () => row,
+    getMappings: async () => mappings,
+    getCurrentReviewResolution: async () => f.intent,
+    getReviewResolution: async () => f.intent,
+    createReviewResolution: async (_company, args) => {
+      if (f.intent) return { resolution: structuredClone(f.intent), created: false }
+      if (args.expectedUpdatedAt !== row.updated_at) return { error: 'stale' }
+      calls.push('intent');
+      f.intent = { id: resolutionId, company_id: 'tenant', review_id: row.id, run_id: row.run_id, portal_id: '123', object_type: row.object_type,
+        source_id: '42', decision: structuredClone(args.decision), action: args.decision.action, expected_review_updated_at: args.expectedUpdatedAt,
+        client_request_id: args.clientRequestId, status: 'pending', execution_phase: null }
+      return { resolution: structuredClone(f.intent), created: true }
+    },
+    claimReviewResolution: async (_company, _id, owner) => {
+      calls.push('claim')
+      if (f.intent.lease_owner) return { error: 'not_claimable' }
+      f.intent.execution_phase = ['waiting_on_albi', 'ready_to_recheck'].includes(f.intent.status) ? f.intent.status : f.intent.execution_phase ?? 'applying'
+      f.intent.status = 'applying'; f.intent.lease_owner = owner; f.intent.lease_expires_at = '2099-10-13T12:00:00Z'
+      return { resolution: structuredClone(f.intent) }
+    },
+    finishReviewResolution: async (_company, _id, owner, args) => {
+      calls.push('finish')
+      assert.equal(owner, f.intent.lease_owner)
+      if (f.crashFinish) throw Error('storage unavailable')
+      if (f.intent.execution_phase !== 'applying') assert.ok(['waiting_on_albi', 'ready_to_recheck', 'completed', 'superseded'].includes(args.status))
+      Object.assign(f.intent, { status: args.status, execution_phase: null, lease_owner: null, provider_outcome_code: args.providerOutcomeCode })
+      events.push(args)
+      return { resolution: structuredClone(f.intent) }
+    },
+    appendReviewResolutionEvent: async (_company, _id, args) => { calls.push('context'); events.push(args); return args },
+    listReviewResolutionEvents: async () => events.map(args => ({ event_type: args.eventType, sanitized_details: args.details })),
+    saveMapping: async (_company, kind, value) => { calls.push('mapping'); mappings[kind === 'contact' ? 'contacts' : 'organizations'].push(value) },
+    upsertContactOrganizationChoice: async (_company, args) => { calls.push('choice'); f.choice = { hubspot_company_id: args.organizationSourceId }; return { choice: f.choice } },
+    getContactOrganizationChoice: async () => f.choice ?? null,
+    appendDryRunReviewEvent: async () => ({ id: 'event' }),
+    applyDryRunRecheck: async (_company, args) => { Object.assign(row, { status: args.status, updated_at: '2026-10-13T13:00:00Z' }); return { review: row } },
+  }
+  const hubspotRead = {
+    getContacts: async () => { calls.push('read-source'); return [structuredClone(source)] },
+    getCompanies: async ids => [{ id: ids[0], properties: { name: 'Acme', phone: '5552223333' } }],
+    getAssociations: async () => [{ fromId: '42', toObjectType: 'companies', toIds: [...f.associations] }],
+  }
+  const albiRead = {
+    listContacts: async () => { calls.push('read-target'); return { records: structuredClone(f.contacts), cursor: null } },
+    listOrganizations: async () => ({ records: structuredClone(f.organizations), cursor: null }),
+  }
+  const hubspotWrite = {
+    updateContact: async (id, properties) => {
+      assert.equal(f.intent.status, 'applying'); assert.equal(id, '42')
+      calls.push(['PATCH', structuredClone(properties)])
+      if (f.writeError) throw f.writeError
+      Object.assign(source.properties, properties)
+      if (f.afterWrite) f.afterWrite()
+      return { id, properties }
+    },
+    updateCompany: async () => { throw Error('unexpected company mutation') },
+    addContactCompanyAssociation: async (contactId, companyId) => { calls.push(['PUT', contactId, companyId]); f.associations.push(companyId); return { contactId, companyId } },
+  }
+  const albiWrite = {
+    createContact: async payload => {
+      calls.push(['CREATE', structuredClone(payload)])
+      if (f.createdTarget) f.contacts.push(f.createdTarget)
+      if (f.afterCreate) f.afterCreate()
+      if (f.writeError) throw f.writeError
+      return { id: f.createdTarget?.id ?? '30' }
+    },
+    createOrganization: async () => { throw Error('unexpected organization mutation') },
+  }
+  for (const object of [repo, hubspotRead, albiRead, hubspotWrite, albiWrite]) for (const name of
+    ['updateAlbiContact', 'updateAlbiOrganization', 'removeAssociation', 'dispatch', 'saveCursor', 'updateOrganization', 'associateContact']) {
+    Object.defineProperty(object, name, { get() { throw Error(`Forbidden getter: ${name}`) } })
+  }
+  f.deps = { repository: repo, hubspotRead, albiRead, hubspotWrite, albiWrite, now: () => new Date(stamp), sleep: async () => {} }
+  return f
+}
+const mutations = f => f.calls.filter(call => Array.isArray(call))
+
+test('stale review rejects before provider capability construction or getters', async () => {
+  const f = fixture(); f.deps.getResolutionClients = () => { throw Error('provider getter touched') }
+  await assert.rejects(executeReviewResolution(f.deps, { ...input, expectedUpdatedAt: '2026-10-12T12:00:00Z' }), error => error.statusCode === 409)
+  assert.deepEqual(f.calls, [])
+})
+
+test('changed provider comparison demands reconfirmation before PATCH', async () => {
+  const f = fixture(); f.target.email = 'new@example.com'
+  await assert.rejects(executeReviewResolution(f.deps, input), error => error.statusCode === 409)
+  assert.deepEqual(mutations(f), [])
+})
+
+test('durable intent and lease precede exact PATCH and follow-up provider read', async () => {
+  const f = fixture(); const result = await executeReviewResolution(f.deps, input)
+  assert.equal(result.resolution.status, 'ready_to_recheck')
+  assert.deepEqual(mutations(f), [['PATCH', { email: 'albi@example.com' }]])
+  assert.ok(f.calls.indexOf('intent') < f.calls.indexOf('claim'))
+  assert.ok(f.calls.indexOf('claim') < f.calls.findIndex(Array.isArray))
+  assert.ok(f.calls.indexOf('context') > f.calls.indexOf('claim'))
+  assert.ok(f.calls.indexOf('context') < f.calls.findIndex(Array.isArray))
+  assert.ok(f.calls.lastIndexOf('read-source') > f.calls.findIndex(Array.isArray))
+  assert.equal(f.events.at(-1).eventType, 'provider_applied')
+})
+
+test('crash after PATCH reconciles its immutable target without repeating the write', async () => {
+  const f = fixture(); f.crashFinish = true
+  await assert.rejects(executeReviewResolution(f.deps, input))
+  assert.equal(f.source.properties.email, 'albi@example.com')
+  f.crashFinish = false; f.intent.lease_owner = null
+  const result = await executeReviewResolution(f.deps, input)
+  assert.equal(result.resolution.status, 'ready_to_recheck')
+  assert.equal(mutations(f).length, 1)
+  assert.equal(f.events.at(-1).eventType, 'provider_reconciled')
+})
+
+test('mixed write stores sanitized manual tasks and waits for Albi', async () => {
+  const f = fixture(); f.target.phoneNumber = '5552223333'; f.row.candidate_snapshots[0].phoneNumber = '5552223333'
+  f.row.proposed_changes.conflicts.phoneNumber = { current: '5552223333', proposed: '5551112222' }
+  const result = await executeReviewResolution(f.deps, { ...input, decision: { action: 'resolve_fields', fieldChoices: { email: 'albi', phoneNumber: 'hubspot' } } })
+  assert.equal(result.resolution.status, 'waiting_on_albi')
+  assert.equal(mutations(f).length, 1)
+  assert.deepEqual(f.events.at(-1).details.manualTasks, [{ provider: 'albi', objectType: 'contacts', targetId: '20', fields: [{ field: 'phoneNumber', value: '5551112222' }] }])
+})
+
+test('manual-only decision performs no provider write and waits', async () => {
+  const f = fixture()
+  const result = await executeReviewResolution(f.deps, { ...input, decision: { action: 'resolve_fields', fieldChoices: { email: 'hubspot' } } })
+  assert.equal(result.resolution.status, 'waiting_on_albi'); assert.deepEqual(mutations(f), [])
+})
+
+test('link saves only reviewed company-scoped mapping, with no dispatch', async () => {
+  const f = fixture(); f.row.reason = 'multiple_candidates'; f.row.conflict_type = 'contact_match'
+  const result = await executeReviewResolution(f.deps, { ...input, decision: { action: 'link_existing', candidateId: '20' } })
+  assert.equal(result.resolution.status, 'ready_to_recheck'); assert.deepEqual(mutations(f), [])
+  assert.deepEqual(f.mappings.contacts, [{ portal_id: '123', hubspot_id: '42', albi_contact_id: '20', match_method: 'reviewed', reviewed_by: actorId }])
+})
+
+test('narrow capability mapping wrappers bind existing saveMapping without broad writes', async () => {
+  const f = fixture(); const caps = createReviewResolutionCapabilities(f.deps.repository)
+  assert.equal(Object.isFrozen(caps), true); assert.equal('saveMapping' in caps, false)
+  await caps.saveContactMapping('tenant', { portal_id: '123', hubspot_id: '42', albi_contact_id: '20' })
+  assert.equal(f.mappings.contacts[0].albi_contact_id, '20')
+})
+
+for (const [category, code, outcome] of [
+  ['permission', 'operation_failed', 'authorization_rejected'], ['auth', 'operation_failed', 'authorization_rejected'],
+  ['validation', 'operation_failed', 'operation_failed'], ['transient', 'operation_failed', 'operation_failed'],
+  ['rate_limit', 'operation_failed', 'operation_failed'], ['transient', 'timeout', 'timeout'],
+  ['permanent', 'malformed_response', 'malformed_response'],
+]) test(`sanitized ${category}/${code} preserves intent after exactly one attempted mutation`, async () => {
+  const f = fixture(); f.writeError = Object.assign(new Error('secret token body'), { category, code })
+  const result = await executeReviewResolution(f.deps, input)
+  assert.equal(result.resolution.status, 'failed'); assert.equal(result.resolution.provider_outcome_code, outcome)
+  assert.equal(mutations(f).length, 1); assert.ok(f.intent)
+  assert.equal(JSON.stringify(f.events).includes('secret'), false)
+})
+
+function asCreate(f) {
+  f.contacts = []; f.row.reason = 'no_match'; f.row.conflict_type = 'contact_match'; f.row.candidate_snapshots = []
+  f.mappings.options = [{ mapping_kind: 'default_contact_type', source_key: 'default', albi_id: '12', confirmed: true }]
+  f.createdTarget = { id: '30', firstName: 'A', lastName: 'B', email: 'hs@example.com', phoneNumber: '555-111-2222', contactTypeIds: ['12'] }
+  return { ...input, decision: { action: 'create_albi' } }
+}
+
+test('ambiguous create is adopted only by unique production matcher plus exact create context', async () => {
+  const f = fixture(), createInput = asCreate(f); f.writeError = new ApiError('transient', { code: 'timeout' })
+  const result = await executeReviewResolution(f.deps, createInput)
+  assert.equal(result.resolution.status, 'ready_to_recheck')
+  assert.equal(f.mappings.contacts[0].albi_contact_id, '30')
+  assert.equal(f.events.at(-1).eventType, 'provider_reconciled'); assert.equal(mutations(f).length, 1)
+})
+
+for (const kind of ['absent', 'duplicate', 'wrong_type', 'missing_field', 'owned']) test(`ambiguous create ${kind} is never blindly repeated`, async () => {
+  const f = fixture(), createInput = asCreate(f)
+  if (kind === 'absent') f.createdTarget = null
+  if (kind === 'wrong_type') f.createdTarget.contactTypeIds = ['99']
+  if (kind === 'missing_field') delete f.createdTarget.lastName
+  if (kind === 'owned') f.mappings.contacts.push({ portal_id: '456', hubspot_id: '99', albi_contact_id: '30' })
+  if (kind === 'duplicate') f.afterCreate = () => f.contacts.push({ ...f.createdTarget, id: '31' })
+  f.writeError = new ApiError('transient', { code: 'timeout' })
+  const first = await executeReviewResolution(f.deps, createInput)
+  assert.equal(first.resolution.status, 'failed')
+  await executeReviewResolution(f.deps, createInput)
+  assert.equal(mutations(f).length, 1)
+  assert.equal(f.mappings.contacts.filter(row => row.hubspot_id === '42').length, 0)
+})
+
+test('newer sample during provider write supersedes durable intent', async () => {
+  const f = fixture(); f.afterWrite = () => { f.latest = 'new-sample' }
+  const result = await executeReviewResolution(f.deps, input)
+  assert.equal(result.resolution.status, 'superseded'); assert.equal(mutations(f).length, 1)
+})
+
+test('waiting claim never repeats provider work even if provider evidence drifts', async () => {
+  const f = fixture(); await executeReviewResolution(f.deps, input)
+  f.source.properties.email = 'changed@example.com'
+  const result = await reconcileReviewResolution(f.deps, { companyId: 'tenant', resolutionId, actorId })
+  assert.equal(result.resolution.status, 'ready_to_recheck'); assert.equal(mutations(f).length, 1)
+})
+
+test('production recheck completes current intent only when review evaluation clears', async () => {
+  const f = fixture(); await executeReviewResolution(f.deps, input)
+  const result = await recheckDryRunReview(f.deps, input)
+  assert.equal(result.review.status, 'cleared'); assert.equal(f.intent.status, 'completed')
+})
+
+test('production recheck retains manual waiting while values still differ', async () => {
+  const f = fixture(); await executeReviewResolution(f.deps, { ...input, decision: { action: 'resolve_fields', fieldChoices: { email: 'hubspot' } } })
+  await recheckDryRunReview(f.deps, input)
+  assert.equal(f.row.status, 'needs_review'); assert.equal(f.intent.status, 'waiting_on_albi')
+  assert.deepEqual(mutations(f), [])
+})
+
+test('provider read failure restores prior waiting phase with sanitized event', async () => {
+  const f = fixture(); await executeReviewResolution(f.deps, input)
+  f.deps.hubspotRead.getContacts = async () => { throw new ApiError('auth', { code: 'operation_failed' }) }
+  const result = await reconcileReviewResolution(f.deps, { companyId: 'tenant', resolutionId, actorId })
+  assert.equal(result.resolution.status, 'ready_to_recheck')
+  assert.equal(f.events.at(-1).eventType, 'failed'); assert.equal(mutations(f).length, 1)
+})
+
+test('missing selected current provider field is unknown and never clears HubSpot', async () => {
+  const f = fixture(); delete f.target.email
+  const result = await executeReviewResolution(f.deps, input)
+  assert.equal(result.resolution.status, 'failed'); assert.deepEqual(mutations(f), [])
+})
+
+test('raw overlength selected values cannot be truncated into provider writes', async () => {
+  const f = fixture(); f.target.email = 'x'.repeat(501); f.row.candidate_snapshots[0].email = 'x'.repeat(500)
+  f.row.proposed_changes.conflicts.email.current = 'x'.repeat(500)
+  const result = await executeReviewResolution(f.deps, input)
+  assert.equal(result.resolution.status, 'failed'); assert.deepEqual(mutations(f), [])
+})
+
+test('fresh missing provider evidence never becomes a default blank', async () => {
+  const f = fixture(); delete f.source.properties.email
+  const result = await executeReviewResolution(f.deps, input)
+  assert.equal(result.resolution.status, 'failed'); assert.deepEqual(mutations(f), [])
+})
+
+test('ownership in a different portal also requires explicit reviewed many-to-one approval', async () => {
+  const f = fixture(); f.row.reason = 'multiple_candidates'; f.row.conflict_type = 'contact_match'
+  f.mappings.contacts.push({ portal_id: '456', hubspot_id: '99', albi_contact_id: '20' })
+  const result = await executeReviewResolution(f.deps, { ...input, decision: { action: 'link_existing', candidateId: '20' } })
+  assert.equal(result.resolution.status, 'failed'); assert.equal(f.calls.includes('mapping'), false)
+})
+
+test('persisted intent is superseded before any provider reads when newer sample arrives', async () => {
+  const f = fixture(); await executeReviewResolution(f.deps, input); f.latest = 'new-sample'; f.calls.length = 0
+  const result = await reconcileReviewResolution(f.deps, { companyId: 'tenant', resolutionId, actorId })
+  assert.equal(result.resolution.status, 'superseded'); assert.equal(f.calls.includes('read-source'), false)
+})
+
+test('real provider client reads retain address2 and contact jobTitle evidence', async () => {
+  const { HubSpotClient } = await import('../../netlify/functions/_h2a/hubspotClient.js')
+  const { AlbiClient } = await import('../../netlify/functions/_h2a/albiClient.js')
+  const hubspot = new HubSpotClient({ token: 'token', fetch: async (_url, options) => {
+    assert.ok(JSON.parse(options.body).properties.includes('address2'))
+    return new Response(JSON.stringify({ status: 'COMPLETE', results: [{ id: '42', properties: { address2: 'Suite 1', jobtitle: 'Manager' } }] }))
+  } })
+  const albi = new AlbiClient({ apiKey: 'key', fetch: async url => new Response(JSON.stringify(
+    new URL(url).pathname.endsWith('/companies') ? { data: [{ companyId: '1319', name: 'Allied' }] }
+      : { data: [{ id: 20, jobTitle: 'Manager', address2: 'Suite 1' }] })) })
+  assert.equal((await hubspot.getContacts(['42']))[0].properties.address2, 'Suite 1')
+  assert.equal((await albi.listContacts({ cursor: '1', pageSize: 100 })).records[0].jobTitle, 'Manager')
+})
+
+test('recheck provider failure preserves waiting intent and adds fixed resolution audit', async () => {
+  const f = fixture(); await executeReviewResolution(f.deps, input)
+  f.deps.hubspotRead.getContacts = async () => { throw Object.assign(Error('secret'), { category: 'auth' }) }
+  await assert.rejects(recheckDryRunReview(f.deps, input), error => error.statusCode === 502)
+  assert.equal(f.intent.status, 'ready_to_recheck'); assert.equal(f.events.at(-1).eventType, 'failed')
+  assert.equal(f.events.at(-1).details.code, 'authorization_rejected'); assert.equal(JSON.stringify(f.events).includes('secret'), false)
+})
+
+test('persisted organization choice permits production recheck to evaluate selected direct association', async () => {
+  const f = fixture(); f.source.properties.email = f.target.email
+  f.associations = ['99', '98']; f.choice = { hubspot_company_id: '99' }
+  f.row.reason = 'multiple_associated_organizations'; f.row.conflict_type = 'association'
+  f.target.organizationId = '50'
+  f.organizations = [{ id: '50', name: 'Acme', phoneNumber: '5552223333' }]
+  const result = await recheckDryRunReview(f.deps, input)
+  assert.equal(result.review.status, 'cleared')
+})
+
+test('intent invalidated after provider reads never starts a write', async () => {
+  const f = fixture()
+  f.deps.albiRead.listContacts = async () => { f.row.updated_at = '2026-10-13T13:00:00Z'; return { records: [f.target], cursor: null } }
+  await assert.rejects(executeReviewResolution(f.deps, input), error => error.statusCode === 409)
+  assert.deepEqual(mutations(f), [])
+})
+
+test('expired lease prevents delayed worker mutation', async () => {
+  const f = fixture()
+  f.deps.repository.claimReviewResolution = async () => {
+    Object.assign(f.intent, { status: 'applying', execution_phase: 'applying', lease_owner: actorId, lease_expires_at: '2020-01-01T00:00:00Z' })
+    return { resolution: f.intent }
+  }
+  await assert.rejects(executeReviewResolution(f.deps, input), error => error.statusCode === 409)
+  assert.deepEqual(mutations(f), [])
+})
+
+test('crashed production recheck finalization is recovered from the persisted cleared review', async () => {
+  const f = fixture(); await executeReviewResolution(f.deps, input); f.crashFinish = true
+  await assert.rejects(recheckDryRunReview(f.deps, input)); assert.equal(f.row.status, 'cleared')
+  f.crashFinish = false; f.intent.lease_owner = null
+  const result = await reconcileReviewResolution(f.deps, { companyId: 'tenant', resolutionId, actorId })
+  assert.equal(result.resolution.status, 'completed'); assert.equal(mutations(f).length, 1)
+})
+
+test('create retry reuses persisted exact type context despite changed option mappings', async () => {
+  const f = fixture(), createInput = asCreate(f); f.writeError = new ApiError('transient', { code: 'timeout' })
+  f.createdTarget.contactTypeIds = ['99']
+  await executeReviewResolution(f.deps, createInput)
+  f.mappings.options[0].albi_id = '99'
+  const result = await executeReviewResolution(f.deps, createInput)
+  assert.equal(result.resolution.status, 'failed'); assert.equal(mutations(f).length, 1)
+  assert.equal(f.mappings.contacts.length, 0)
+})
+
+test('create mapping saved before finalization crash is reconciled without a second create', async () => {
+  const f = fixture(), createInput = asCreate(f); f.crashFinish = true
+  await assert.rejects(executeReviewResolution(f.deps, createInput))
+  assert.equal(f.mappings.contacts[0].albi_contact_id, '30')
+  f.crashFinish = false; f.intent.lease_owner = null
+  const result = await executeReviewResolution(f.deps, createInput)
+  assert.equal(result.resolution.status, 'ready_to_recheck')
+  assert.equal(mutations(f).length, 1); assert.equal(f.events.at(-1).eventType, 'provider_reconciled')
+})
+
+test('explicit organization addition uses one PUT, saves choice, and leaves Albi reassociation manual', async () => {
+  const f = fixture(); f.row.reason = 'multiple_associated_organizations'; f.row.conflict_type = 'association'
+  f.row.candidate_snapshots = []; f.associations = ['98']; f.target.organizationId = '51'
+  f.source.properties.email = f.target.email; f.row.source_snapshot.email = f.target.email
+  f.organizations = [{ id: '50', name: 'Acme', phoneNumber: '5552223333' }]
+  const result = await executeReviewResolution(f.deps, { ...input,
+    decision: { action: 'choose_organization', organizationSourceId: '99', addHubSpotAssociation: true } })
+  assert.deepEqual(mutations(f), [['PUT', '42', '99']]); assert.equal(result.resolution.status, 'waiting_on_albi')
+  assert.equal(f.choice.hubspot_company_id, '99')
+  assert.deepEqual(f.events.at(-1).details.manualTasks[0].fields, [{ field: 'organizationId', value: '50' }])
+})
+
+test('separate narrow reconciliation capability completes intents through unchanged diagnostic adapter', async () => {
+  const f = fixture(); await executeReviewResolution(f.deps, input)
+  const deps = { ...f.deps, repository: createReviewRepositoryCapabilities(f.deps.repository),
+    resolutionRepository: createReviewReconciliationCapabilities(f.deps.repository) }
+  assert.equal('saveMapping' in deps.resolutionRepository, false)
+  await recheckDryRunReview(deps, input)
+  assert.equal(f.intent.status, 'completed')
+})
+
+test('new target ownership after persisted link context still blocks unapproved mapping', async () => {
+  const f = fixture(); f.row.reason = 'multiple_candidates'; f.row.conflict_type = 'contact_match'
+  const linkInput = { ...input, decision: { action: 'link_existing', candidateId: '20' } }
+  f.deps.repository.saveMapping = async () => { throw Error('storage unavailable') }
+  await executeReviewResolution(f.deps, linkInput)
+  f.mappings.contacts.push({ portal_id: '456', hubspot_id: '99', albi_contact_id: '20' })
+  f.deps.repository.saveMapping = async () => { f.calls.push('mapping') }
+  const result = await executeReviewResolution(f.deps, linkInput)
+  assert.equal(result.resolution.status, 'failed'); assert.equal(f.calls.includes('mapping'), false)
+})
+
+test('older exact RPC replay survives recheck freshness even when a newer intent exists', async () => {
+  const f = fixture(); await executeReviewResolution(f.deps, input)
+  f.row.updated_at = '2026-10-13T13:00:00Z'
+  f.deps.repository.getCurrentReviewResolution = async () => ({ ...f.intent,
+    expected_review_updated_at: f.row.updated_at, decision: { action: 'resolve_fields', fieldChoices: { phoneNumber: 'albi' } } })
+  const result = await executeReviewResolution(f.deps, input)
+  assert.equal(result.resolution.status, 'ready_to_recheck'); assert.equal(mutations(f).length, 1)
+})
+
+test('HubSpot source drift during slow Albi reads is caught immediately before mutation', async () => {
+  const f = fixture()
+  f.deps.albiRead.listContacts = async () => { f.source.properties.email = 'changed@example.com'; return { records: [f.target], cursor: null } }
+  await assert.rejects(executeReviewResolution(f.deps, input), error => error.statusCode === 409)
+  assert.deepEqual(mutations(f), [])
+})
+
+test('capped history without context cannot prove that no provider mutation occurred', async () => {
+  const f = fixture(); f.deps.repository.listReviewResolutionEvents = async () => Array.from({ length: 100 }, () => ({ event_type: 'claimed', sanitized_details: {} }))
+  const result = await executeReviewResolution(f.deps, input)
+  assert.equal(result.resolution.status, 'failed'); assert.deepEqual(mutations(f), [])
+})
+
+test('intent retry before context persistence still rejects a changed raw provider comparison', async () => {
+  const f = fixture()
+  f.deps.getResolutionClients = async () => { throw new ApiError('transient', { code: 'timeout' }) }
+  await executeReviewResolution(f.deps, input)
+  delete f.deps.getResolutionClients
+  f.target.email = ' albi@example.com '
+  await assert.rejects(executeReviewResolution(f.deps, input), error => error.statusCode === 409)
+  assert.deepEqual(mutations(f), [])
+})

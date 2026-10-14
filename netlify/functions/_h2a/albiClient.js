@@ -49,7 +49,7 @@ function validatePayload(payload, required, operation) {
   }
   return payload
 }
-const CONTACT_FIELDS = ['firstName', 'lastName', 'email', 'phoneNumber', 'mobileNumber', 'organizationId', 'organizationName', 'parentOrganizationId', 'contactTypeIds', 'address1', 'address2', 'city', 'state', 'zipcode', 'country', 'referralSourceID', 'relationshipStatusID']
+const CONTACT_FIELDS = ['firstName', 'lastName', 'email', 'phoneNumber', 'mobileNumber', 'jobTitle', 'organizationId', 'organizationName', 'parentOrganizationId', 'contactTypeIds', 'address1', 'address2', 'city', 'state', 'zipcode', 'country', 'referralSourceID', 'relationshipStatusID']
 const ORGANIZATION_FIELDS = ['name', 'email', 'phoneNumber', 'organizationTypeIds', 'parentOrganizationId', 'address1', 'address2', 'city', 'state', 'zipcode', 'country', 'referralSourceID', 'relationshipStatusID']
 const ACTIVITY_FIELDS = ['contactId', 'organizationId', 'relationshipName', 'date', 'type', 'notes', 'source', 'sourceId']
 function normalizeRecord(value, fields, operation) {

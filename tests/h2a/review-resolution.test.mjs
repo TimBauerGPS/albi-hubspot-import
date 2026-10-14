@@ -126,6 +126,23 @@ const createInput = objectType => ({ review: { objectType, sourceId: '42', reaso
   optionMappings: [{ mapping_kind: objectType === 'contacts' ? 'default_contact_type' : 'default_organization_type',
     source_key: 'default', albi_id: '12', confirmed: true }] })
 
+test('durable internal execution context preserves exact allowlisted proof and stays out of public events', () => {
+  const original = plan(createInput('contacts'))
+  assert.equal(typeof resolution.safeResolutionExecutionContext, 'function')
+  assert.deepEqual(resolution.safeResolutionExecutionContext(original), original)
+  const details = resolution.safeResolutionInternalEventDetails({ executionContext: original, token: 'secret' })
+  assert.deepEqual(details, { executionContext: original })
+  assert.deepEqual(projectReviewResolutionEvent({ event_type: 'claimed', sanitized_details: details }).details, {})
+  for (const change of [
+    value => { value.providerOperation.payload.apiKey = 'secret' },
+    value => { value.providerOperation.payload.firstName = 'x'.repeat(501) },
+    value => { value.verification.create.typeId = '99' },
+    value => { value.verification.create.payload.organizationId = '999' },
+    value => { value.providerOperation.operation = 'updateContact' },
+    value => { value.rawResponse = 'secret' },
+  ]) { const value = structuredClone(original); change(value); assert.equal(resolution.safeResolutionExecutionContext(value), null) }
+})
+
 test('create plans rebuild supported payloads from current HubSpot and confirmed type mappings', () => {
   const contact = plan(createInput('contacts'))
   assert.deepEqual(contact.providerOperation, { provider: 'albi', operation: 'createContact', payload: {

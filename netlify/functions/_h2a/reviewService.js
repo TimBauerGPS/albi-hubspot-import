@@ -107,7 +107,7 @@ function exactSource(records, sourceId) {
   if (!Array.isArray(records)) malformed('review')
   if (records.length === 0) return null
   if (records.length !== 1 || !isRecord(records[0]) || records[0].id !== sourceId || !isRecord(records[0].properties)) malformed('review')
-  const fields = ['firstname', 'lastname', 'email', 'phone', 'mobilephone', 'address', 'city', 'state', 'zip', 'country', 'jobtitle', 'name', 'domain']
+  const fields = ['firstname', 'lastname', 'email', 'phone', 'mobilephone', 'address', 'address2', 'city', 'state', 'zip', 'country', 'jobtitle', 'name', 'domain']
   if (fields.some(key => records[0].properties[key] != null && typeof records[0].properties[key] !== 'string')) malformed('review')
   return records[0]
 }
@@ -163,9 +163,14 @@ export async function recheckDryRunReview(deps, { companyId, reviewId, actorId, 
     source = exactSource(await read(deps, () => row.object_type === 'contacts' ? hubspot.getContacts([row.source_id]) : hubspot.getCompanies([row.source_id]), deadline), row.source_id)
     if (!source) evaluation = { outcome: 'source_missing', evidence: [], candidates: [], proposedChanges: {} }
     else {
-      const associatedCompanyIds = row.object_type === 'contacts' ? associations(await read(deps, () => hubspot.getAssociations({
+      let associatedCompanyIds = row.object_type === 'contacts' ? associations(await read(deps, () => hubspot.getAssociations({
         objectType: 'contacts', objectIds: [row.source_id], toObjectTypes: ['companies'],
       }), deadline), row.source_id) : []
+      const resolutionRepository = deps.resolutionRepository ?? repository
+      if (row.object_type === 'contacts' && typeof resolutionRepository.getContactOrganizationChoice === 'function') {
+        const choice = await bounded(deps, () => resolutionRepository.getContactOrganizationChoice(companyId, row.portal_id, row.source_id), deadline)
+        if (choice && associatedCompanyIds.includes(choice.hubspot_company_id)) associatedCompanyIds = [choice.hubspot_company_id]
+      }
       const candidates = await listAll(deps, row.object_type === 'contacts' ? args => albi.listContacts(args) : args => albi.listOrganizations(args), deadline)
       const mappings = await bounded(deps, () => repository.getMappings(companyId), deadline)
       if (!mappings || !['contacts', 'organizations', 'options'].every(key => Array.isArray(mappings[key]))) malformed('review')
@@ -200,6 +205,10 @@ export async function recheckDryRunReview(deps, { companyId, reviewId, actorId, 
     try { await repository.appendDryRunReviewEvent(companyId, sample.id, reviewId,
       { eventType: 'recheck_failed', actorId, details: fixedFailure(error), now: iso(deps) }) }
     catch { /* Failed auditing cannot make the unchanged row safe. */ }
+    try {
+      const { recordResolutionRecheckFailure } = await import('./reviewResolutionService.js')
+      await recordResolutionRecheckFailure(deps, { companyId, reviewId, actorId }, error)
+    } catch { /* An unchanged durable intent remains available for reconciliation. */ }
     fail(502, 'Unable to recheck this sample review.')
   } finally { clearTimeout(abortTimer) }
   await requireCurrentSample(repository, companyId, sample, config.initial_start_locked_at)
@@ -221,5 +230,7 @@ export async function recheckDryRunReview(deps, { companyId, reviewId, actorId, 
   if (result?.error) fail(result.error === 'not_found' ? 404 : ['stale', 'superseded'].includes(result.error) ? 409 : 502,
     MESSAGES[result.error] ?? 'Unable to recheck this sample review.')
   if (!isRecord(result?.review)) fail(502, 'Unable to recheck this sample review.')
+  const { finalizeRecheckedResolution } = await import('./reviewResolutionService.js')
+  await finalizeRecheckedResolution(deps, { companyId, reviewId, actorId }, result.review)
   return { review: result.review, sample, config }
 }

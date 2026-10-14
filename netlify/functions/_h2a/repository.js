@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { DRY_RUN_PROPOSED_ACTION_TOTALS, DRY_RUN_REVIEW_TOTAL_FIELDS, SAMPLE_LIMIT_PER_TYPE } from './constants.js'
 import { assertReviewClassification, projectReviewEvent, REVIEW_REASONS, safeReviewCandidates,
   safeReviewChanges, safeReviewEvidence, safeReviewSnapshot } from './review.js'
-import { normalizeResolutionDecision, hashResolutionDecision, safeResolutionEventDetails, isResolutionProviderId,
+import { normalizeResolutionDecision, hashResolutionDecision, safeResolutionEventDetails, safeResolutionInternalEventDetails, isResolutionProviderId,
   RESOLUTION_STATUSES, RESOLUTION_EVENT_TYPES, RESOLUTION_OUTCOME_CODES, RESOLUTION_EVENT_LIMIT } from './reviewResolution.js'
 
 const BASE_RUN_TOTAL_FIELDS = ['created', 'updated', 'linked', 'delivered', 'reconciled', 'skipped', 'conflict', 'failed', 'dry_run']
@@ -56,7 +56,7 @@ async function resolutionRpc(supabase, name, args, key = 'resolution', created =
 
 function safeStoredResolutionEvent(row) {
   const event = resolutionFields(row, RESOLUTION_EVENT_COLUMNS)
-  event.sanitized_details = safeResolutionEventDetails(event.sanitized_details)
+  event.sanitized_details = safeResolutionInternalEventDetails(event.sanitized_details)
   return event
 }
 
@@ -156,7 +156,7 @@ function reviewResolutionRepository(supabase) {
       requireReviewTimestamp(now)
       const row = await resolutionStorage(() => supabase.from('h2a_dry_run_review_resolution_events')
         .insert({ company_id: companyId, resolution_id: resolutionId, actor_id: actorId, event_type: eventType,
-          sanitized_details: safeResolutionEventDetails(details), created_at: now })
+          sanitized_details: safeResolutionInternalEventDetails(details), created_at: now })
         .eq('company_id', companyId).select(RESOLUTION_EVENT_COLUMNS).single())
       return safeStoredResolutionEvent(row)
     },

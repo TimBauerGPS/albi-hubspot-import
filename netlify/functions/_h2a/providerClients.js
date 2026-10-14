@@ -22,3 +22,15 @@ export function readOnlyH2ACapabilities({ hubspot, albi }) {
     albiRead: Object.freeze({ listContacts: albi.listContacts.bind(albi), listOrganizations: albi.listOrganizations.bind(albi) }),
   }
 }
+
+// Bind only the writes allowed by record resolution. Never enumerate providers.
+export function reviewResolutionProviderCapabilities(clients) {
+  const reads = readOnlyH2ACapabilities(clients)
+  return Object.freeze({ ...reads,
+    hubspotWrite: Object.freeze({ updateContact: clients.hubspot.updateContact.bind(clients.hubspot),
+      updateCompany: clients.hubspot.updateCompany.bind(clients.hubspot),
+      addContactCompanyAssociation: clients.hubspot.addContactCompanyAssociation.bind(clients.hubspot) }),
+    albiWrite: Object.freeze({ createContact: clients.albi.createContact.bind(clients.albi),
+      createOrganization: clients.albi.createOrganization.bind(clients.albi) }),
+  })
+}

@@ -41,8 +41,8 @@ const PROPERTIES = {
   emails: ['hs_timestamp', 'hs_email_subject', 'hs_email_text', 'hs_email_direction', 'hs_email_status', 'hubspot_owner_id'],
   communications: ['hs_timestamp', 'hs_communication_channel_type', 'hs_communication_logged_from', 'hs_communication_body', 'hubspot_owner_id'],
   notes: ['hs_timestamp', 'hs_note_body', 'hubspot_owner_id'],
-  contacts: ['firstname', 'lastname', 'email', 'phone', 'mobilephone', 'address', 'city', 'state', 'zip', 'country', 'jobtitle'],
-  companies: ['name', 'domain', 'phone', 'address', 'city', 'state', 'zip', 'country'],
+  contacts: ['firstname', 'lastname', 'email', 'phone', 'mobilephone', 'address', 'address2', 'city', 'state', 'zip', 'country', 'jobtitle'],
+  companies: ['name', 'domain', 'phone', 'address', 'address2', 'city', 'state', 'zip', 'country'],
 }
 const timestamp = (value, operation) => {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d\d:\d\d)$/.test(value) || !Number.isFinite(Date.parse(value))) invalid(operation)

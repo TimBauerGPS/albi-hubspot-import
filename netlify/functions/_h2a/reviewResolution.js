@@ -227,7 +227,7 @@ export function buildReviewResolutionPlan(input) {
     if (decision.candidateId !== albi.id) invalidPlan()
     const mappings = mappingRows(input, portalId)
     if (mappings.some(row => mappingSource(row) === sourceId && mappingTarget(row, type) !== albi.id) ||
-      mappings.some(row => mappingSource(row) !== sourceId && mappingTarget(row, type) === albi.id) && !decision.approveManyToOne) invalidPlan()
+      list(input.mappings).some(row => mappingSource(row) !== sourceId && mappingTarget(row, type) === albi.id) && !decision.approveManyToOne) invalidPlan()
     result.mapping = { objectType: type, sourceId, targetId: albi.id, approveManyToOne: decision.approveManyToOne === true }
   } else if (decision.action === 'create_albi') {
     if (mappingRows(input, portalId).some(row => mappingSource(row) === sourceId)) invalidPlan()
@@ -297,6 +297,77 @@ export function safeResolutionEventDetails(value) {
   if (H2A_REVIEW_ERROR_CATEGORIES.includes(input.category)) details.category = input.category
   if (RESOLUTION_OUTCOME_CODES.includes(input.outcome)) details.outcome = input.outcome
   if (Array.isArray(input.manualTasks)) details.manualTasks = safeManualTasks(input.manualTasks)
+  return details
+}
+
+// Executor-only proof. Reject rather than truncate: every stored value must be
+// exactly the one verified before the provider attempt. Public events omit it.
+export function safeResolutionExecutionContext(value) {
+  const shape = (item, keys) => object(item) && Object.keys(item).length === keys.length &&
+    keys.every(key => Object.hasOwn(item, key) && Object.hasOwn(Object.getOwnPropertyDescriptor(item, key), 'value'))
+  const text = item => typeof item === 'string' && item.length <= 500
+  const properties = (item, type) => object(item) && Object.keys(item).length > 0 &&
+    Object.entries(item).every(([key, value]) => Object.values(FIELD_METADATA[type]).some(field => field.hubspot === key) && text(value))
+  const payload = (item, type) => {
+    const fields = type === 'contacts' ? ['firstName', 'lastName', 'email', 'phoneNumber', 'jobTitle', 'organizationId'] : ['name', 'phoneNumber']
+    const ids = type === 'contacts' ? 'contactTypeIds' : 'organizationTypeIds'
+    const allowed = [...fields, 'address1', 'address2', 'city', 'state', 'zipCode', 'country', ids]
+    return object(item) && Object.keys(item).every(key => allowed.includes(key)) &&
+      Object.entries(item).every(([key, value]) => key === ids ? Array.isArray(value) && value.length === 1 && providerId(value[0])
+        : key === 'organizationId' ? providerId(value) : text(value)) && Object.hasOwn(item, ids)
+  }
+  try {
+    if (!shape(value, ['decisionHash', 'action', 'providerOperation', 'manualTasks', 'mapping', 'organizationChoice', 'verification']) ||
+      typeof value.decisionHash !== 'string' || !/^[a-f0-9]{64}$/.test(value.decisionHash) ||
+      !Object.hasOwn(ACTION_FIELDS, value.action) || !Array.isArray(value.manualTasks) || value.manualTasks.length > 10 ||
+      !shape(value.verification, ['successStatus', 'properties', 'association', 'create'])) return null
+    const manualTasks = value.manualTasks.map(task => {
+      if (!object(task) || Object.keys(task).some(key => !['provider', 'objectType', 'targetId', 'fields', 'url', 'organizationUrl'].includes(key)) ||
+        task.provider !== 'albi' || !['contacts', 'companies'].includes(task.objectType) || !providerId(task.targetId) ||
+        !Array.isArray(task.fields) || !task.fields.length || task.fields.length > 20 ||
+        task.fields.some(field => !shape(field, ['field', 'value']) || !text(field.value) ||
+          !(task.objectType === 'contacts' ? [...CONTACT_FIELDS, 'organizationId'] : ORGANIZATION_FIELDS).includes(field.field) ||
+          field.field === 'organizationId' && !providerId(field.value))) throw new TypeError()
+      return { provider: 'albi', objectType: task.objectType, targetId: task.targetId, fields: task.fields.map(field => ({ ...field })) }
+    })
+    const op = value.providerOperation, verification = value.verification
+    if (verification.successStatus !== (manualTasks.length ? 'waiting_on_albi' : 'ready_to_recheck')) return null
+    let operation = null
+    if (op !== null) {
+      if (op?.provider === 'hubspot' && ['updateContact', 'updateCompany'].includes(op.operation)) {
+        if (!shape(op, ['provider', 'operation', 'id', 'properties']) || !providerId(op.id) ||
+          !properties(op.properties, op.operation === 'updateContact' ? 'contacts' : 'companies') ||
+          canonical(verification.properties) !== canonical(op.properties) || verification.association !== null || verification.create !== null) return null
+      } else if (op?.provider === 'hubspot' && op.operation === 'addContactCompanyAssociation') {
+        if (!shape(op, ['provider', 'operation', 'contactId', 'companyId']) || !providerId(op.contactId) || !providerId(op.companyId) ||
+          !shape(verification.association, ['contactId', 'companyId']) || verification.association.contactId !== op.contactId ||
+          verification.association.companyId !== op.companyId || verification.properties !== null || verification.create !== null) return null
+      } else if (op?.provider === 'albi' && ['createContact', 'createOrganization'].includes(op.operation)) {
+        const type = op.operation === 'createContact' ? 'contacts' : 'companies', create = verification.create
+        if (!shape(op, ['provider', 'operation', 'payload']) || !payload(op.payload, type) ||
+          !shape(create, ['objectType', 'sourceId', 'portalId', 'typeId', 'organizationId', 'payload']) ||
+          create.objectType !== type || !providerId(create.sourceId) || create.portalId !== null && !providerId(create.portalId) ||
+          !providerId(create.typeId) || create.organizationId !== null && !providerId(create.organizationId) ||
+          create.typeId !== op.payload[type === 'contacts' ? 'contactTypeIds' : 'organizationTypeIds'][0] ||
+          create.organizationId !== (op.payload.organizationId ?? null) || canonical(create.payload) !== canonical(op.payload) ||
+          verification.properties !== null || verification.association !== null) return null
+      } else return null
+      operation = structuredClone(op)
+    } else if (verification.properties !== null || verification.association !== null || verification.create !== null) return null
+    if (value.mapping !== null && (!shape(value.mapping, ['objectType', 'sourceId', 'targetId', 'approveManyToOne']) ||
+      !['contacts', 'companies'].includes(value.mapping.objectType) || !providerId(value.mapping.sourceId) ||
+      value.mapping.targetId !== null && !providerId(value.mapping.targetId) || typeof value.mapping.approveManyToOne !== 'boolean')) return null
+    if (value.organizationChoice !== null && (!shape(value.organizationChoice, ['contactId', 'organizationSourceId']) ||
+      !providerId(value.organizationChoice.contactId) || !providerId(value.organizationChoice.organizationSourceId))) return null
+    return { decisionHash: value.decisionHash, action: value.action, providerOperation: operation, manualTasks,
+      mapping: structuredClone(value.mapping), organizationChoice: structuredClone(value.organizationChoice), verification: structuredClone(verification) }
+  } catch { return null }
+}
+
+export function safeResolutionInternalEventDetails(value) {
+  const details = safeResolutionEventDetails(value)
+  const context = safeResolutionExecutionContext(record(value).executionContext)
+  if (context) details.executionContext = context
   return details
 }
 
