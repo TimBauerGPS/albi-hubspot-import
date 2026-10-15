@@ -495,8 +495,8 @@ test('conflict resolution is an atomic tenant-scoped CAS that appends audit, map
   assert.ok(organizationTargetLock > sourceIdentityLock, 'organization target lock must follow the source lock')
   assert.match(body, /hubspot_id = v_conflict\.source_id and m\.albi_contact_id <> v_target_id/)
   assert.match(body, /hubspot_id = v_conflict\.source_id and m\.albi_organization_id <> v_target_id/)
-  assert.match(body, /update public\.h2a_contact_mappings[\s\S]*?set match_method = 'reviewed', approved_many_to_one = v_many_to_one, reviewed_by = p_actor_id,\s*reviewed_at = p_now, updated_at = p_now[\s\S]*?and albi_contact_id = v_target_id/)
-  assert.match(body, /update public\.h2a_organization_mappings[\s\S]*?set match_method = 'reviewed', approved_many_to_one = v_many_to_one, reviewed_by = p_actor_id,\s*reviewed_at = p_now, updated_at = p_now[\s\S]*?and albi_organization_id = v_target_id/)
+  assert.match(body, /update public\.h2a_contact_mappings[\s\S]*?set match_method = 'reviewed', approved_many_to_one = approved_many_to_one or v_many_to_one, reviewed_by = p_actor_id,\s*reviewed_at = p_now, updated_at = p_now[\s\S]*?and albi_contact_id = v_target_id/)
+  assert.match(body, /update public\.h2a_organization_mappings[\s\S]*?set match_method = 'reviewed', approved_many_to_one = approved_many_to_one or v_many_to_one, reviewed_by = p_actor_id,\s*reviewed_at = p_now, updated_at = p_now[\s\S]*?and albi_organization_id = v_target_id/)
   assert.doesNotMatch(body, /on conflict \(company_id, portal_id, hubspot_id\) do update set albi_(?:contact|organization)_id/)
   assert.match(body, /insert into public\.h2a_contact_mappings/)
   assert.match(body, /insert into public\.h2a_organization_mappings/)
@@ -554,6 +554,24 @@ test('mapping ownership is tenant-wide, source-then-target serialized, and requi
   for (const name of ['h2a_save_mapping', 'h2a_resolve_conflict']) {
     const normalize = value => value.replace(/\s+/g, ' ').trim()
     assert.equal(normalize(functionBody(readSchema(), name)), normalize(functionBody(migration, name)))
+  }
+})
+
+test('reviewed sharing upgrades the pre-existing owner and same-target approval without downgrading replay', () => {
+  for (const sql of [readSchema(), readFileSync(mappingOwnershipMigrationUrl, 'utf8').replace(/--[^\n]*/g, '').toLowerCase()]) {
+    const save = functionBody(sql, 'h2a_save_mapping'), resolve = functionBody(sql, 'h2a_resolve_conflict')
+    for (const [table, row, target] of [
+      ['h2a_contact_mappings', 'v_contact', 'albi_contact_id'],
+      ['h2a_organization_mappings', 'v_organization', 'albi_organization_id'],
+    ]) {
+      assert.match(save, new RegExp(`if p_approve_many_to_one and not ${row}\\.approved_many_to_one then[\\s\\S]*?update public\\.${table} set match_method = 'reviewed', approved_many_to_one = true[\\s\\S]*?returning \\* into ${row}`))
+      assert.match(save, new RegExp(`if v_peer_count = 1 and v_unapproved_count = 1 then[\\s\\S]*?update public\\.${table} set match_method = 'reviewed', approved_many_to_one = true[\\s\\S]*?${target} = p_target_id`))
+      assert.match(resolve, new RegExp(`if v_peer_count = 1 and v_unapproved_count = 1 then[\\s\\S]*?update public\\.${table} set match_method = 'reviewed', approved_many_to_one = true[\\s\\S]*?${target} = v_target_id`))
+    }
+    assert.match(save, /if v_unapproved_count > 0 and v_peer_count <> 1 then[\s\S]*?'many_to_one_required'/)
+    assert.match(resolve, /if v_unapproved_count > 0 and v_peer_count <> 1 then[\s\S]*?'many_to_one_required'/)
+    assert.match(save, /if p_approve_many_to_one and not v_contact\.approved_many_to_one then/)
+    assert.match(save, /if p_approve_many_to_one and not v_organization\.approved_many_to_one then/)
   }
 })
 

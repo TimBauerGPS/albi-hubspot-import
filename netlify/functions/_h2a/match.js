@@ -194,6 +194,22 @@ function ownershipConflict(sourceId, targetId, mappings = [], portalId = null) {
   })
 }
 
+function legacyApprovedOwner(mapping, owners, targetId, sourceId, portalId) {
+  const tenant = mapping.company_id
+  if (!tenant || !sourceId || !portalId || mapping.approved_many_to_one === true) return false
+  if (owners.some(owner => mappedTargetId(owner) === targetId && owner.company_id !== tenant)) return false
+  const group = owners.filter(owner => owner.company_id === tenant && mappedTargetId(owner) === targetId)
+  if (group.length < 2 || group.some(owner => !Number.isFinite(Date.parse(owner.created_at)))) return false
+  const approved = group.filter(owner => owner.approved_many_to_one === true && owner.match_method === 'reviewed')
+  if (!approved.length || approved.some(owner => !Number.isFinite(Date.parse(owner.reviewed_at)))) return false
+  const firstApproval = Math.min(...approved.map(owner => Date.parse(owner.reviewed_at)))
+  // Only the unique owner that already existed before the first reviewed
+  // share may inherit legacy group approval. Later unreviewed owners never do.
+  const predecessors = group.filter(owner => owner.approved_many_to_one !== true && Date.parse(owner.created_at) < firstApproval)
+  return predecessors.length === 1 && mappedSourceId(predecessors[0]) === sourceId &&
+    (predecessors[0].portal_id ?? predecessors[0].portalId) === portalId
+}
+
 function resolveMapping(input, entityType, source, candidates) {
   const mapping = input.existingMapping ?? input.mapping
   if (!mapping) return null
@@ -205,9 +221,11 @@ function resolveMapping(input, entityType, source, candidates) {
   const approvedSharedTarget = mapping.approved_many_to_one === true && mapping.match_method === 'reviewed' &&
     (input.companyId == null || mapping.company_id === input.companyId) &&
     owners.every(owner => !mapping.company_id || !owner.company_id || owner.company_id === mapping.company_id)
+  const grandfatheredOwner = (input.companyId == null || mapping.company_id === input.companyId) &&
+    legacyApprovedOwner(mapping, owners, targetId, sourceId, String(input.portalId ?? mappingPortalId ?? ''))
   if (!targetId || sourceId === null || mappingSourceId === null || mappingSourceId !== sourceId ||
       input.portalId != null && mappingPortalId !== undefined && String(mappingPortalId) !== String(input.portalId) ||
-      ownershipConflict(sourceId, targetId, owners, input.portalId ?? null) && !approvedSharedTarget) {
+      ownershipConflict(sourceId, targetId, owners, input.portalId ?? null) && !approvedSharedTarget && !grandfatheredOwner) {
     return result('conflict', 'target_already_mapped', targetId)
   }
   const candidate = candidates.find((item) => idOf(item) === targetId)

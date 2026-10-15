@@ -31,6 +31,8 @@ create or replace function public.h2a_save_mapping(
 declare
   v_contact public.h2a_contact_mappings%rowtype;
   v_organization public.h2a_organization_mappings%rowtype;
+  v_peer_count bigint;
+  v_unapproved_count bigint;
 begin
   if p_company_id is null or nullif(pg_catalog.btrim(p_portal_id), '') is null
     or p_object_type is null or p_object_type not in ('contacts', 'companies')
@@ -55,13 +57,33 @@ begin
       if v_contact.albi_contact_id <> p_target_id then
         return pg_catalog.jsonb_build_object('error', 'mapping_conflict');
       end if;
-      -- A same-target retry is a read-only replay; do not downgrade reviewed metadata.
+      -- Only a new explicit reviewed approval upgrades a same-target row.
+      if p_approve_many_to_one and not v_contact.approved_many_to_one then
+        update public.h2a_contact_mappings set match_method = 'reviewed', approved_many_to_one = true,
+          reviewed_by = p_reviewed_by, reviewed_at = p_now, updated_at = p_now
+          where company_id = p_company_id and portal_id = p_portal_id and hubspot_id = p_source_id
+            and albi_contact_id = p_target_id returning * into v_contact;
+      end if;
       return pg_catalog.to_jsonb(v_contact);
     end if;
-    if exists (select 1 from public.h2a_contact_mappings m where m.company_id = p_company_id
+    select count(*), count(*) filter (where not m.approved_many_to_one)
+      into v_peer_count, v_unapproved_count from public.h2a_contact_mappings m where m.company_id = p_company_id
       and m.albi_contact_id = p_target_id
-      and (m.portal_id <> p_portal_id or m.hubspot_id <> p_source_id))
-      and not p_approve_many_to_one then return pg_catalog.jsonb_build_object('error', 'many_to_one_required'); end if;
+      and (m.portal_id <> p_portal_id or m.hubspot_id <> p_source_id);
+    if v_peer_count > 0 and not p_approve_many_to_one then
+      return pg_catalog.jsonb_build_object('error', 'many_to_one_required');
+    end if;
+    -- A reviewed share includes its sole original owner. Never silently approve
+    -- an already-ambiguous group with multiple unreviewed source identities.
+    if v_unapproved_count > 0 and v_peer_count <> 1 then
+      return pg_catalog.jsonb_build_object('error', 'many_to_one_required');
+    end if;
+    if v_peer_count = 1 and v_unapproved_count = 1 then
+      update public.h2a_contact_mappings set match_method = 'reviewed', approved_many_to_one = true,
+        reviewed_by = p_reviewed_by, reviewed_at = p_now, updated_at = p_now
+        where company_id = p_company_id and albi_contact_id = p_target_id
+          and (portal_id <> p_portal_id or hubspot_id <> p_source_id) and not approved_many_to_one;
+    end if;
     insert into public.h2a_contact_mappings (company_id, portal_id, hubspot_id, albi_contact_id,
       match_method, approved_many_to_one, reviewed_by, reviewed_at, updated_at)
     values (p_company_id, p_portal_id, p_source_id, p_target_id, p_match_method, p_approve_many_to_one, p_reviewed_by,
@@ -83,12 +105,30 @@ begin
     if v_organization.albi_organization_id <> p_target_id then
       return pg_catalog.jsonb_build_object('error', 'mapping_conflict');
     end if;
+    if p_approve_many_to_one and not v_organization.approved_many_to_one then
+      update public.h2a_organization_mappings set match_method = 'reviewed', approved_many_to_one = true,
+        reviewed_by = p_reviewed_by, reviewed_at = p_now, updated_at = p_now
+        where company_id = p_company_id and portal_id = p_portal_id and hubspot_id = p_source_id
+          and albi_organization_id = p_target_id returning * into v_organization;
+    end if;
     return pg_catalog.to_jsonb(v_organization);
   end if;
-  if exists (select 1 from public.h2a_organization_mappings m where m.company_id = p_company_id
+  select count(*), count(*) filter (where not m.approved_many_to_one)
+    into v_peer_count, v_unapproved_count from public.h2a_organization_mappings m where m.company_id = p_company_id
     and m.albi_organization_id = p_target_id
-    and (m.portal_id <> p_portal_id or m.hubspot_id <> p_source_id))
-    and not p_approve_many_to_one then return pg_catalog.jsonb_build_object('error', 'many_to_one_required'); end if;
+    and (m.portal_id <> p_portal_id or m.hubspot_id <> p_source_id);
+  if v_peer_count > 0 and not p_approve_many_to_one then
+    return pg_catalog.jsonb_build_object('error', 'many_to_one_required');
+  end if;
+  if v_unapproved_count > 0 and v_peer_count <> 1 then
+    return pg_catalog.jsonb_build_object('error', 'many_to_one_required');
+  end if;
+  if v_peer_count = 1 and v_unapproved_count = 1 then
+    update public.h2a_organization_mappings set match_method = 'reviewed', approved_many_to_one = true,
+      reviewed_by = p_reviewed_by, reviewed_at = p_now, updated_at = p_now
+      where company_id = p_company_id and albi_organization_id = p_target_id
+        and (portal_id <> p_portal_id or hubspot_id <> p_source_id) and not approved_many_to_one;
+  end if;
   insert into public.h2a_organization_mappings (company_id, portal_id, hubspot_id, albi_organization_id,
     match_method, approved_many_to_one, reviewed_by, reviewed_at, updated_at)
   values (p_company_id, p_portal_id, p_source_id, p_target_id, p_match_method, p_approve_many_to_one, p_reviewed_by,
@@ -122,6 +162,8 @@ declare
   v_expected_db_action text;
   v_target_id text;
   v_many_to_one boolean;
+  v_peer_count bigint;
+  v_unapproved_count bigint;
   v_field text;
 begin
   v_expected_db_action := case p_api_action
@@ -198,12 +240,24 @@ begin
       pg_catalog.jsonb_build_array(p_company_id::text, 'target', v_conflict.object_type, v_target_id)::text, 0));
     if v_conflict.object_type = 'contacts' then
       if exists (select 1 from public.h2a_contact_mappings m where m.company_id = p_company_id
-        and m.albi_contact_id = v_target_id and (m.portal_id <> v_conflict.portal_id or m.hubspot_id <> v_conflict.source_id))
-        and not v_many_to_one then return pg_catalog.jsonb_build_object('error', 'many_to_one_required'); end if;
-      if exists (select 1 from public.h2a_contact_mappings m where m.company_id = p_company_id
         and m.portal_id = v_conflict.portal_id and m.hubspot_id = v_conflict.source_id and m.albi_contact_id <> v_target_id)
         then return pg_catalog.jsonb_build_object('error', 'mapping_conflict'); end if;
-      update public.h2a_contact_mappings set match_method = 'reviewed', approved_many_to_one = v_many_to_one, reviewed_by = p_actor_id,
+      select count(*), count(*) filter (where not m.approved_many_to_one)
+        into v_peer_count, v_unapproved_count from public.h2a_contact_mappings m where m.company_id = p_company_id
+          and m.albi_contact_id = v_target_id and (m.portal_id <> v_conflict.portal_id or m.hubspot_id <> v_conflict.source_id);
+      if v_peer_count > 0 and not v_many_to_one then
+        return pg_catalog.jsonb_build_object('error', 'many_to_one_required');
+      end if;
+      if v_unapproved_count > 0 and v_peer_count <> 1 then
+        return pg_catalog.jsonb_build_object('error', 'many_to_one_required');
+      end if;
+      if v_peer_count = 1 and v_unapproved_count = 1 then
+        update public.h2a_contact_mappings set match_method = 'reviewed', approved_many_to_one = true,
+          reviewed_by = p_actor_id, reviewed_at = p_now, updated_at = p_now
+          where company_id = p_company_id and albi_contact_id = v_target_id
+            and (portal_id <> v_conflict.portal_id or hubspot_id <> v_conflict.source_id) and not approved_many_to_one;
+      end if;
+      update public.h2a_contact_mappings set match_method = 'reviewed', approved_many_to_one = approved_many_to_one or v_many_to_one, reviewed_by = p_actor_id,
         reviewed_at = p_now, updated_at = p_now
         where company_id = p_company_id and portal_id = v_conflict.portal_id
           and hubspot_id = v_conflict.source_id and albi_contact_id = v_target_id;
@@ -215,12 +269,24 @@ begin
       end if;
     else
       if exists (select 1 from public.h2a_organization_mappings m where m.company_id = p_company_id
-        and m.albi_organization_id = v_target_id and (m.portal_id <> v_conflict.portal_id or m.hubspot_id <> v_conflict.source_id))
-        and not v_many_to_one then return pg_catalog.jsonb_build_object('error', 'many_to_one_required'); end if;
-      if exists (select 1 from public.h2a_organization_mappings m where m.company_id = p_company_id
         and m.portal_id = v_conflict.portal_id and m.hubspot_id = v_conflict.source_id and m.albi_organization_id <> v_target_id)
         then return pg_catalog.jsonb_build_object('error', 'mapping_conflict'); end if;
-      update public.h2a_organization_mappings set match_method = 'reviewed', approved_many_to_one = v_many_to_one, reviewed_by = p_actor_id,
+      select count(*), count(*) filter (where not m.approved_many_to_one)
+        into v_peer_count, v_unapproved_count from public.h2a_organization_mappings m where m.company_id = p_company_id
+          and m.albi_organization_id = v_target_id and (m.portal_id <> v_conflict.portal_id or m.hubspot_id <> v_conflict.source_id);
+      if v_peer_count > 0 and not v_many_to_one then
+        return pg_catalog.jsonb_build_object('error', 'many_to_one_required');
+      end if;
+      if v_unapproved_count > 0 and v_peer_count <> 1 then
+        return pg_catalog.jsonb_build_object('error', 'many_to_one_required');
+      end if;
+      if v_peer_count = 1 and v_unapproved_count = 1 then
+        update public.h2a_organization_mappings set match_method = 'reviewed', approved_many_to_one = true,
+          reviewed_by = p_actor_id, reviewed_at = p_now, updated_at = p_now
+          where company_id = p_company_id and albi_organization_id = v_target_id
+            and (portal_id <> v_conflict.portal_id or hubspot_id <> v_conflict.source_id) and not approved_many_to_one;
+      end if;
+      update public.h2a_organization_mappings set match_method = 'reviewed', approved_many_to_one = approved_many_to_one or v_many_to_one, reviewed_by = p_actor_id,
         reviewed_at = p_now, updated_at = p_now
         where company_id = p_company_id and portal_id = v_conflict.portal_id
           and hubspot_id = v_conflict.source_id and albi_organization_id = v_target_id;

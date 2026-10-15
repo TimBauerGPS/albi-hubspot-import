@@ -24,6 +24,55 @@ test('approved tenant and portal scoped many-to-one mapping remains usable on la
   }
 })
 
+test('all approved shared-target owners recheck across portals while an unapproved third owner is rejected', () => {
+  for (const [decide, source, candidate, targetKey] of [
+    [decideContactMatch, { properties: { firstname: 'A', lastname: 'B', email: 'a@example.com' } }, contact('7', { email: 'a@example.com' }), 'albi_contact_id'],
+    [decideOrganizationMatch, { properties: { name: 'A', domain: 'a.example' } }, org('7', { domain: 'a.example' }), 'albi_organization_id'],
+  ]) {
+    const owners = [
+      { company_id: 'tenant', portal_id: '123', hubspot_id: '41', [targetKey]: '7', match_method: 'reviewed', approved_many_to_one: true },
+      { company_id: 'tenant', portal_id: '456', hubspot_id: '42', [targetKey]: '7', match_method: 'reviewed', approved_many_to_one: true },
+      { company_id: 'tenant', portal_id: '789', hubspot_id: '43', [targetKey]: '7', match_method: 'automatic', approved_many_to_one: false },
+    ]
+    for (const owner of owners.slice(0, 2)) {
+      assert.equal(decide({ source: { ...source, id: owner.hubspot_id }, candidates: [candidate], mappings: owners,
+        existingMapping: owner, companyId: 'tenant', portalId: owner.portal_id }).action, 'link')
+    }
+    assert.equal(decide({ source: { ...source, id: '43' }, candidates: [candidate], mappings: owners,
+      existingMapping: owners[2], companyId: 'tenant', portalId: '789' }).reason, 'target_already_mapped')
+    assert.equal(decide({ source: { ...source, id: '42' }, candidates: [candidate], mappings: owners,
+      existingMapping: owners[1], companyId: 'other-tenant', portalId: '456' }).reason, 'target_already_mapped')
+  }
+})
+
+test('legacy original owner predating reviewed share remains valid without admitting a later unapproved owner', () => {
+  for (const [decide, source, candidate, targetKey] of [
+    [decideContactMatch, { properties: { firstname: 'A', lastname: 'B', email: 'a@example.com' } }, contact('7', { email: 'a@example.com' }), 'albi_contact_id'],
+    [decideOrganizationMatch, { properties: { name: 'A', domain: 'a.example' } }, org('7', { domain: 'a.example' }), 'albi_organization_id'],
+  ]) {
+    const owners = [
+      { company_id: 'tenant', portal_id: '123', hubspot_id: '41', [targetKey]: '7', match_method: 'automatic',
+        approved_many_to_one: false, created_at: '2026-10-01T00:00:00Z' },
+      { company_id: 'tenant', portal_id: '456', hubspot_id: '42', [targetKey]: '7', match_method: 'reviewed',
+        approved_many_to_one: true, created_at: '2026-10-02T00:00:00Z', reviewed_at: '2026-10-02T01:00:00Z' },
+      { company_id: 'tenant', portal_id: '789', hubspot_id: '43', [targetKey]: '7', match_method: 'automatic',
+        approved_many_to_one: false, created_at: '2026-10-03T00:00:00Z' },
+    ]
+    for (const owner of owners.slice(0, 2)) {
+      assert.equal(decide({ source: { ...source, id: owner.hubspot_id }, candidates: [candidate], mappings: owners,
+        existingMapping: owner, companyId: 'tenant', portalId: owner.portal_id }).action, 'link')
+    }
+    assert.equal(decide({ source: { ...source, id: '43' }, candidates: [candidate], mappings: owners,
+      existingMapping: owners[2], companyId: 'tenant', portalId: '789' }).reason, 'target_already_mapped')
+    assert.equal(decide({ source: { ...source, id: '41' }, candidates: [candidate],
+      mappings: [...owners, { ...owners[1], company_id: 'other-tenant' }], existingMapping: owners[0],
+      companyId: 'tenant', portalId: '123' }).reason, 'target_already_mapped')
+    const ambiguous = [{ ...owners[0] }, { ...owners[2], created_at: '2026-10-01T12:00:00Z' }, owners[1]]
+    assert.equal(decide({ source: { ...source, id: '41' }, candidates: [candidate], mappings: ambiguous,
+      existingMapping: ambiguous[0], companyId: 'tenant', portalId: '123' }).reason, 'target_already_mapped')
+  }
+})
+
 test('review candidates retain identity evidence without unrelated name matches or changing decisions', () => {
   const input = { source: { firstname: 'A', lastname: 'Person', email: 'a@example.com', phone: '5551112222' },
     candidates: [contact('z', { email: 'a@example.com' }), contact('a', { phoneNumber: '5551112222' }),
