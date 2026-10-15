@@ -94,6 +94,8 @@ for (const change of [{ reviewId: 'bad' }, { clientRequestId: 'bad' }, { expecte
   { expectedUpdatedAt: 'tomorrow' }, { action: 'delete' }, { action: 'resolve_fields', fieldChoices: { email: 'secret' } },
   { action: 'link_existing', candidateId: 'url' }, { action: 'choose_organization', organizationSourceId: 12 },
   { action: 'link_existing', candidateId: '12', approveManyToOne: 'yes' },
+  { action: 'force_create_albi', ignoredCandidateIds: [] },
+  { action: 'force_create_albi', ignoredCandidateIds: ['22', '22'] },
   { action: 'choose_organization', organizationSourceId: '12', addHubSpotAssociation: 'yes' },
   { action: 'create_albi', candidateId: '12' }, { sourceId: '12' }, { runId: resolutionId }, { portalId: '123' },
   { albiCompanyId: '123' }, { credentials: 'secret' }, { values: { email: 'private@example.com' } }, { url: 'https://example.com' },
@@ -113,12 +115,14 @@ test('missing app access also blocks read-only resolution history before storage
 test('all accepted action inputs are normalized before passing server actor and company to execution', async () => {
   for (const decision of [{ action: 'resolve_fields', fieldChoices: { phoneNumber: 'hubspot', email: 'albi' } },
     { action: 'link_existing', candidateId: '22', approveManyToOne: true },
+    { action: 'force_create_albi', ignoredCandidateIds: ['23', '22'] },
     { action: 'choose_organization', organizationSourceId: '33', addHubSpotAssociation: false }]) {
     const f = fixture()
     let received
     f.options.executeResolution = async (_deps, args) => { received = args; return { resolution: f.row } }
     assert.equal((await f.request({ ...input, ...decision })).statusCode, 200)
-    assert.deepEqual(received.decision, decision)
+    assert.deepEqual(received.decision, decision.action === 'force_create_albi'
+      ? { ...decision, ignoredCandidateIds: ['22', '23'] } : decision)
     assert.equal(received.companyId, 'company-a')
     assert.equal(received.actorId, actorId)
     assert.equal(Object.hasOwn(received, 'action'), false)

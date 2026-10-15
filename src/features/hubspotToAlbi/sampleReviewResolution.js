@@ -9,14 +9,14 @@ const LABELS = Object.freeze({ firstName: 'First name', lastName: 'Last name', e
   mobileNumber: 'Mobile', jobTitle: 'Job title', address1: 'Address', address2: 'Address line 2', city: 'City',
   state: 'State / region', zipcode: 'Postal code', country: 'Country', name: 'Name', domain: 'Domain', organizationId: 'Organization ID' })
 const ACTION_FIELDS = Object.freeze({ resolve_fields: ['fieldChoices'], link_existing: ['candidateId', 'approveManyToOne'],
-  create_albi: [], choose_organization: ['organizationSourceId', 'addHubSpotAssociation'] })
+  create_albi: [], force_create_albi: ['ignoredCandidateIds'], choose_organization: ['organizationSourceId', 'addHubSpotAssociation'] })
 const STATUS_LABELS = Object.freeze({ pending: 'Pending', applying: 'Applying', waiting_on_albi: 'Waiting on Albi',
   ready_to_recheck: 'Ready to recheck', completed: 'Completed', failed: 'Failed', superseded: 'Superseded' })
 const EVENT_LABELS = Object.freeze({ planned: 'Resolution planned', claimed: 'Resolution started', provider_applied: 'Provider change applied',
   provider_reconciled: 'Provider change verified', waiting_on_albi: 'Waiting on Albi', recheck_requested: 'Recheck requested',
   completed: 'Completed', failed: 'Failed', superseded: 'Superseded' })
 const OUTCOMES = new Set([...H2A_REVIEW_ERROR_CODES, 'authorization_rejected', ...Object.keys(EVENT_LABELS),
-  'safe_to_link', 'safe_to_create', 'still_needs_review', 'source_missing', 'recheck_failed', 'linked', 'created', 'updated', 'reconciled'])
+  'safe_to_link', 'safe_to_create', 'still_needs_review', 'source_missing', 'recheck_failed', 'linked', 'created', 'forced_created', 'updated', 'reconciled'])
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const record = value => object(value) ? value : {}
 const ownMember = (values, key) => typeof key === 'string' && Object.hasOwn(values, key)
@@ -39,6 +39,11 @@ function decision(input) {
     if (!object(input.fieldChoices) || !Object.keys(input.fieldChoices).length || Object.entries(input.fieldChoices)
       .some(([field, winner]) => ![...RESOLUTION_FIELDS.contacts, ...RESOLUTION_FIELDS.companies].includes(field) || !['hubspot', 'albi'].includes(winner))) fail()
     result.fieldChoices = Object.fromEntries(Object.keys(input.fieldChoices).sort().map(field => [field, input.fieldChoices[field]]))
+  }
+  if (input.action === 'force_create_albi') {
+    if (!Array.isArray(input.ignoredCandidateIds) || !input.ignoredCandidateIds.length || input.ignoredCandidateIds.length > 10 ||
+      input.ignoredCandidateIds.some(value => !id(value)) || new Set(input.ignoredCandidateIds).size !== input.ignoredCandidateIds.length) fail()
+    result.ignoredCandidateIds = [...input.ignoredCandidateIds].sort((a, b) => BigInt(a) < BigInt(b) ? -1 : BigInt(a) > BigInt(b) ? 1 : 0)
   }
   for (const field of ['candidateId', 'organizationSourceId']) if (ACTION_FIELDS[input.action].includes(field)) {
     if (!id(input[field])) fail()
@@ -137,6 +142,13 @@ export function buildResolutionConfirmation({ review, decision: input } = {}) {
   } else if (selected.action === 'create_albi') {
     if (!id(review.sourceId)) fail()
     result.mapping = { objectType: review.objectType, sourceId: review.sourceId, targetId: null, createAlbi: true }
+  } else if (selected.action === 'force_create_albi') {
+    if (!id(review.sourceId)) fail()
+    const candidates = (Array.isArray(review.candidates) ? review.candidates : []).map(item => id(item.id)).filter(Boolean)
+      .sort((a, b) => BigInt(a) < BigInt(b) ? -1 : BigInt(a) > BigInt(b) ? 1 : 0)
+    if (!candidates.length || JSON.stringify(candidates) !== JSON.stringify(selected.ignoredCandidateIds)) fail()
+    result.mapping = { objectType: review.objectType, sourceId: review.sourceId, targetId: null, createAlbi: true,
+      forced: true, ignoredCandidateIds: [...selected.ignoredCandidateIds] }
   } else {
     if (review.objectType !== 'contacts' || !id(review.sourceId)) fail()
     result.association = { contactId: review.sourceId, organizationSourceId: selected.organizationSourceId,

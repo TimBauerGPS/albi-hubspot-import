@@ -55,6 +55,9 @@ test('identity and organization controls require eligible evidence', async () =>
   const identity = await render({ ...base, reason: 'name_only_candidate', proposedChanges: {} })
   assert.match(identity, /Link.*Albi/i)
   assert.doesNotMatch(identity, /Create in Albi/)
+  const forced = await render({ ...base, reason: 'name_only_candidate', proposedChanges: {}, forceCreateReadiness: { eligible: true, ready: true } })
+  assert.match(forced, /These records are different/i)
+  assert.match(forced, /create a new Albi record/i)
   const noCandidate = await render({ ...base, reason: 'no_match', candidateSnapshots: [], proposedChanges: {},
     createReadiness: { ready: true } })
   assert.match(noCandidate, /Create in Albi/)
@@ -66,6 +69,20 @@ test('identity and organization controls require eligible evidence', async () =>
       organizationUrl: 'https://app.albiware.com/Relationships/Organization/888', associated: true }] })
   assert.match(organization, /Choose organization/)
   assert.match(organization, /Existing HubSpot associations will not be removed/)
+})
+
+test('forced create confirmation names the duplicate risk and submits the audited candidate IDs', async () => {
+  const calls = []
+  const ui = await mount({ ...base, reason: 'name_only_candidate', proposedChanges: {},
+    forceCreateReadiness: { eligible: true, ready: true } }, async (...args) => {
+    calls.push(args); return { resolution: { status: 'ready_to_recheck' } }
+  })
+  ui.find('button', 'Create a separate Albi record').props.onClick(); await ui.flush()
+  assert.match(ui.text(), /ignores 1 listed candidate/i)
+  assert.match(ui.text(), /duplicate may be created/i)
+  await ui.find('button', 'Confirm resolution').props.onClick(); await ui.flush()
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[0][0])),
+    { action: 'force_create_albi', ignoredCandidateIds: ['456'] })
 })
 
 test('waiting audit keeps provider success and validated manual task links visible', async () => {

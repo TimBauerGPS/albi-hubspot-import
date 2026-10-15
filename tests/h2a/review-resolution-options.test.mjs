@@ -60,6 +60,29 @@ test('create readiness requires current identity, confirmed type, and resolvable
   assert.deepEqual(ambiguousMapping.createReadiness, { ready: false })
 })
 
+test('forced create readiness permits reviewed candidates but never an existing source mapping', async () => {
+  const forceRow = { ...row, reason: 'name_only_candidate', candidate_snapshots: [{ id: '456', firstName: 'Alex', lastName: 'Stone' }],
+    source_snapshot: { id: '123', firstName: 'Alex', lastName: 'Stone' } }
+  const currentMappings = { contacts: [], organizations: [], options: [{ mapping_kind: 'default_contact_type',
+    source_key: 'default', albi_id: '12', confirmed: true }] }
+  const currentReads = { ...reads, hubspotRead: { ...reads.hubspotRead,
+    getContacts: async () => [{ id: '123', properties: { firstname: 'Alex', lastname: 'Stone' } }],
+    getAssociations: async () => [{ fromId: '123', toObjectType: 'companies', toIds: [] }] },
+  albiRead: { ...reads.albiRead, listContacts: async () => ({ records: [{ id: '456', firstName: 'Alex', lastName: 'Stone' }], cursor: null }) } }
+  const ready = await loadReviewResolutionOptions({ row: forceRow, repository: { getMappings: async () => currentMappings }, reads: currentReads })
+  assert.deepEqual(ready.forceCreateReadiness, { eligible: true, ready: true })
+  const mapped = await loadReviewResolutionOptions({ row: forceRow, repository: { getMappings: async () => ({ ...currentMappings,
+    contacts: [{ portal_id: '321', hubspot_id: '123', albi_contact_id: '456' }] }) }, reads: currentReads })
+  assert.deepEqual(mapped.forceCreateReadiness, { eligible: false, ready: false })
+
+  const eleven = Array.from({ length: 11 }, (_, index) => ({ id: String(100 + index), firstName: 'Alex', lastName: 'Stone' }))
+  const cappedRow = { ...forceRow, candidate_snapshots: eleven.slice(0, 10) }
+  const capped = await loadReviewResolutionOptions({ row: cappedRow, repository: { getMappings: async () => currentMappings },
+    reads: { ...currentReads, albiRead: { ...currentReads.albiRead,
+      listContacts: async () => ({ records: eleven, cursor: null }) } } })
+  assert.deepEqual(capped.forceCreateReadiness, { eligible: false, ready: false })
+})
+
 test('fresh zero-association evidence can offer a mapped organization as an explicit addition', async () => {
   const result = await loadReviewResolutionOptions({ row, repository: { getMappings: async () => mappings },
     reads: { ...reads, hubspotRead: { ...reads.hubspotRead,

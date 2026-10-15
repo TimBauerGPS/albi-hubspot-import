@@ -57,6 +57,7 @@ function fixture() {
     appendReviewResolutionEvent: async (_company, _id, args) => { calls.push('context'); events.push(args); return args },
     listReviewResolutionEvents: async () => events.map(args => ({ event_type: args.eventType, sanitized_details: args.details })),
     saveMapping: async (_company, kind, value, options = {}) => {
+      f.mappingOptions = structuredClone(options)
       if (f.beforeMapping) f.beforeMapping()
       const rows = mappings[kind === 'contact' ? 'contacts' : 'organizations']
       const key = kind === 'contact' ? 'albi_contact_id' : 'albi_organization_id'
@@ -194,6 +195,59 @@ function asCreate(f) {
   f.createdTarget = { id: '30', firstName: 'A', lastName: 'B', email: 'hs@example.com', phoneNumber: '555-111-2222', contactTypeIds: ['12'] }
   return { ...input, decision: { action: 'create_albi' } }
 }
+
+function asForcedCreate(f) {
+  f.row.reason = 'name_only_candidate'; f.row.conflict_type = 'contact_match'
+  f.mappings.options = [{ mapping_kind: 'default_contact_type', source_key: 'default', albi_id: '12', confirmed: true }]
+  f.createdTarget = { id: '30', firstName: 'A', lastName: 'B', email: 'hs@example.com', phoneNumber: '555-111-2222', contactTypeIds: ['12'] }
+  return { ...input, decision: { action: 'force_create_albi', ignoredCandidateIds: ['20'] } }
+}
+
+test('forced create ignores the confirmed candidate, maps the receipt, and records a distinct audit outcome', async () => {
+  const f = fixture(), createInput = asForcedCreate(f)
+  const result = await executeReviewResolution(f.deps, createInput)
+  assert.equal(result.resolution.status, 'ready_to_recheck')
+  assert.equal(result.resolution.provider_outcome_code, 'forced_created')
+  assert.equal(f.mappings.contacts[0].albi_contact_id, '30')
+  assert.equal(f.mappingOptions.forceResolutionId, resolutionId)
+  assert.equal(mutations(f).length, 1)
+  assert.equal(f.events.at(-1).details.outcome, 'forced_created')
+})
+
+test('forced create retry reconciles its exact receipt and existing mapping without creating again', async () => {
+  const f = fixture(), createInput = asForcedCreate(f); f.crashFinish = true
+  await assert.rejects(executeReviewResolution(f.deps, createInput))
+  assert.equal(f.mappings.contacts[0].albi_contact_id, '30')
+  f.crashFinish = false; f.intent.lease_owner = null
+  const result = await executeReviewResolution(f.deps, createInput)
+  assert.equal(result.resolution.status, 'ready_to_recheck')
+  assert.equal(result.resolution.provider_outcome_code, 'forced_created')
+  assert.equal(mutations(f).length, 1)
+  assert.equal(f.events.at(-1).eventType, 'provider_reconciled')
+})
+
+test('forced create stops before Albi when a source mapping exists or ignored candidate changes', async () => {
+  const mapped = fixture(), mappedInput = asForcedCreate(mapped)
+  mapped.mappings.contacts.push({ portal_id: '123', hubspot_id: '42', albi_contact_id: '20' })
+  const mappedResult = await executeReviewResolution(mapped.deps, mappedInput)
+  assert.equal(mappedResult.resolution.status, 'failed')
+  assert.deepEqual(mutations(mapped), [])
+  const changed = fixture(), changedInput = asForcedCreate(changed)
+  changed.target.firstName = 'Changed'
+  await assert.rejects(executeReviewResolution(changed.deps, changedInput), error => error.statusCode === 409)
+  assert.deepEqual(mutations(changed), [])
+  const appeared = fixture(), appearedInput = asForcedCreate(appeared)
+  appeared.contacts.push({ id: '21', firstName: 'A', lastName: 'B', email: 'hs@example.com' })
+  await assert.rejects(executeReviewResolution(appeared.deps, appearedInput), error => error.statusCode === 409)
+  assert.deepEqual(mutations(appeared), [])
+  const capped = fixture(); asForcedCreate(capped)
+  capped.contacts = Array.from({ length: 11 }, (_, index) => ({ id: String(100 + index), firstName: 'A', lastName: 'B' }))
+  capped.row.candidate_snapshots = structuredClone(capped.contacts.slice(0, 10))
+  const cappedInput = { ...input, decision: { action: 'force_create_albi',
+    ignoredCandidateIds: capped.row.candidate_snapshots.map(item => item.id) } }
+  await assert.rejects(executeReviewResolution(capped.deps, cappedInput), error => error.statusCode === 409)
+  assert.deepEqual(mutations(capped), [])
+})
 
 test('ambiguous create is adopted only by unique production matcher plus exact create context', async () => {
   const f = fixture(), createInput = asCreate(f); f.writeError = new ApiError('transient', { code: 'timeout' })

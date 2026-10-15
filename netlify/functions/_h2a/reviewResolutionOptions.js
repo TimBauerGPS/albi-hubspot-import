@@ -2,7 +2,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { getH2AReviewReason } from '../../../shared/h2aReviewReasons.js'
 import { buildAlbiRecordUrl } from '../../../shared/h2aProviderLinks.js'
 import { resolveContactType } from './options.js'
-import { decideContactMatch, decideOrganizationMatch } from './match.js'
+import { decideContactMatch, decideOrganizationMatch, selectAllReviewCandidates } from './match.js'
 import { safeReviewSnapshot } from './review.js'
 
 const providerId = value => typeof value === 'string' && /^[1-9]\d{0,99}$/.test(value)
@@ -42,11 +42,11 @@ function associationIds(rows, sourceId) {
 // Projection is advisory UI evidence only. The POST service repeats all reads
 // and validates the tenant, portal, review version and provider state.
 export async function loadReviewResolutionOptions({ row, repository, reads }) {
-  const unavailable = { organizationOptions: [], createReadiness: { ready: false } }
+  const unavailable = { organizationOptions: [], createReadiness: { ready: false }, forceCreateReadiness: { eligible: false, ready: false } }
   if (!record(row) || !providerId(row.source_id) || !providerId(row.portal_id) ||
     !['contacts', 'companies'].includes(row.object_type) || !reads?.hubspotRead || !reads?.albiRead) return unavailable
   const actions = getH2AReviewReason(row.reason).actions
-  if (!actions.includes('choose_organization') && !actions.includes('create_albi')) return unavailable
+  if (!actions.includes('choose_organization') && !actions.includes('create_albi') && !actions.includes('force_create_albi')) return unavailable
   try {
     const mappings = await repository.getMappings(row.company_id)
     if (!mappings || !['contacts', 'organizations', 'options'].every(key => Array.isArray(mappings[key]))) return unavailable
@@ -94,8 +94,11 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
       return { ...unavailable, organizationOptions }
     }
 
-    if (actions.includes('create_albi') && (row.status === 'needs_review' || row.status === 'cleared' && row.recheck_outcome === 'safe_to_create') &&
-      Array.isArray(row.candidate_snapshots) && row.candidate_snapshots.length === 0 && associated.length <= 1 &&
+    const forced = actions.includes('force_create_albi') && row.status === 'needs_review' &&
+      Array.isArray(row.candidate_snapshots) && row.candidate_snapshots.length > 0
+    const normal = actions.includes('create_albi') && (row.status === 'needs_review' || row.status === 'cleared' && row.recheck_outcome === 'safe_to_create') &&
+      Array.isArray(row.candidate_snapshots) && row.candidate_snapshots.length === 0
+    if ((normal || forced) && associated.length <= 1 &&
       !mappings[row.object_type === 'contacts' ? 'contacts' : 'organizations'].some(item =>
         item?.portal_id === row.portal_id && mappedSource(item) === row.source_id)) {
       if (!isDeepStrictEqual(safeReviewSnapshot(sourceRows[0], row.object_type), row.source_snapshot)) return unavailable
@@ -106,7 +109,17 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
         source: sourceRows[0], candidates, portalId: row.portal_id,
         mappings: mappings[row.object_type === 'contacts' ? 'contacts' : 'organizations'],
       })
-      if (match.action !== 'create') return unavailable
+      if (normal && match.action !== 'create') return unavailable
+      const matchInput = { source: sourceRows[0], sourceId: row.source_id, candidates, portalId: row.portal_id,
+        mappings: mappings[row.object_type === 'contacts' ? 'contacts' : 'organizations'] }
+      const currentCandidateIds = forced ? selectAllReviewCandidates(matchInput, match,
+        row.object_type === 'contacts' ? 'contact' : 'organization').map(item => item.id) : []
+      const storedCandidateIds = forced ? row.candidate_snapshots.map(item => item?.id) : []
+      if (forced && !isDeepStrictEqual(currentCandidateIds, storedCandidateIds)) return unavailable
+      if (forced && row.candidate_snapshots.some(snapshot => {
+        const current = candidates.filter(item => item.id === snapshot?.id)
+        return current.length !== 1 || !isDeepStrictEqual(safeReviewSnapshot(current[0], row.object_type), safeReviewSnapshot(snapshot, row.object_type))
+      })) return unavailable
       const props = sourceRows[0].properties
       const nameReady = row.object_type === 'contacts' ? Boolean(String(props.firstname ?? '').trim() && String(props.lastname ?? '').trim())
         : Boolean(String(props.name ?? '').trim())
@@ -129,7 +142,8 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
         organizationTypeId })
       const typeReady = type.action === 'resolved' && providerId(type.contactTypeId) &&
         Number.isSafeInteger(Number(type.contactTypeId))
-      return { ...unavailable, createReadiness: { ready: nameReady && organizationReady && typeReady } }
+      const ready = nameReady && organizationReady && typeReady
+      return { ...unavailable, ...(forced ? { forceCreateReadiness: { eligible: true, ready } } : { createReadiness: { ready } }) }
     }
   } catch { /* A failed read cannot become an actionable projection. */ }
   return unavailable

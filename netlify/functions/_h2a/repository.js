@@ -647,7 +647,7 @@ export function createH2ARepository(supabase) {
       const rows = await readAll(supabase, 'h2a_item_results', companyId, query => query.eq('run_id', runId))
       return aggregateRunTotals(rows, mode)
     },
-    async saveMapping(companyId, kind, row, { approveManyToOne = false } = {}) {
+    async saveMapping(companyId, kind, row, { approveManyToOne = false, forceResolutionId = null } = {}) {
       const objectType = kind === 'contact' ? 'contacts' : kind === 'organization' ? 'companies' : null
       if (!objectType) throw new TypeError('Unsupported mapping kind')
       if (typeof approveManyToOne !== 'boolean' || approveManyToOne && (row?.match_method !== 'reviewed' || !row?.reviewed_by)) {
@@ -658,10 +658,13 @@ export function createH2ARepository(supabase) {
         p_company_id: companyId, p_portal_id: row?.portal_id, p_object_type: objectType,
         p_source_id: row?.hubspot_id, p_target_id: targetId, p_match_method: row?.match_method,
         p_reviewed_by: row?.reviewed_by ?? null, p_now: new Date().toISOString(),
-        p_approve_many_to_one: approveManyToOne,
+        p_approve_many_to_one: approveManyToOne, p_force_resolution_id: forceResolutionId,
       }))
       if (result?.error === 'mapping_conflict') {
         throw Object.assign(new Error('A different Albi target is already mapped for this HubSpot source'), { code: 'mapping_conflict' })
+      }
+      if (result?.error === 'mapping_reserved') {
+        throw Object.assign(new Error('This HubSpot source is reserved by an active reviewed create'), { code: 'mapping_reserved' })
       }
       if (result?.error === 'many_to_one_required') {
         throw Object.assign(new Error('Explicit approval is required to map another source to this Albi target'), { code: 'many_to_one_required' })

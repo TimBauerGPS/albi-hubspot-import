@@ -25,7 +25,7 @@ create table if not exists public.h2a_dry_run_review_resolutions (
   portal_id text not null check (length(btrim(portal_id)) > 0),
   object_type text not null check (object_type in ('contacts', 'companies')),
   source_id text not null check (length(btrim(source_id)) > 0),
-  action text not null check (action in ('resolve_fields', 'link_existing', 'create_albi', 'choose_organization')),
+  action text not null check (action in ('resolve_fields', 'link_existing', 'create_albi', 'force_create_albi', 'choose_organization')),
   status text not null default 'pending' check (status in ('pending', 'applying', 'waiting_on_albi', 'ready_to_recheck', 'completed', 'failed', 'superseded')),
   expected_review_updated_at timestamptz not null,
   decision jsonb not null check (jsonb_typeof(decision) = 'object'),
@@ -47,6 +47,13 @@ create table if not exists public.h2a_dry_run_review_resolutions (
   check ((status = 'applying') = (lease_owner is not null)),
   constraint h2a_review_resolutions_execution_phase_check check ((status = 'applying') = (execution_phase is not null))
 );
+
+-- Extend existing deployments without weakening the action allowlist.
+alter table public.h2a_dry_run_review_resolutions
+  drop constraint if exists h2a_dry_run_review_resolutions_action_check;
+alter table public.h2a_dry_run_review_resolutions
+  add constraint h2a_dry_run_review_resolutions_action_check
+  check (action in ('resolve_fields', 'link_existing', 'create_albi', 'force_create_albi', 'choose_organization'));
 
 -- Older deployments created cascading foreign keys. Replace those constraints
 -- so deleting a run or review can never erase provider-write audit history.
@@ -153,6 +160,27 @@ alter table public.h2a_contact_organization_choices enable row level security;
 revoke all on table public.h2a_contact_organization_choices from public, anon, authenticated, service_role;
 grant select, insert, update on table public.h2a_contact_organization_choices to service_role;
 
+-- Forced creation depends on the fenced mapping migration. Refuse to install
+-- over an older mapping writer or conflict resolver that could bypass it.
+do $$
+declare
+  v_mapping_definition text;
+  v_conflict_definition text;
+begin
+  select pg_catalog.pg_get_functiondef(p.oid) into v_mapping_definition
+    from pg_catalog.pg_proc p
+    where p.oid = pg_catalog.to_regprocedure('public.h2a_save_mapping(uuid,text,text,text,text,text,uuid,timestamptz,boolean,uuid)');
+  select pg_catalog.pg_get_functiondef(p.oid) into v_conflict_definition
+    from pg_catalog.pg_proc p
+    where p.oid = pg_catalog.to_regprocedure('public.h2a_resolve_conflict(uuid,uuid,timestamptz,uuid,text,text,jsonb,timestamptz)');
+  if v_mapping_definition is null or pg_catalog.strpos(v_mapping_definition, 'mapping_reserved') = 0
+    or pg_catalog.strpos(v_mapping_definition, 'h2a_dry_run_review_resolutions') = 0
+    or v_conflict_definition is null or pg_catalog.strpos(v_conflict_definition, 'force_create_albi') = 0 then
+    raise exception 'Run h2a-mapping-target-ownership.sql before h2a-review-resolutions.sql';
+  end if;
+end;
+$$;
+
 create or replace function public.h2a_create_review_resolution(
   p_company_id uuid, p_run_id uuid, p_review_id uuid,
   p_portal_id text, p_object_type text, p_source_id text, p_action text,
@@ -168,12 +196,14 @@ begin
     or p_portal_id is null or length(pg_catalog.btrim(p_portal_id)) = 0
     or p_object_type is null or p_object_type not in ('contacts', 'companies')
     or p_source_id is null or length(pg_catalog.btrim(p_source_id)) = 0
-    or p_action is null or p_action not in ('resolve_fields', 'link_existing', 'create_albi', 'choose_organization')
+    or p_action is null or p_action not in ('resolve_fields', 'link_existing', 'create_albi', 'force_create_albi', 'choose_organization')
     or p_expected_review_updated_at is null or p_decision is null or pg_catalog.jsonb_typeof(p_decision) <> 'object'
     or p_decision_hash is null or p_decision_hash !~ '^[a-f0-9]{64}$'
     or p_client_request_id is null or p_actor_id is null then
     return pg_catalog.jsonb_build_object('error', 'invalid_resolution');
   end if;
+  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
+    pg_catalog.jsonb_build_array(p_company_id::text, p_portal_id, 'source', p_object_type, p_source_id)::text, 0));
   select * into v_review from public.h2a_dry_run_reviews r
     where r.company_id = p_company_id and r.id = p_review_id for update;
   if not found then return pg_catalog.jsonb_build_object('error', 'not_found'); end if;
@@ -201,6 +231,20 @@ begin
       return pg_catalog.jsonb_build_object('error', 'request_conflict');
     end if;
     return pg_catalog.jsonb_build_object('resolution', pg_catalog.to_jsonb(v_row), 'created', false);
+  end if;
+  if p_action = 'force_create_albi' then
+    if exists (select 1 from public.h2a_dry_run_review_resolutions r
+      where r.company_id = p_company_id and r.portal_id = p_portal_id
+        and r.object_type = p_object_type and r.source_id = p_source_id
+        and r.action = 'force_create_albi' and r.status in ('pending', 'applying')) then
+      return pg_catalog.jsonb_build_object('error', 'request_conflict');
+    end if;
+    if (p_object_type = 'contacts' and exists (select 1 from public.h2a_contact_mappings m
+          where m.company_id = p_company_id and m.portal_id = p_portal_id and m.hubspot_id = p_source_id))
+      or (p_object_type = 'companies' and exists (select 1 from public.h2a_organization_mappings m
+          where m.company_id = p_company_id and m.portal_id = p_portal_id and m.hubspot_id = p_source_id)) then
+      return pg_catalog.jsonb_build_object('error', 'stale');
+    end if;
   end if;
   if v_review.updated_at is distinct from p_expected_review_updated_at then
     return pg_catalog.jsonb_build_object('error', 'stale');
@@ -238,6 +282,7 @@ declare
   v_phase text;
   v_row public.h2a_dry_run_review_resolutions%rowtype;
   v_now timestamptz;
+  v_mapping_exists boolean;
 begin
   if p_company_id is null or p_resolution_id is null or p_owner_token is null or p_actor_id is null
     or p_ttl_seconds is null or p_ttl_seconds <= 0 or p_ttl_seconds > 3600 then
@@ -253,6 +298,18 @@ begin
       and r.status in ('pending', 'applying', 'waiting_on_albi', 'ready_to_recheck', 'failed')
       and (r.lease_owner is null or r.lease_expires_at <= v_now) for update;
   if not found then return pg_catalog.jsonb_build_object('error', 'not_claimable'); end if;
+  if v_row.action = 'force_create_albi' and v_row.status = 'failed' then
+    perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
+      pg_catalog.jsonb_build_array(v_row.company_id::text, v_row.portal_id, 'source', v_row.object_type, v_row.source_id)::text, 0));
+    if v_row.object_type = 'contacts' then
+      select exists (select 1 from public.h2a_contact_mappings m where m.company_id = v_row.company_id
+        and m.portal_id = v_row.portal_id and m.hubspot_id = v_row.source_id) into v_mapping_exists;
+    else
+      select exists (select 1 from public.h2a_organization_mappings m where m.company_id = v_row.company_id
+        and m.portal_id = v_row.portal_id and m.hubspot_id = v_row.source_id) into v_mapping_exists;
+    end if;
+    if v_mapping_exists then return pg_catalog.jsonb_build_object('error', 'stale'); end if;
+  end if;
   v_now := pg_catalog.clock_timestamp();
   if exists (
     select 1 from public.h2a_dry_run_review_resolutions r

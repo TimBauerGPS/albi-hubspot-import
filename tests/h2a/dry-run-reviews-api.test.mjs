@@ -85,7 +85,7 @@ test('review detail mode and durable HubSpot outcomes determine safe capability'
   assert.deepEqual(JSON.parse(result.body).item.resolutionCapability,
     { enabled: true, mode: 'admins', canResolve: true, hubspotWrites: 'available' })
   assert.equal(result.body.includes('secret'), false)
-  assert.equal(f.calls.some(call => call[0] === 'clients'), false)
+  assert.equal(f.calls.some(call => call[0] === 'clients'), true)
 })
 
 test('detail projects organization choices only after live server association reads', async () => {

@@ -5,6 +5,7 @@ import {
   decideContactMatch,
   decideFieldChanges,
   decideOrganizationMatch,
+  selectAllReviewCandidates,
   selectReviewCandidates,
 } from '../../netlify/functions/_h2a/match.js'
 
@@ -87,6 +88,7 @@ test('review candidates fall back to normalized names, sort IDs and cap at ten',
   const input = { sourceContact: { firstName: 'a', lastName: 'person' }, albiCandidates: [...candidates, { firstName: 'a', lastName: 'person' }] }
   assert.deepEqual(selectReviewCandidates(input, decideContactMatch(input)).map(item => item.id),
     ['00', '01', '02', '03', '04', '05', '06', '07', '08', '09'])
+  assert.equal(selectAllReviewCandidates(input, decideContactMatch(input)).length, 12)
   assert.equal(candidates[0].id, '11')
 })
 

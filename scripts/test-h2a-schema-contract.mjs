@@ -98,7 +98,7 @@ test('durable resolution tables preserve tenant identity, fixed states, append-o
     const choices = tableBody(sql, 'public.h2a_contact_organization_choices')
     const values = (body, field) => [...body.match(new RegExp(`${field} text[^\\n]*check \\(${field} in \\(([\\s\\S]*?)\\)\\)`))[1].matchAll(/'([^']+)'/g)].map(m => m[1])
     assert.deepEqual(values(resolutions, 'status'), ['pending', 'applying', 'waiting_on_albi', 'ready_to_recheck', 'completed', 'failed', 'superseded'])
-    assert.deepEqual(values(resolutions, 'action'), ['resolve_fields', 'link_existing', 'create_albi', 'choose_organization'])
+    assert.deepEqual(values(resolutions, 'action'), ['resolve_fields', 'link_existing', 'create_albi', 'force_create_albi', 'choose_organization'])
     assert.deepEqual(values(events, 'event_type'), ['planned', 'claimed', 'provider_applied', 'provider_reconciled', 'waiting_on_albi', 'recheck_requested', 'completed', 'failed', 'superseded'])
     assert.match(resolutions, /unique \(company_id, review_id, expected_review_updated_at, decision_hash\)/)
     assert.match(resolutions, /unique \(company_id, client_request_id\)/)
@@ -135,6 +135,27 @@ test('retention RPC supersedes nonleased old intents and keeps their review rows
     assert.match(sql, /grant execute on function public\.h2a_retain_review_resolution_runs\(uuid, uuid\) to service_role;/)
   }
   assert.match(readResolutionMigration(), /drop constraint %i/)
+})
+
+test('forced create reserves the source before provider work and fences every mapping RPC', () => {
+  for (const sql of [readSchema(), readResolutionMigration()]) {
+    const create = functionBody(sql, 'h2a_create_review_resolution')
+    assert.match(create, /pg_advisory_xact_lock[\s\S]*'source'[\s\S]*p_action = 'force_create_albi'/)
+    assert.match(create, /public\.h2a_contact_mappings[\s\S]*public\.h2a_organization_mappings/)
+    const claim = functionBody(sql, 'h2a_claim_review_resolution')
+    assert.match(claim, /v_row\.action = 'force_create_albi' and v_row\.status = 'failed'[\s\S]*pg_advisory_xact_lock[\s\S]*v_mapping_exists[\s\S]*'stale'/)
+  }
+  for (const sql of [readSchema(), readFileSync(mappingOwnershipMigrationUrl, 'utf8').toLowerCase()]) {
+    const mapping = functionBody(sql, 'h2a_save_mapping')
+    assert.match(sql, /create (?:or replace )?function public\.h2a_save_mapping\([\s\S]*?p_force_resolution_id uuid default null[\s\S]*?as \$\$/)
+    assert.match(mapping, /pg_advisory_xact_lock[\s\S]*to_regclass\('public\.h2a_dry_run_review_resolutions'\)[\s\S]*mapping_reserved/)
+    assert.match(mapping, /p_force_resolution_id is distinct from v_force_reservation/)
+    assert.doesNotMatch(sql, /create (?:or replace )?function public\.h2a_save_mapping_unfenced/)
+    assert.doesNotMatch(sql, /grant execute on function public\.h2a_save_mapping\(uuid,\s*text,\s*text,\s*text,\s*text,\s*text,\s*uuid,\s*timestamptz,\s*boolean\) to service_role/)
+    const conflict = functionBody(sql, 'h2a_resolve_conflict')
+    assert.match(conflict, /to_regclass\('public\.h2a_dry_run_review_resolutions'\)[\s\S]*force_create_albi[\s\S]*mapping_conflict/)
+  }
+  assert.match(readResolutionMigration(), /run h2a-mapping-target-ownership\.sql before h2a-review-resolutions\.sql/)
 })
 
 test('resolution RPCs fail closed, pin invoker search paths, and expose execution only to service role', () => {
@@ -393,7 +414,7 @@ test('all public RPCs restrict execution to service role and pin their search pa
   for (const name of ['h2a_get_credentials', 'h2a_put_credentials', 'h2a_claim_lease', 'h2a_heartbeat_lease', 'h2a_release_lease',
     'h2a_claim_daily_run', 'h2a_reserve_delivery', 'h2a_transition_delivery', 'h2a_resolve_conflict',
     'h2a_save_mapping', 'h2a_claim_conflict_resume', 'h2a_finish_conflict_resume', 'h2a_requeue_conflict_resume']) {
-    const definition = sql.match(new RegExp(`create function public\\.${name}\\(([\\s\\S]*?)as \\$\\$`))?.[1]
+    const definition = sql.match(new RegExp(`create (?:or replace )?function public\\.${name}\\(([\\s\\S]*?)as \\$\\$`))?.[1]
     assert.ok(definition, name)
     assert.match(definition, /set search_path = ''/)
     assert.match(sql, new RegExp(`revoke execute on function public\\.${name}\\([^;]+\\) from public, anon, authenticated;`))
@@ -548,7 +569,7 @@ test('mapping ownership is tenant-wide, source-then-target serialized, and requi
     }
     assert.match(save, /p_approve_many_to_one and p_match_method <> 'reviewed'/)
     assert.match(resolve, /p_company_id::text, 'target', v_conflict\.object_type, v_target_id/)
-    assert.match(sql, /revoke execute on function public\.h2a_save_mapping\(uuid, text, text, text, text, text, uuid, timestamptz, boolean\) from public, anon, authenticated/)
+    assert.match(sql, /revoke execute on function public\.h2a_save_mapping\(uuid, text, text, text, text, text, uuid, timestamptz, boolean, uuid\) from public, anon, authenticated/)
   }
   assert.match(migration, /drop function if exists public\.h2a_save_mapping\(uuid, text, text, text, text, text, uuid, timestamptz\)/)
   for (const name of ['h2a_save_mapping', 'h2a_resolve_conflict']) {

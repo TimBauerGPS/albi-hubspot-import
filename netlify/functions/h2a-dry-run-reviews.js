@@ -67,10 +67,11 @@ async function detail(repository, companyId, runId, row, auth, options, config) 
   const projected = await currentResolutionProjection(repository, companyId, row.id, row.portal_id)
   const resolutionCapability = projectResolutionCapability(auth, (options.env ?? process.env).H2A_REVIEW_RESOLUTION_MODE, projected.hubspotWrites)
   const actions = getH2AReviewReason(row.reason).actions
-  let resolutionOptions = { organizationOptions: [], createReadiness: { ready: false } }
+  let resolutionOptions = { organizationOptions: [], createReadiness: { ready: false }, forceCreateReadiness: { eligible: false, ready: false } }
   if (resolutionCapability.canResolve && (row.status === 'needs_review' || row.status === 'cleared' && row.recheck_outcome === 'safe_to_create') &&
     (actions.includes('choose_organization') || actions.includes('create_albi') &&
-      Array.isArray(row.candidate_snapshots) && row.candidate_snapshots.length === 0)) {
+      Array.isArray(row.candidate_snapshots) && row.candidate_snapshots.length === 0 ||
+      actions.includes('force_create_albi') && Array.isArray(row.candidate_snapshots) && row.candidate_snapshots.length > 0)) {
     try {
       const clients = options.makeClients ? await options.makeClients(companyId) : await createH2AProviderClients({
         companyId, repository, keyring: options.keyring, env: options.env, fetch: options.fetch })

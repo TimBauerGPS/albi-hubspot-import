@@ -139,6 +139,8 @@ test('durable internal execution context preserves exact allowlisted proof and s
   const original = plan(createInput('contacts'))
   assert.equal(typeof resolution.safeResolutionExecutionContext, 'function')
   assert.deepEqual(resolution.safeResolutionExecutionContext(original), original)
+  const legacy = structuredClone(original); delete legacy.ignoredCandidateIds
+  assert.deepEqual(resolution.safeResolutionExecutionContext(legacy), original)
   const details = resolution.safeResolutionInternalEventDetails({ executionContext: original, token: 'secret' })
   assert.deepEqual(details, { executionContext: original })
   assert.deepEqual(projectReviewResolutionEvent({ event_type: 'claimed', sanitized_details: details }).details, {})
@@ -167,6 +169,20 @@ test('create plans rebuild supported payloads from current HubSpot and confirmed
   const result = plan(input)
   assert.equal(result.providerOperation.payload.mobileNumber, undefined)
   assert.equal(result.providerOperation.payload.zipCode, '90001')
+})
+
+test('forced create records the exact ignored candidates and still builds a create plan', () => {
+  const input = createInput('contacts')
+  input.review.reason = 'name_only_candidate'
+  input.review.candidateSnapshots = [{ id: '20', firstName: 'A', lastName: 'B' }, { id: '21', firstName: 'A', lastName: 'Bee' }]
+  input.decision = { action: 'force_create_albi', ignoredCandidateIds: ['21', '20'] }
+  const result = plan(input)
+  assert.equal(result.action, 'force_create_albi')
+  assert.equal(result.providerOperation.operation, 'createContact')
+  assert.deepEqual(result.ignoredCandidateIds, ['20', '21'])
+  assert.deepEqual(result.mapping, { objectType: 'contacts', sourceId: '42', targetId: null, approveManyToOne: false })
+  input.mappings = [{ portal_id: '123', hubspot_id: '42', albi_contact_id: '20' }]
+  assert.throws(() => plan(input), TypeError)
 })
 
 test('create prerequisites reject missing names, options, unresolved context and unsafe phone formats', () => {
@@ -291,6 +307,8 @@ test('decisions keep exact action-specific fields and sort field choices without
   assert.deepEqual(normalizeResolutionDecision({ action: 'link_existing', candidateId: '2590478' }),
     { action: 'link_existing', candidateId: '2590478' })
   assert.deepEqual(normalizeResolutionDecision({ action: 'create_albi' }), { action: 'create_albi' })
+  assert.deepEqual(normalizeResolutionDecision({ action: 'force_create_albi', ignoredCandidateIds: ['21', '20'] }),
+    { action: 'force_create_albi', ignoredCandidateIds: ['20', '21'] })
   assert.deepEqual(normalizeResolutionDecision({ action: 'choose_organization', organizationSourceId: '123', addHubSpotAssociation: false }),
     { action: 'choose_organization', organizationSourceId: '123', addHubSpotAssociation: false })
 })
@@ -313,6 +331,9 @@ test('decision schemas reject provider values, unknown fields, unsafe IDs and ma
     { action: 'resolve_fields', fieldChoices: { email: 'ALBI' } },
     { action: 'resolve_fields', fieldChoices: { email: 'albi' }, values: { email: 'injected' } },
     { action: 'link_existing' }, { action: 'link_existing', candidateId: 12 },
+    { action: 'force_create_albi', ignoredCandidateIds: [] },
+    { action: 'force_create_albi', ignoredCandidateIds: ['20', '20'] },
+    { action: 'force_create_albi', ignoredCandidateIds: ['bad'] },
     ...['', '0', '-1', '01', ' 12', '12x', '1'.repeat(101)].map(candidateId => ({ action: 'link_existing', candidateId })),
     { action: 'link_existing', candidateId: '12', approveManyToOne: 'true' },
     { action: 'choose_organization', organizationSourceId: 'https://evil.test' },

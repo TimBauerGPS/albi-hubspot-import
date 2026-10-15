@@ -6,7 +6,7 @@ import { buildReviewResolutionPlan, hashResolutionDecision, normalizeResolutionD
   safeResolutionExecutionContext, resolutionCanonicalField, RESOLUTION_EVENT_LIMIT } from './reviewResolution.js'
 import { isResolutionProviderId } from './reviewResolution.js'
 import { safeReviewSnapshot } from './review.js'
-import { decideContactMatch, decideOrganizationMatch } from './match.js'
+import { decideContactMatch, decideOrganizationMatch, selectAllReviewCandidates } from './match.js'
 import { normalizePhone } from './normalize.js'
 import { H2A_REVIEW_ERROR_CATEGORIES, H2A_REVIEW_ERROR_CODES } from '../../../shared/h2aReviewReasons.js'
 
@@ -22,8 +22,10 @@ export function createReviewResolutionCapabilities(repository) {
     claimReviewResolution: repository.claimReviewResolution.bind(repository),
     finishReviewResolution: repository.finishReviewResolution.bind(repository),
     appendReviewResolutionEvent: repository.appendReviewResolutionEvent.bind(repository),
-    saveContactMapping: (companyId, row, approveManyToOne = false) => repository.saveMapping(companyId, 'contact', row, { approveManyToOne }),
-    saveOrganizationMapping: (companyId, row, approveManyToOne = false) => repository.saveMapping(companyId, 'organization', row, { approveManyToOne }),
+    saveContactMapping: (companyId, row, approveManyToOne = false, forceResolutionId = null) => repository.saveMapping(companyId, 'contact', row,
+      { approveManyToOne, forceResolutionId }),
+    saveOrganizationMapping: (companyId, row, approveManyToOne = false, forceResolutionId = null) => repository.saveMapping(companyId, 'organization', row,
+      { approveManyToOne, forceResolutionId }),
     upsertContactOrganizationChoice: repository.upsertContactOrganizationChoice.bind(repository),
   })
 }
@@ -95,7 +97,8 @@ async function evidence(deps, clients, row, decision, deadline) {
   const mappings = await deps.repository.getMappings(row.company_id)
   if (!mappings || !['contacts', 'organizations', 'options'].every(key => Array.isArray(mappings[key]))) malformed('resolution')
   const contacts = row.object_type === 'contacts' ? await listAll(deps, args => clients.albiRead.listContacts(args), deadline) : []
-  const organizations = row.object_type === 'companies' || decision.action === 'choose_organization' || decision.action === 'create_albi'
+  const organizations = row.object_type === 'companies' || decision.action === 'choose_organization' ||
+    ['create_albi', 'force_create_albi'].includes(decision.action)
     ? await listAll(deps, args => clients.albiRead.listOrganizations(args), deadline) : []
   const candidates = row.object_type === 'contacts' ? contacts : organizations
   let associatedCompanyIds = []
@@ -155,7 +158,7 @@ function capturedPlan(row, decision, current) {
     originalTarget ?? (decision.action === 'choose_organization' ? current.albi : null)))
 }
 
-function assertComparison(row, current, plan, replay) {
+function assertComparison(row, current, plan, replay, verifiedCreateTargetId = null) {
   const source = structuredClone(current.source)
   if (replay && plan.verification.properties) {
     // Allow only the exact intended write result to differ from the captured source.
@@ -173,6 +176,21 @@ function assertComparison(row, current, plan, replay) {
     if (!before || !isDeepStrictEqual(safeReviewSnapshot(current.albi, row.object_type), safeReviewSnapshot(before, row.object_type))) stale()
   }
   if (['resolve_fields', 'link_existing'].includes(plan.action) && !current.albi) stale()
+  if (plan.action === 'force_create_albi') {
+    const matchInput = { source: current.source, sourceId: row.source_id, candidates: current.candidates,
+      mappings: row.object_type === 'contacts' ? current.mappings.contacts : current.mappings.organizations, portalId: row.portal_id }
+    const decision = (row.object_type === 'contacts' ? decideContactMatch : decideOrganizationMatch)(matchInput)
+    const selected = selectAllReviewCandidates(matchInput, decision, row.object_type === 'contacts' ? 'contact' : 'organization')
+      .map(item => item.id).filter(id => id !== verifiedCreateTargetId)
+      .sort((a, b) => BigInt(a) < BigInt(b) ? -1 : BigInt(a) > BigInt(b) ? 1 : 0)
+    if (!isDeepStrictEqual(selected, plan.ignoredCandidateIds)) stale()
+    for (const candidateId of plan.ignoredCandidateIds) {
+      const before = row.candidate_snapshots?.find(item => item.id === candidateId)
+      const after = current.candidates.filter(item => item.id === candidateId)
+      if (!before || after.length !== 1 ||
+        !isDeepStrictEqual(safeReviewSnapshot(after[0], row.object_type), safeReviewSnapshot(before, row.object_type))) stale()
+    }
+  }
 }
 
 function propertiesMatch(source, properties) {
@@ -180,7 +198,7 @@ function propertiesMatch(source, properties) {
     (source.properties[key] === null ? '' : source.properties[key]) === value)
 }
 
-function exactCreateTarget(row, plan, current, receiptId = null) {
+function exactCreateTarget(row, plan, current, receiptId = null, requireReceipt = false) {
   const verify = plan.verification.create
   const rows = row.object_type === 'contacts' ? current.mappings.contacts : current.mappings.organizations
   let targetId = receiptId
@@ -188,6 +206,7 @@ function exactCreateTarget(row, plan, current, receiptId = null) {
     const key = row.object_type === 'contacts' ? 'albi_contact_id' : 'albi_organization_id'
     if (rows.some(item => item[key] === targetId && (item.portal_id !== row.portal_id || item.hubspot_id !== row.source_id))) return null
   } else {
+    if (requireReceipt) return null
     const match = (row.object_type === 'contacts' ? decideContactMatch : decideOrganizationMatch)({ source: { id: row.source_id, ...row.source_snapshot },
       candidates: current.candidates, mappings: rows, portalId: row.portal_id })
     if (match.action !== 'link') return null
@@ -206,12 +225,13 @@ function exactCreateTarget(row, plan, current, receiptId = null) {
   return target.id
 }
 
-async function saveLocal(caps, row, plan, actorId, targetId = plan.mapping?.targetId) {
+async function saveLocal(caps, row, plan, actorId, resolutionId, targetId = plan.mapping?.targetId) {
   if (plan.mapping) {
     if (!targetId) malformed('resolution')
     await caps[row.object_type === 'contacts' ? 'saveContactMapping' : 'saveOrganizationMapping'](row.company_id,
       { portal_id: row.portal_id, hubspot_id: row.source_id,
-        [row.object_type === 'contacts' ? 'albi_contact_id' : 'albi_organization_id']: targetId, match_method: 'reviewed', reviewed_by: actorId }, plan.mapping.approveManyToOne)
+        [row.object_type === 'contacts' ? 'albi_contact_id' : 'albi_organization_id']: targetId, match_method: 'reviewed', reviewed_by: actorId },
+      plan.mapping.approveManyToOne, plan.action === 'force_create_albi' ? resolutionId : null)
   }
   if (plan.organizationChoice) {
     const result = await caps.upsertContactOrganizationChoice(row.company_id, { portalId: row.portal_id, ...plan.organizationChoice, actorId })
@@ -289,7 +309,12 @@ async function runClaim(deps, input, saved, context) {
       if (!plan) malformed('resolution')
       if (!isDeepStrictEqual(livePlan, plan)) stale()
     }
-    assertComparison(row, current, plan, !!contextPlan)
+    const verifiedReceiptTarget = plan.action === 'force_create_albi' && createReceiptId
+      ? exactCreateTarget(row, plan, current, createReceiptId, true) : null
+    if (plan.action === 'force_create_albi' && createReceiptId && !verifiedReceiptTarget) {
+      throw new ApiError('permanent', { code: 'operation_failed' })
+    }
+    assertComparison(row, current, plan, !!contextPlan, verifiedReceiptTarget)
     if (!await stillCurrent(deps, row, context.config)) return finish('superseded', 'superseded')
     // Revalidate the review after HTTP reads and before obtaining a mutation method.
     const newest = await deps.repository.getDryRunReview(input.companyId, row.run_id, row.id)
@@ -302,14 +327,23 @@ async function runClaim(deps, input, saved, context) {
       // boundary so intervening source edits require a new confirmation.
       current.source = await sourceRead(deps, clients, row.object_type, row.source_id, deadline)
       if (!current.source) stale()
-      assertComparison(row, current, plan, true)
+      assertComparison(row, current, plan, true, verifiedReceiptTarget)
+      if (plan.action === 'force_create_albi') {
+        const mappings = await bounded(deps, () => deps.repository.getMappings(row.company_id), deadline)
+        if (!mappings || !['contacts', 'organizations', 'options'].every(key => Array.isArray(mappings[key]))) malformed('resolution')
+        current.mappings = mappings
+        const rows = row.object_type === 'contacts' ? mappings.contacts : mappings.organizations
+        const mapped = rows.filter(item => item.portal_id === row.portal_id && item.hubspot_id === row.source_id)
+        const key = row.object_type === 'contacts' ? 'albi_contact_id' : 'albi_organization_id'
+        if (mapped.length > 1 || mapped.length === 1 && mapped[0][key] !== verifiedReceiptTarget) stale()
+      }
     }
     let createTarget = null
     if (operation?.provider === 'albi') {
-      createTarget = exactCreateTarget(row, plan, current, createReceiptId)
+      createTarget = exactCreateTarget(row, plan, current, createReceiptId, plan.action === 'force_create_albi')
       if (createTarget) reconciled = true
       else if (contextPlan) throw new ApiError('permanent', { code: 'operation_failed' })
-      else {
+      else if (plan.action !== 'force_create_albi') {
         // A new create cannot override newly appeared or contradictory identity evidence.
         const matched = (row.object_type === 'contacts' ? decideContactMatch : decideOrganizationMatch)({ source: current.source,
           candidates: current.candidates, mappings: row.object_type === 'contacts' ? current.mappings.contacts : current.mappings.organizations, portalId: row.portal_id })
@@ -337,7 +371,7 @@ async function runClaim(deps, input, saved, context) {
         // All ambiguous responses are verified by reads. Permission/validation
         // failures still retain the intent and return a fixed, sanitized outcome.
         const after = await evidence(deps, clients, row, saved.decision, deadline)
-        createTarget = plan.verification.create ? exactCreateTarget(row, plan, after, createReceiptId) : null
+        createTarget = plan.verification.create ? exactCreateTarget(row, plan, after, createReceiptId, plan.action === 'force_create_albi') : null
         const verified = plan.verification.properties ? propertiesMatch(after.source, plan.verification.properties)
           : plan.verification.association ? after.associatedCompanyIds.includes(plan.verification.association.companyId) : !!createTarget
         if (!verified) throw error
@@ -345,14 +379,14 @@ async function runClaim(deps, input, saved, context) {
       }
       if (!reconciled) {
         const after = await evidence(deps, clients, row, saved.decision, deadline)
-        createTarget = plan.verification.create ? exactCreateTarget(row, plan, after, createReceiptId) : null
+        createTarget = plan.verification.create ? exactCreateTarget(row, plan, after, createReceiptId, plan.action === 'force_create_albi') : null
         const verified = plan.verification.properties ? propertiesMatch(after.source, plan.verification.properties)
           : plan.verification.association ? after.associatedCompanyIds.includes(plan.verification.association.companyId) : !!createTarget
         if (!verified) malformed('resolution')
       }
     }
     if (!await stillCurrent(deps, row, context.config)) return finish('superseded', 'superseded')
-    await saveLocal(caps, row, plan, input.actorId, createTarget ?? plan.mapping?.targetId)
+    await saveLocal(caps, row, plan, input.actorId, saved.id, createTarget ?? plan.mapping?.targetId)
   } catch (error) {
     const details = fixedFailure(error)
     const result = await finish(phase === 'applying' ? 'failed' : phase, 'failed', details.code, details)
@@ -361,8 +395,10 @@ async function runClaim(deps, input, saved, context) {
   }
   // Keep storage failures outside the provider-error catch: a failed finalization
   // leaves a live/expired lease for reconciliation instead of pretending success.
+  const forced = plan.action === 'force_create_albi'
   return finish(plan.verification.successStatus, plan.providerOperation ? reconciled ? 'provider_reconciled' : 'provider_applied'
-    : plan.manualTasks.length ? 'waiting_on_albi' : 'recheck_requested', undefined, { manualTasks: plan.manualTasks })
+    : plan.manualTasks.length ? 'waiting_on_albi' : 'recheck_requested', forced ? 'forced_created' : undefined,
+  { manualTasks: plan.manualTasks, ...(forced ? { outcome: 'forced_created' } : {}) })
 }
 
 export async function executeReviewResolution(deps, input) {

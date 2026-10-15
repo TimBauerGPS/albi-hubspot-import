@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
 import { H2A_REVIEW_ERROR_CATEGORIES, H2A_REVIEW_ERROR_CODES, getH2AReviewReason } from '../../../shared/h2aReviewReasons.js'
 import { buildAlbiRecordUrl } from '../../../shared/h2aProviderLinks.js'
 import { resolveContactType } from './options.js'
@@ -8,6 +9,7 @@ const ACTION_FIELDS = Object.freeze({
   resolve_fields: new Set(['fieldChoices']),
   link_existing: new Set(['candidateId', 'approveManyToOne']),
   create_albi: new Set([]),
+  force_create_albi: new Set(['ignoredCandidateIds']),
   choose_organization: new Set(['organizationSourceId', 'addHubSpotAssociation']),
 })
 const CONTACT_FIELDS = ['firstName', 'lastName', 'email', 'phoneNumber', 'mobileNumber', 'jobTitle',
@@ -19,7 +21,7 @@ export const RESOLUTION_EVENT_TYPES = Object.freeze(['planned', 'claimed', 'prov
   'waiting_on_albi', 'recheck_requested', 'completed', 'failed', 'superseded'])
 export const RESOLUTION_OUTCOME_CODES = Object.freeze([...H2A_REVIEW_ERROR_CODES, 'authorization_rejected',
   'provider_applied', 'provider_reconciled', 'waiting_on_albi', 'recheck_requested', 'completed', 'failed', 'superseded',
-  'safe_to_link', 'safe_to_create', 'still_needs_review', 'source_missing', 'recheck_failed', 'linked', 'created', 'updated', 'reconciled'])
+  'safe_to_link', 'safe_to_create', 'still_needs_review', 'source_missing', 'recheck_failed', 'linked', 'created', 'forced_created', 'updated', 'reconciled'])
 export const RESOLUTION_EVENT_LIMIT = 100
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/
@@ -46,6 +48,12 @@ export function normalizeResolutionDecision(input) {
       throw new TypeError('Invalid resolution field choices')
     }
     decision.fieldChoices = Object.fromEntries(Object.keys(input.fieldChoices).sort().map(key => [key, input.fieldChoices[key]]))
+  }
+  if (input.action === 'force_create_albi') {
+    if (!Array.isArray(input.ignoredCandidateIds) || !input.ignoredCandidateIds.length || input.ignoredCandidateIds.length > 10 ||
+      input.ignoredCandidateIds.some(value => !isResolutionProviderId(value)) ||
+      new Set(input.ignoredCandidateIds).size !== input.ignoredCandidateIds.length) throw new TypeError('Invalid ignored candidates')
+    decision.ignoredCandidateIds = [...input.ignoredCandidateIds].sort((a, b) => BigInt(a) < BigInt(b) ? -1 : BigInt(a) > BigInt(b) ? 1 : 0)
   }
   for (const field of ['candidateId', 'organizationSourceId']) {
     if (ACTION_FIELDS[input.action].has(field)) {
@@ -208,7 +216,7 @@ export function buildReviewResolutionPlan(input) {
   const hubspot = requireRecord(input.hubspot, type, sourceId)
   const associations = [...new Set(list(input.associatedCompanyIds).map(positiveId))]
   const result = { decisionHash: hashResolutionDecision(decision), action: decision.action, providerOperation: null,
-    manualTasks: [], mapping: null, organizationChoice: null,
+    ignoredCandidateIds: [], manualTasks: [], mapping: null, organizationChoice: null,
     verification: { successStatus: 'ready_to_recheck', properties: null, association: null, create: null } }
   if (decision.action === 'resolve_fields') {
     const albi = reviewedAlbi(input, review, type), properties = {}, fields = []
@@ -234,8 +242,14 @@ export function buildReviewResolutionPlan(input) {
     if (mappings.some(row => mappingSource(row) === sourceId && mappingTarget(row, type) !== albi.id) ||
       list(input.mappings).some(row => !sameMappingSource(row, sourceId, portalId) && mappingTarget(row, type) === albi.id) && !decision.approveManyToOne) invalidPlan()
     result.mapping = { objectType: type, sourceId, targetId: albi.id, approveManyToOne: decision.approveManyToOne === true }
-  } else if (decision.action === 'create_albi') {
+  } else if (['create_albi', 'force_create_albi'].includes(decision.action)) {
     if (mappingRows(input, portalId).some(row => mappingSource(row) === sourceId)) invalidPlan()
+    if (decision.action === 'force_create_albi') {
+      const captured = list(review.candidateSnapshots).map(item => positiveId(item?.id))
+        .sort((a, b) => BigInt(a) < BigInt(b) ? -1 : BigInt(a) > BigInt(b) ? 1 : 0)
+      if (!captured.length || !isDeepStrictEqual(captured, decision.ignoredCandidateIds)) invalidPlan()
+      result.ignoredCandidateIds = [...decision.ignoredCandidateIds]
+    }
     const create = createPayload(input, hubspot, type, associations)
     result.providerOperation = { provider: 'albi', operation: type === 'contacts' ? 'createContact' : 'createOrganization', payload: create.payload }
     result.mapping = { objectType: type, sourceId, targetId: null, approveManyToOne: false }
@@ -322,10 +336,16 @@ export function safeResolutionExecutionContext(value) {
         : key === 'organizationId' ? providerId(value) : text(value)) && Object.hasOwn(item, ids)
   }
   try {
-    if (!shape(value, ['decisionHash', 'action', 'providerOperation', 'manualTasks', 'mapping', 'organizationChoice', 'verification']) ||
+    const legacyKeys = ['decisionHash', 'action', 'providerOperation', 'manualTasks', 'mapping', 'organizationChoice', 'verification']
+    const currentKeys = ['decisionHash', 'action', 'ignoredCandidateIds', 'providerOperation', 'manualTasks', 'mapping', 'organizationChoice', 'verification']
+    if (!shape(value, legacyKeys) && !shape(value, currentKeys) ||
       typeof value.decisionHash !== 'string' || !/^[a-f0-9]{64}$/.test(value.decisionHash) ||
       !Object.hasOwn(ACTION_FIELDS, value.action) || !Array.isArray(value.manualTasks) || value.manualTasks.length > 10 ||
       !shape(value.verification, ['successStatus', 'properties', 'association', 'create'])) return null
+    const ignoredCandidateIds = Object.hasOwn(value, 'ignoredCandidateIds') ? value.ignoredCandidateIds : []
+    if (!Array.isArray(ignoredCandidateIds) || ignoredCandidateIds.length > 10 ||
+      ignoredCandidateIds.some(item => !providerId(item)) || new Set(ignoredCandidateIds).size !== ignoredCandidateIds.length ||
+      (value.action === 'force_create_albi') !== (ignoredCandidateIds.length > 0)) return null
     const manualTasks = value.manualTasks.map(task => {
       if (!object(task) || Object.keys(task).some(key => !['provider', 'objectType', 'targetId', 'fields', 'url', 'organizationUrl'].includes(key)) ||
         task.provider !== 'albi' || !['contacts', 'companies'].includes(task.objectType) || !providerId(task.targetId) ||
@@ -364,7 +384,7 @@ export function safeResolutionExecutionContext(value) {
       value.mapping.targetId !== null && !providerId(value.mapping.targetId) || typeof value.mapping.approveManyToOne !== 'boolean')) return null
     if (value.organizationChoice !== null && (!shape(value.organizationChoice, ['contactId', 'organizationSourceId']) ||
       !providerId(value.organizationChoice.contactId) || !providerId(value.organizationChoice.organizationSourceId))) return null
-    return { decisionHash: value.decisionHash, action: value.action, providerOperation: operation, manualTasks,
+    return { decisionHash: value.decisionHash, action: value.action, ignoredCandidateIds: [...ignoredCandidateIds], providerOperation: operation, manualTasks,
       mapping: structuredClone(value.mapping), organizationChoice: structuredClone(value.organizationChoice), verification: structuredClone(verification) }
   } catch { return null }
 }

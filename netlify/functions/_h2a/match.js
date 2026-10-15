@@ -303,7 +303,9 @@ function organizationReviewCandidates(source, candidates) {
 }
 
 // Diagnostics only: selection never participates in the match decision.
-export function selectReviewCandidates(input = {}, decision = {}, entityType = 'contact') {
+// Forced-create validation uses the uncapped form so an eleventh match can
+// never fall outside the exact set the administrator approved ignoring.
+export function selectAllReviewCandidates(input = {}, decision = {}, entityType = 'contact') {
   const candidates = [...(input.candidates ?? input.albiCandidates ?? [])]
   const target = decision.targetId == null ? [] : candidates.filter(item => idOf(item) === String(decision.targetId))
   const related = entityType === 'organization'
@@ -312,7 +314,10 @@ export function selectReviewCandidates(input = {}, decision = {}, entityType = '
   return [...new Map([...target, ...related].map(item => [idOf(item), item])).values()]
     .filter(item => idOf(item))
     .sort((left, right) => idOf(left).localeCompare(idOf(right)))
-    .slice(0, 10)
+}
+
+export function selectReviewCandidates(input = {}, decision = {}, entityType = 'contact') {
+  return selectAllReviewCandidates(input, decision, entityType).slice(0, 10)
 }
 
 function matchDecisionConflict(sourceId, targetId, input) {

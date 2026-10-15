@@ -10,7 +10,7 @@ test('stored review reasons have safe shared presentation and action metadata', 
     assert.equal(entry.code, reason)
     assert.ok(entry.label)
     assert.ok(Object.isFrozen(entry.actions))
-    const allowed = { identity: ['link_existing', 'create_albi'], field: ['resolve_fields'], association: ['choose_organization'] }[entry.category] ?? []
+    const allowed = { identity: ['link_existing', 'create_albi', 'force_create_albi'], field: ['resolve_fields'], association: ['choose_organization'] }[entry.category] ?? []
     assert.ok(entry.actions.every(action => allowed.includes(action)))
   }
   assert.equal(getH2AReviewReason('missing_hubspot_company').label, 'HubSpot company is missing')

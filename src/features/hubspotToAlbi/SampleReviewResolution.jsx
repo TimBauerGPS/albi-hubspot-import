@@ -39,6 +39,8 @@ export default function SampleReviewResolution({ item, busy = false, onResolve }
   const canChooseOrganization = organizationOptions.length > 0
   const selectedOrganization = organizationOptions.find(option => option.sourceId === organizationSourceId)
   const canCreate = item?.createReadiness?.ready === true && review.candidates.length === 0
+  const canForceCreate = item?.forceCreateReadiness?.ready === true && eligibleCandidates.length > 0 &&
+    eligibleCandidates.length === review.candidates.length
   const effectiveBusy = busy || submitting
   const canAct = capability.canResolve && review.actions.length > 0 && (review.status === 'needs_review' ||
     review.status === 'cleared' && item?.recheckOutcome === 'safe_to_create')
@@ -84,6 +86,9 @@ export default function SampleReviewResolution({ item, busy = false, onResolve }
     } else if (action === 'create_albi') {
       if (!canCreate) return
       decision = { action }
+    } else if (action === 'force_create_albi') {
+      if (!canForceCreate) return
+      decision = { action, ignoredCandidateIds: eligibleCandidates.map(candidate => candidate.id) }
     } else {
       if (!canChooseOrganization || !selectedOrganization || !selectedOrganization.associated && !approveAssociation) {
         setMessage('Choose a current associated organization.'); return
@@ -169,10 +174,14 @@ export default function SampleReviewResolution({ item, busy = false, onResolve }
       <label className="flex gap-2 text-xs text-gray-700"><input type="checkbox" checked={approveManyToOne} onChange={event => changed(choices, candidateId, organizationSourceId, event.target.checked)} className="text-brand-600 focus:ring-brand-500" />Approve a many-to-one mapping if this Albi record is already linked elsewhere</label>
       <button type="button" className={primary} disabled={effectiveBusy || !candidateId} onClick={() => open('link_existing')}>Link selected Albi record</button>
     </div>}
-    {canAct && review.actions.includes('create_albi') && <div className="mt-5 rounded-lg border border-gray-200 p-4"><h5 className="text-sm font-semibold text-gray-900">Create a new Albi record</h5>
+    {canAct && review.actions.includes('create_albi') && review.candidates.length === 0 && <div className="mt-5 rounded-lg border border-gray-200 p-4"><h5 className="text-sm font-semibold text-gray-900">Create a new Albi record</h5>
       <p className="mt-1 text-xs leading-5 text-gray-600">The server rechecks identity and type readiness before creating anything.</p>
       {canCreate ? <button type="button" className={`${primary} mt-3`} disabled={effectiveBusy} onClick={() => open('create_albi')}>Create in Albi</button>
         : <p className="mt-2 text-xs text-amber-800">Creation is unavailable until the candidate and type checks are ready. Recheck this record after correcting them.</p>}</div>}
+    {canAct && review.actions.includes('force_create_albi') && item?.forceCreateReadiness?.eligible === true && review.candidates.length > 0 && <div className="mt-5 rounded-lg border border-red-200 bg-red-50 p-4"><h5 className="text-sm font-semibold text-red-950">These records are different</h5>
+      <p className="mt-1 text-xs leading-5 text-red-900">Create a new Albi record and deliberately ignore the listed match candidates. This can create a duplicate, so the server rechecks every record before applying it.</p>
+      {canForceCreate ? <button type="button" className={`${primary} mt-3`} disabled={effectiveBusy} onClick={() => open('force_create_albi')}>Create a separate Albi record</button>
+        : <p className="mt-2 text-xs text-red-900">This option is unavailable until the source, candidate, mapping, and type checks are current. Recheck this record first.</p>}</div>}
     {canAct && review.actions.includes('choose_organization') && <div className="mt-5 rounded-lg border border-gray-200 p-4"><h5 className="text-sm font-semibold text-gray-900">Organization context</h5>
       <p className="mt-1 text-xs leading-5 text-gray-700">Existing HubSpot associations will not be removed. The selected organization becomes the saved context; an Albi relationship may need a manual update.</p>
       {canChooseOrganization ? <><label className="mt-3 block text-xs font-medium text-gray-700">Organization<select value={organizationSourceId} onChange={event => changed(choices, candidateId, event.target.value, approveManyToOne)} className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:ring-2 focus:ring-brand-500"><option value="">Choose organization</option>{organizationOptions.map(option => <option key={option.sourceId} value={option.sourceId}>HubSpot {option.sourceId} → Albi {option.targetId}{option.associated ? ' · currently associated' : ' · add association'}</option>)}</select></label>
@@ -197,7 +206,9 @@ export default function SampleReviewResolution({ item, busy = false, onResolve }
         {feedback}
         <div className="mt-4 grid gap-3 sm:grid-cols-2"><section className="rounded-lg border border-blue-200 bg-blue-50 p-3"><h4 className="text-sm font-semibold text-blue-900">Updates HubSpot now</h4>{confirmation.preview.hubspotWrites.length ? <ul className="mt-2 space-y-1 text-xs text-blue-900">{confirmation.preview.hubspotWrites.map(write => <li key={write.field}>{write.field}: {display(write.value)}</li>)}</ul> : <p className="mt-2 text-xs text-blue-800">None</p>}</section>
           <section className="rounded-lg border border-amber-200 bg-amber-50 p-3"><h4 className="text-sm font-semibold text-amber-900">You’ll update this in Albi</h4>{confirmation.preview.albiTasks.length ? <ul className="mt-2 space-y-1 text-xs text-amber-900">{confirmation.preview.albiTasks.map(task => <li key={task.field}>{task.field}: {display(task.value)}</li>)}</ul> : <p className="mt-2 text-xs text-amber-800">None</p>}</section></div>
-        {confirmation.preview.mapping && <p className="mt-3 rounded-lg bg-gray-50 p-3 text-sm text-gray-800">{confirmation.preview.mapping.createAlbi ? 'Creates an Albi record and saves its mapping.' : `Saves a mapping to Albi record ${confirmation.preview.mapping.targetId}.`}</p>}
+        {confirmation.preview.mapping && <p className={`mt-3 rounded-lg p-3 text-sm ${confirmation.preview.mapping.forced ? 'border border-red-200 bg-red-50 text-red-950' : 'bg-gray-50 text-gray-800'}`}>{confirmation.preview.mapping.forced
+          ? `Creates a separate Albi record, ignores ${confirmation.preview.mapping.ignoredCandidateIds.length} listed candidate${confirmation.preview.mapping.ignoredCandidateIds.length === 1 ? '' : 's'}, and saves the new mapping. A duplicate may be created.`
+          : confirmation.preview.mapping.createAlbi ? 'Creates an Albi record and saves its mapping.' : `Saves a mapping to Albi record ${confirmation.preview.mapping.targetId}.`}</p>}
         {confirmation.preview.association && <p className="mt-3 rounded-lg bg-gray-50 p-3 text-sm text-gray-800">Saves HubSpot organization {confirmation.preview.association.organizationSourceId} as context. {confirmation.preview.association.addHubSpotAssociation ? 'Adds HubSpot association. ' : ''}Existing HubSpot associations will not be removed.</p>}
         <div className="mt-5 flex flex-row-reverse flex-wrap gap-2" aria-busy={effectiveBusy}><button ref={confirmRef} type="button" className={primary} disabled={effectiveBusy} onClick={submit}>{effectiveBusy ? 'Applying…' : message.startsWith('Resolution failed') ? 'Retry resolution' : 'Confirm resolution'}</button>
           <button ref={cancelRef} type="button" className={secondary} disabled={effectiveBusy} onClick={() => setConfirmation(null)}>Cancel</button></div>

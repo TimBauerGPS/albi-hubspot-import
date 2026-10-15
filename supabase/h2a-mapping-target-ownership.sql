@@ -22,17 +22,21 @@ end;
 $$;
 
 drop function if exists public.h2a_save_mapping(uuid, text, text, text, text, text, uuid, timestamptz);
+drop function if exists public.h2a_save_mapping(uuid, text, text, text, text, text, uuid, timestamptz, boolean);
+drop function if exists public.h2a_save_mapping(uuid, text, text, text, text, text, uuid, timestamptz, boolean, uuid);
+drop function if exists public.h2a_save_mapping_unfenced(uuid, text, text, text, text, text, uuid, timestamptz, boolean);
 
 create or replace function public.h2a_save_mapping(
   p_company_id uuid, p_portal_id text, p_object_type text, p_source_id text,
   p_target_id text, p_match_method text, p_reviewed_by uuid, p_now timestamptz,
-  p_approve_many_to_one boolean default false
+  p_approve_many_to_one boolean default false, p_force_resolution_id uuid default null
 ) returns jsonb language plpgsql security definer set search_path = '' as $$
 declare
   v_contact public.h2a_contact_mappings%rowtype;
   v_organization public.h2a_organization_mappings%rowtype;
   v_peer_count bigint;
   v_unapproved_count bigint;
+  v_force_reservation uuid;
 begin
   if p_company_id is null or nullif(pg_catalog.btrim(p_portal_id), '') is null
     or p_object_type is null or p_object_type not in ('contacts', 'companies')
@@ -47,6 +51,22 @@ begin
 
   perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
     pg_catalog.jsonb_build_array(p_company_id::text, p_portal_id, 'source', p_object_type, p_source_id)::text, 0));
+  if pg_catalog.to_regclass('public.h2a_dry_run_review_resolutions') is not null then
+    execute 'select r.id from public.h2a_dry_run_review_resolutions r
+      where r.company_id = $1 and r.portal_id = $2 and r.object_type = $3 and r.source_id = $4
+        and r.action = ''force_create_albi'' and r.status in (''pending'', ''applying'')
+      order by r.created_at desc, r.id desc limit 1'
+      into v_force_reservation using p_company_id, p_portal_id, p_object_type, p_source_id;
+    if v_force_reservation is not null and p_force_resolution_id is distinct from v_force_reservation then
+      return pg_catalog.jsonb_build_object('error', 'mapping_reserved');
+    end if;
+    if p_force_resolution_id is not null and
+      (v_force_reservation is null or v_force_reservation <> p_force_resolution_id) then
+      return pg_catalog.jsonb_build_object('error', 'invalid_mapping');
+    end if;
+  elsif p_force_resolution_id is not null then
+    return pg_catalog.jsonb_build_object('error', 'invalid_mapping');
+  end if;
   perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
     pg_catalog.jsonb_build_array(p_company_id::text, 'target', p_object_type, p_target_id)::text, 0));
 
@@ -144,8 +164,8 @@ begin
   return pg_catalog.to_jsonb(v_organization);
 end;
 $$;
-revoke execute on function public.h2a_save_mapping(uuid, text, text, text, text, text, uuid, timestamptz, boolean) from public, anon, authenticated;
-grant execute on function public.h2a_save_mapping(uuid, text, text, text, text, text, uuid, timestamptz, boolean) to service_role;
+revoke execute on function public.h2a_save_mapping(uuid, text, text, text, text, text, uuid, timestamptz, boolean, uuid) from public, anon, authenticated;
+grant execute on function public.h2a_save_mapping(uuid, text, text, text, text, text, uuid, timestamptz, boolean, uuid) to service_role;
 
 create or replace function public.h2a_resolve_conflict(
   p_company_id uuid, p_conflict_id uuid, p_expected_updated_at timestamptz, p_actor_id uuid,
@@ -164,6 +184,7 @@ declare
   v_many_to_one boolean;
   v_peer_count bigint;
   v_unapproved_count bigint;
+  v_force_reserved boolean := false;
   v_field text;
 begin
   v_expected_db_action := case p_api_action
@@ -236,6 +257,13 @@ begin
     perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
       pg_catalog.jsonb_build_array(p_company_id::text, v_conflict.portal_id, 'source',
         v_conflict.object_type, v_conflict.source_id)::text, 0));
+    if pg_catalog.to_regclass('public.h2a_dry_run_review_resolutions') is not null then
+      execute 'select exists (select 1 from public.h2a_dry_run_review_resolutions r
+        where r.company_id = $1 and r.portal_id = $2 and r.object_type = $3 and r.source_id = $4
+          and r.action = ''force_create_albi'' and r.status in (''pending'', ''applying''))'
+        into v_force_reserved using p_company_id, v_conflict.portal_id, v_conflict.object_type, v_conflict.source_id;
+      if v_force_reserved then return pg_catalog.jsonb_build_object('error', 'mapping_conflict'); end if;
+    end if;
     perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
       pg_catalog.jsonb_build_array(p_company_id::text, 'target', v_conflict.object_type, v_target_id)::text, 0));
     if v_conflict.object_type = 'contacts' then

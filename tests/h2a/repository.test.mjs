@@ -777,7 +777,7 @@ test('saveMapping uses the atomic tenant RPC and returns its same-target replay 
   assert.equal(result, mapping)
   assert.deepEqual(calls, [{ name: 'h2a_save_mapping', args: { p_company_id: 'company-1', p_portal_id: '123',
     p_object_type: 'contacts', p_source_id: '42', p_target_id: '7', p_match_method: 'automatic',
-    p_reviewed_by: null, p_now: calls[0].args.p_now, p_approve_many_to_one: false } }])
+    p_reviewed_by: null, p_now: calls[0].args.p_now, p_approve_many_to_one: false, p_force_resolution_id: null } }])
   assert.equal(Number.isNaN(Date.parse(calls[0].args.p_now)), false)
 })
 
