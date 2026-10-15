@@ -22,6 +22,15 @@ const emptyProgress = () => ({ total: 0, needsReview: 0, cleared: 0, noLongerInS
 const AUTH_MESSAGES = new Set(['Authentication required.', 'Invalid authentication token.', 'Administrator access is required.',
   'You are not authorized to access H2A.', 'You are not authorized to access the requested company.', 'A company must be selected.', 'Company not found.'])
 
+async function advisoryWithin(call, timeoutMs) {
+  let timer
+  try {
+    return await Promise.race([Promise.resolve().then(call), new Promise(resolve => {
+      timer = setTimeout(() => resolve(null), timeoutMs)
+    })])
+  } finally { clearTimeout(timer) }
+}
+
 function cursor(value) {
   if (value === undefined) return null
   const invalid = () => fail(400, 'Invalid sample review cursor.')
@@ -73,12 +82,16 @@ async function detail(repository, companyId, runId, row, auth, options, config) 
       Array.isArray(row.candidate_snapshots) && row.candidate_snapshots.length === 0 ||
       actions.includes('force_create_albi') && Array.isArray(row.candidate_snapshots) && row.candidate_snapshots.length > 0)) {
     try {
-      const clients = options.makeClients ? await options.makeClients(companyId) : await createH2AProviderClients({
-        companyId, repository, keyring: options.keyring, env: options.env, fetch: options.fetch })
-      if (options.makeClients || (await clients.hubspot.getAccountInfo()).portalId === config.portal_id) {
-        resolutionOptions = await loadReviewResolutionOptions({ row: { ...row, company_id: companyId }, repository,
+      const timeoutMs = Number.isFinite(options.detailDeadlineMs)
+        ? Math.min(10000, Math.max(1, options.detailDeadlineMs)) : 5000
+      const loaded = await advisoryWithin(async () => {
+        const clients = options.makeClients ? await options.makeClients(companyId) : await createH2AProviderClients({
+          companyId, repository, keyring: options.keyring, env: options.env, fetch: options.fetch })
+        if (!options.makeClients && (await clients.hubspot.getAccountInfo()).portalId !== config.portal_id) return null
+        return loadReviewResolutionOptions({ row: { ...row, company_id: companyId }, repository,
           reads: readOnlyH2ACapabilities(clients) })
-      }
+      }, timeoutMs)
+      if (loaded) resolutionOptions = loaded
     } catch { /* The chooser remains disabled when live evidence cannot be read. */ }
   }
   return { ...projectReviewRow(row, { detail: true }), resolutionStatus: projected.resolution?.status ?? null,

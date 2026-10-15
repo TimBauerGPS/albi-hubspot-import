@@ -88,6 +88,33 @@ test('review detail mode and durable HubSpot outcomes determine safe capability'
   assert.equal(f.calls.some(call => call[0] === 'clients'), true)
 })
 
+test('detail returns safe JSON when advisory provider evidence exceeds its deadline', async () => {
+  const f = fixture()
+  f.options.env = { H2A_REVIEW_RESOLUTION_MODE: 'admins' }
+  f.options.detailDeadlineMs = 5
+  f.options.requireRequest = async () => ({ companyId: 'authorized-company', role: 'admin', isSuperAdmin: false })
+  f.row.source_snapshot = { id: '10', firstName: 'A', lastName: 'Person', email: 'a@example.com' }
+  f.options.makeClients = async () => ({ hubspot: {
+    getContacts: async () => [{ id: '10', properties: { firstname: 'A', lastname: 'Person', email: 'a@example.com' } }],
+    getCompanies: async () => [],
+    getAssociations: async () => [{ fromId: '10', toObjectType: 'companies', toIds: [] }],
+  }, albi: {
+    listContacts: async () => new Promise(() => {}),
+    listOrganizations: async () => new Promise(() => {}),
+  } })
+
+  const response = await Promise.race([
+    createDryRunReviewHandler(f.options)(get({ reviewId })),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('detail did not honor its advisory deadline')), 100)),
+  ])
+
+  assert.equal(response.statusCode, 200)
+  assert.equal(response.headers['Content-Type'], 'application/json')
+  const item = JSON.parse(response.body).item
+  assert.deepEqual(item.forceCreateReadiness, { eligible: false, ready: false })
+  assert.equal(item.resolutionCapability.canResolve, true)
+})
+
 test('detail projects organization choices only after live server association reads', async () => {
   const f = fixture()
   f.options.env = { H2A_REVIEW_RESOLUTION_MODE: 'admins' }
