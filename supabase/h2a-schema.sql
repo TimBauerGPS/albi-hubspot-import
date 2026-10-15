@@ -142,6 +142,7 @@ create table public.h2a_contact_mappings (
   hubspot_id text not null check (length(btrim(hubspot_id)) > 0),
   albi_contact_id text not null check (length(btrim(albi_contact_id)) > 0),
   match_method text not null check (match_method in ('automatic', 'created', 'reviewed')),
+  approved_many_to_one boolean not null default false check (not approved_many_to_one or match_method = 'reviewed'),
   reviewed_by uuid references auth.users(id) on delete set null,
   reviewed_at timestamptz,
   created_at timestamptz not null default now(),
@@ -156,6 +157,7 @@ create table public.h2a_organization_mappings (
   hubspot_id text not null check (length(btrim(hubspot_id)) > 0),
   albi_organization_id text not null check (length(btrim(albi_organization_id)) > 0),
   match_method text not null check (match_method in ('automatic', 'created', 'reviewed')),
+  approved_many_to_one boolean not null default false check (not approved_many_to_one or match_method = 'reviewed'),
   reviewed_by uuid references auth.users(id) on delete set null,
   reviewed_at timestamptz,
   created_at timestamptz not null default now(),
@@ -901,8 +903,8 @@ begin
       and (m.portal_id <> p_portal_id or m.hubspot_id <> p_source_id))
       and not p_approve_many_to_one then return pg_catalog.jsonb_build_object('error', 'many_to_one_required'); end if;
     insert into public.h2a_contact_mappings (company_id, portal_id, hubspot_id, albi_contact_id,
-      match_method, reviewed_by, reviewed_at, updated_at)
-    values (p_company_id, p_portal_id, p_source_id, p_target_id, p_match_method, p_reviewed_by,
+      match_method, approved_many_to_one, reviewed_by, reviewed_at, updated_at)
+    values (p_company_id, p_portal_id, p_source_id, p_target_id, p_match_method, p_approve_many_to_one, p_reviewed_by,
       case when p_match_method = 'reviewed' then p_now else null end, p_now)
     on conflict (company_id, portal_id, hubspot_id) do nothing returning * into v_contact;
     if not found then
@@ -928,8 +930,8 @@ begin
     and (m.portal_id <> p_portal_id or m.hubspot_id <> p_source_id))
     and not p_approve_many_to_one then return pg_catalog.jsonb_build_object('error', 'many_to_one_required'); end if;
   insert into public.h2a_organization_mappings (company_id, portal_id, hubspot_id, albi_organization_id,
-    match_method, reviewed_by, reviewed_at, updated_at)
-  values (p_company_id, p_portal_id, p_source_id, p_target_id, p_match_method, p_reviewed_by,
+    match_method, approved_many_to_one, reviewed_by, reviewed_at, updated_at)
+  values (p_company_id, p_portal_id, p_source_id, p_target_id, p_match_method, p_approve_many_to_one, p_reviewed_by,
     case when p_match_method = 'reviewed' then p_now else null end, p_now)
   on conflict (company_id, portal_id, hubspot_id) do nothing returning * into v_organization;
   if not found then
@@ -1043,14 +1045,14 @@ begin
       if exists (select 1 from public.h2a_contact_mappings m where m.company_id = p_company_id
         and m.portal_id = v_conflict.portal_id and m.hubspot_id = v_conflict.source_id and m.albi_contact_id <> v_target_id)
         then return pg_catalog.jsonb_build_object('error', 'mapping_conflict'); end if;
-      update public.h2a_contact_mappings set match_method = 'reviewed', reviewed_by = p_actor_id,
+      update public.h2a_contact_mappings set match_method = 'reviewed', approved_many_to_one = v_many_to_one, reviewed_by = p_actor_id,
         reviewed_at = p_now, updated_at = p_now
         where company_id = p_company_id and portal_id = v_conflict.portal_id
           and hubspot_id = v_conflict.source_id and albi_contact_id = v_target_id;
       if not found then
         insert into public.h2a_contact_mappings (company_id, portal_id, hubspot_id, albi_contact_id,
-          match_method, reviewed_by, reviewed_at, updated_at)
-        values (p_company_id, v_conflict.portal_id, v_conflict.source_id, v_target_id, 'reviewed', p_actor_id, p_now, p_now)
+          match_method, approved_many_to_one, reviewed_by, reviewed_at, updated_at)
+        values (p_company_id, v_conflict.portal_id, v_conflict.source_id, v_target_id, 'reviewed', v_many_to_one, p_actor_id, p_now, p_now)
         on conflict (company_id, portal_id, hubspot_id) do nothing;
       end if;
     else
@@ -1060,14 +1062,14 @@ begin
       if exists (select 1 from public.h2a_organization_mappings m where m.company_id = p_company_id
         and m.portal_id = v_conflict.portal_id and m.hubspot_id = v_conflict.source_id and m.albi_organization_id <> v_target_id)
         then return pg_catalog.jsonb_build_object('error', 'mapping_conflict'); end if;
-      update public.h2a_organization_mappings set match_method = 'reviewed', reviewed_by = p_actor_id,
+      update public.h2a_organization_mappings set match_method = 'reviewed', approved_many_to_one = v_many_to_one, reviewed_by = p_actor_id,
         reviewed_at = p_now, updated_at = p_now
         where company_id = p_company_id and portal_id = v_conflict.portal_id
           and hubspot_id = v_conflict.source_id and albi_organization_id = v_target_id;
       if not found then
         insert into public.h2a_organization_mappings (company_id, portal_id, hubspot_id, albi_organization_id,
-          match_method, reviewed_by, reviewed_at, updated_at)
-        values (p_company_id, v_conflict.portal_id, v_conflict.source_id, v_target_id, 'reviewed', p_actor_id, p_now, p_now)
+          match_method, approved_many_to_one, reviewed_by, reviewed_at, updated_at)
+        values (p_company_id, v_conflict.portal_id, v_conflict.source_id, v_target_id, 'reviewed', v_many_to_one, p_actor_id, p_now, p_now)
         on conflict (company_id, portal_id, hubspot_id) do nothing;
       end if;
     end if;
@@ -1234,8 +1236,8 @@ create table public.h2a_dry_run_review_resolutions (
   created_by uuid not null references auth.users(id),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  foreign key (company_id, run_id) references public.h2a_sync_runs (company_id, id) on delete cascade,
-  foreign key (company_id, run_id, review_id) references public.h2a_dry_run_reviews (company_id, run_id, id) on delete cascade,
+  foreign key (company_id, run_id) references public.h2a_sync_runs (company_id, id) on delete restrict,
+  foreign key (company_id, run_id, review_id) references public.h2a_dry_run_reviews (company_id, run_id, id) on delete restrict,
   unique (company_id, id),
   unique (company_id, review_id, expected_review_updated_at, decision_hash),
   unique (company_id, client_request_id),
@@ -1243,6 +1245,24 @@ create table public.h2a_dry_run_review_resolutions (
   check ((status = 'applying') = (lease_owner is not null)),
   constraint h2a_review_resolutions_execution_phase_check check ((status = 'applying') = (execution_phase is not null))
 );
+
+do $$
+declare v_constraint record;
+begin
+  for v_constraint in select conname from pg_catalog.pg_constraint
+    where conrelid = 'public.h2a_dry_run_review_resolutions'::pg_catalog.regclass
+      and contype = 'f' and confrelid in ('public.h2a_sync_runs'::pg_catalog.regclass,
+        'public.h2a_dry_run_reviews'::pg_catalog.regclass)
+  loop
+    execute pg_catalog.format('alter table public.h2a_dry_run_review_resolutions drop constraint %I', v_constraint.conname);
+  end loop;
+  alter table public.h2a_dry_run_review_resolutions
+    add constraint h2a_review_resolution_run_retention_fk foreign key (company_id, run_id)
+      references public.h2a_sync_runs (company_id, id) on delete restrict,
+    add constraint h2a_review_resolution_review_retention_fk foreign key (company_id, run_id, review_id)
+      references public.h2a_dry_run_reviews (company_id, run_id, id) on delete restrict;
+end;
+$$;
 
 -- Reruns can add the phase column to a previous draft, but cannot guess the
 -- source phase of an already-applying legacy lease. Validation fails closed.
@@ -1379,6 +1399,10 @@ begin
     return pg_catalog.jsonb_build_object('resolution', pg_catalog.to_jsonb(v_row), 'created', false);
   end if;
   if v_review.updated_at is distinct from p_expected_review_updated_at then
+    return pg_catalog.jsonb_build_object('error', 'stale');
+  end if;
+  if v_review.status <> 'needs_review' and not (p_action = 'create_albi'
+    and v_review.status = 'cleared' and v_review.recheck_outcome = 'safe_to_create') then
     return pg_catalog.jsonb_build_object('error', 'stale');
   end if;
   v_now := pg_catalog.clock_timestamp();
@@ -1536,5 +1560,37 @@ end;
 $$;
 revoke execute on function public.h2a_upsert_contact_organization_choice(uuid, text, text, text, uuid) from public, anon, authenticated;
 grant execute on function public.h2a_upsert_contact_organization_choice(uuid, text, text, text, uuid) to service_role;
+
+create or replace function public.h2a_retain_review_resolution_runs(
+  p_company_id uuid, p_keep_run_id uuid
+) returns jsonb language plpgsql security invoker set search_path = '' as $$
+declare
+  v_runs jsonb;
+begin
+  if p_company_id is null or p_keep_run_id is null or not exists (
+    select 1 from public.h2a_sync_runs r where r.company_id = p_company_id and r.id = p_keep_run_id
+      and r.mode = 'dry_run' and r.status = 'completed'
+  ) then
+    raise exception 'invalid_review_retention';
+  end if;
+  with changed as (
+    update public.h2a_dry_run_review_resolutions r
+      set status = 'superseded', provider_outcome_code = 'superseded', updated_at = pg_catalog.clock_timestamp()
+      where r.company_id = p_company_id and r.run_id <> p_keep_run_id
+        and r.status in ('pending', 'waiting_on_albi', 'ready_to_recheck', 'failed')
+        and r.lease_owner is null
+      returning r.company_id, r.id, r.created_by
+  )
+  insert into public.h2a_dry_run_review_resolution_events
+    (company_id, resolution_id, actor_id, event_type, sanitized_details)
+    select company_id, id, created_by, 'superseded', '{"code":"superseded"}'::jsonb from changed;
+  select coalesce(pg_catalog.jsonb_agg(distinct r.run_id::text), '[]'::jsonb)
+    into v_runs from public.h2a_dry_run_review_resolutions r
+    where r.company_id = p_company_id and r.run_id <> p_keep_run_id;
+  return v_runs;
+end;
+$$;
+revoke execute on function public.h2a_retain_review_resolution_runs(uuid, uuid) from public, anon, authenticated;
+grant execute on function public.h2a_retain_review_resolution_runs(uuid, uuid) to service_role;
 
 commit;

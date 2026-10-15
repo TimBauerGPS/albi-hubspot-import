@@ -18,6 +18,7 @@ const COMPARISON_FIELDS = Object.freeze([
   ['city', 'City'], ['state', 'State / region'], ['zipcode', 'Postal code'], ['country', 'Country'],
 ])
 const STATUSES = new Set(['needs_review', 'cleared', 'no_longer_in_scope'])
+const RESOLUTION_STATUSES = new Set(['pending', 'applying', 'waiting_on_albi', 'ready_to_recheck', 'completed', 'failed', 'superseded'])
 const EVIDENCE = new Set(['existing_mapping', 'email', 'phone', 'mobilePhone', 'name', 'domain', 'address'])
 const CHANGE_FIELDS = new Set(SOURCE_FIELDS.map(([key]) => key))
 
@@ -85,10 +86,12 @@ export function presentSampleReviewItem(item) {
     sourceId: safeScalar(input.sourceId) ?? source.id ?? 'Not provided', reason,
     reasonLabel: copy.label, guidance: copy.guidance,
     status: STATUSES.has(input.status) ? input.status : 'needs_review',
+    resolutionStatus: RESOLUTION_STATUSES.has(input.resolutionStatus) ? input.resolutionStatus : null,
     displayName: displayName || source.name || 'Not provided', source,
     candidates, matchEvidence: Array.isArray(input.matchEvidence) ? [...new Set(input.matchEvidence.filter(value => EVIDENCE.has(value)))] : [],
     proposedChanges: safeChanges(input.proposedChanges),
-    resolutionFields, actions: input.status === 'needs_review' || input.status === undefined ? [...copy.actions] : [],
+    resolutionFields, actions: input.status === 'needs_review' || input.status === undefined ? [...copy.actions]
+      : input.status === 'cleared' && input.recheckOutcome === 'safe_to_create' && copy.actions.includes('create_albi') ? ['create_albi'] : [],
     portalId, hubspotUrl: buildHubSpotRecordUrl(portalId, objectType, input.sourceId ?? source.id),
     candidateLinks: candidates.map(candidate => ({ id: candidate.id, url: buildAlbiRecordUrl(objectType, candidate.id) })),
     resolution: presentReviewResolution(input.resolution), resolutionCapability: presentResolutionCapability(input.resolutionCapability),

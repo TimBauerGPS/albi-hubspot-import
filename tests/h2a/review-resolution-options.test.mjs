@@ -74,3 +74,19 @@ test('duplicate organization mappings cannot become an actionable option', async
   const result = await loadReviewResolutionOptions({ row, repository: { getMappings: async () => duplicate }, reads })
   assert.deepEqual(result.organizationOptions, [])
 })
+
+test('first sample derives advisory organization choices from unique live matches without mappings', async () => {
+  const first = { ...row, reason: 'multiple_associated_organizations', candidate_snapshots: [] }
+  const live = { hubspotRead: {
+    getContacts: async () => [{ id: '123', properties: { firstname: 'A', lastname: 'B', email: 'a@example.com' } }],
+    getCompanies: async ids => [{ id: ids[0], properties: { name: ids[0] === '777' ? 'One' : 'Two', domain: `${ids[0]}.example` } }],
+    getAssociations: async () => [{ fromId: '123', toObjectType: 'companies', toIds: ['777', '778'] }],
+  }, albiRead: {
+    listContacts: async () => ({ records: [{ id: '456', firstName: 'A', lastName: 'B', email: 'a@example.com' }], cursor: null }),
+    listOrganizations: async () => ({ records: [{ id: '888', name: 'One', domain: '777.example' },
+      { id: '889', name: 'Two', domain: '778.example' }], cursor: null }),
+  } }
+  const result = await loadReviewResolutionOptions({ row: first, repository: { getMappings: async () => ({ contacts: [], organizations: [], options: [] }) }, reads: live })
+  assert.deepEqual(result.organizationOptions.map(option => [option.sourceId, option.targetId, option.contactTargetId, option.associated]),
+    [['777', '888', '456', true], ['778', '889', '456', true]])
+})

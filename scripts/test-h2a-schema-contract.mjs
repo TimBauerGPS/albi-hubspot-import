@@ -102,8 +102,8 @@ test('durable resolution tables preserve tenant identity, fixed states, append-o
     assert.deepEqual(values(events, 'event_type'), ['planned', 'claimed', 'provider_applied', 'provider_reconciled', 'waiting_on_albi', 'recheck_requested', 'completed', 'failed', 'superseded'])
     assert.match(resolutions, /unique \(company_id, review_id, expected_review_updated_at, decision_hash\)/)
     assert.match(resolutions, /unique \(company_id, client_request_id\)/)
-    assert.match(resolutions, /foreign key \(company_id, run_id\) references public\.h2a_sync_runs \(company_id, id\) on delete cascade/)
-    assert.match(resolutions, /foreign key \(company_id, run_id, review_id\) references public\.h2a_dry_run_reviews \(company_id, run_id, id\) on delete cascade/)
+    assert.match(resolutions, /foreign key \(company_id, run_id\) references public\.h2a_sync_runs \(company_id, id\) on delete restrict/)
+    assert.match(resolutions, /foreign key \(company_id, run_id, review_id\) references public\.h2a_dry_run_reviews \(company_id, run_id, id\) on delete restrict/)
     assert.match(resolutions, /decision_hash ~ '\^\[a-f0-9\]\{64\}\$'/)
     assert.match(resolutions, /check \(\(lease_owner is null\) = \(lease_expires_at is null\)\)/)
     assert.match(events, /foreign key \(company_id, resolution_id\) references public\.h2a_dry_run_review_resolutions \(company_id, id\) on delete cascade/)
@@ -122,6 +122,19 @@ test('durable resolution tables preserve tenant identity, fixed states, append-o
     assert.match(sql, /add constraint h2a_dry_run_reviews_company_run_id_key unique \(company_id, run_id, id\)/)
     assert.doesNotMatch(sql, /add constraint if not exists/)
   }
+})
+
+test('retention RPC supersedes nonleased old intents and keeps their review rows', () => {
+  for (const sql of [readSchema(), readResolutionMigration()]) {
+    const body = functionBody(sql, 'h2a_retain_review_resolution_runs')
+    assert.match(body, /status in \('pending', 'waiting_on_albi', 'ready_to_recheck', 'failed'\)/)
+    assert.match(body, /lease_owner is null/)
+    assert.match(body, /insert into public\.h2a_dry_run_review_resolution_events/)
+    assert.match(body, /event_type[\s\S]*'superseded'/)
+    assert.match(body, /select[^;]*run_id[^;]*from public\.h2a_dry_run_review_resolutions/)
+    assert.match(sql, /grant execute on function public\.h2a_retain_review_resolution_runs\(uuid, uuid\) to service_role;/)
+  }
+  assert.match(readResolutionMigration(), /drop constraint %i/)
 })
 
 test('resolution RPCs fail closed, pin invoker search paths, and expose execution only to service role', () => {
@@ -482,8 +495,8 @@ test('conflict resolution is an atomic tenant-scoped CAS that appends audit, map
   assert.ok(organizationTargetLock > sourceIdentityLock, 'organization target lock must follow the source lock')
   assert.match(body, /hubspot_id = v_conflict\.source_id and m\.albi_contact_id <> v_target_id/)
   assert.match(body, /hubspot_id = v_conflict\.source_id and m\.albi_organization_id <> v_target_id/)
-  assert.match(body, /update public\.h2a_contact_mappings[\s\S]*?set match_method = 'reviewed', reviewed_by = p_actor_id,\s*reviewed_at = p_now, updated_at = p_now[\s\S]*?and albi_contact_id = v_target_id/)
-  assert.match(body, /update public\.h2a_organization_mappings[\s\S]*?set match_method = 'reviewed', reviewed_by = p_actor_id,\s*reviewed_at = p_now, updated_at = p_now[\s\S]*?and albi_organization_id = v_target_id/)
+  assert.match(body, /update public\.h2a_contact_mappings[\s\S]*?set match_method = 'reviewed', approved_many_to_one = v_many_to_one, reviewed_by = p_actor_id,\s*reviewed_at = p_now, updated_at = p_now[\s\S]*?and albi_contact_id = v_target_id/)
+  assert.match(body, /update public\.h2a_organization_mappings[\s\S]*?set match_method = 'reviewed', approved_many_to_one = v_many_to_one, reviewed_by = p_actor_id,\s*reviewed_at = p_now, updated_at = p_now[\s\S]*?and albi_organization_id = v_target_id/)
   assert.doesNotMatch(body, /on conflict \(company_id, portal_id, hubspot_id\) do update set albi_(?:contact|organization)_id/)
   assert.match(body, /insert into public\.h2a_contact_mappings/)
   assert.match(body, /insert into public\.h2a_organization_mappings/)
@@ -528,6 +541,7 @@ test('mapping ownership is tenant-wide, source-then-target serialized, and requi
     assert.ok(sourceLock >= 0 && targetLock > sourceLock)
     assert.ok(targetLock < save.indexOf('select * into v_contact'))
     for (const [table, target] of [['h2a_contact_mappings', 'albi_contact_id'], ['h2a_organization_mappings', 'albi_organization_id']]) {
+      assert.match(sql, new RegExp(`(?:create table public\\.${table}[\\s\\S]*?|alter table public\\.${table} add column if not exists )approved_many_to_one boolean not null default false`))
       assert.match(save, new RegExp(`from public\\.${table} m where m\\.company_id = p_company_id\\s+and m\\.${target} = p_target_id\\s+and \\(m\\.portal_id <> p_portal_id or m\\.hubspot_id <> p_source_id\\)`))
       assert.match(resolve, new RegExp(`and m\\.${target} = v_target_id and \\(m\\.portal_id <> v_conflict\\.portal_id or m\\.hubspot_id <> v_conflict\\.source_id\\)`))
       assert.ok(save.indexOf('many_to_one_required') < save.indexOf(`insert into public.${table}`))

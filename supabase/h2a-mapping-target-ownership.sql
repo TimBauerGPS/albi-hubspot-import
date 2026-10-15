@@ -4,6 +4,23 @@
 
 begin;
 
+alter table public.h2a_contact_mappings add column if not exists approved_many_to_one boolean not null default false;
+alter table public.h2a_organization_mappings add column if not exists approved_many_to_one boolean not null default false;
+do $$
+begin
+  if not exists (select 1 from pg_catalog.pg_constraint where conname = 'h2a_contact_many_to_one_reviewed_check'
+    and conrelid = 'public.h2a_contact_mappings'::pg_catalog.regclass) then
+    alter table public.h2a_contact_mappings add constraint h2a_contact_many_to_one_reviewed_check
+      check (not approved_many_to_one or match_method = 'reviewed');
+  end if;
+  if not exists (select 1 from pg_catalog.pg_constraint where conname = 'h2a_organization_many_to_one_reviewed_check'
+    and conrelid = 'public.h2a_organization_mappings'::pg_catalog.regclass) then
+    alter table public.h2a_organization_mappings add constraint h2a_organization_many_to_one_reviewed_check
+      check (not approved_many_to_one or match_method = 'reviewed');
+  end if;
+end;
+$$;
+
 drop function if exists public.h2a_save_mapping(uuid, text, text, text, text, text, uuid, timestamptz);
 
 create or replace function public.h2a_save_mapping(
@@ -46,8 +63,8 @@ begin
       and (m.portal_id <> p_portal_id or m.hubspot_id <> p_source_id))
       and not p_approve_many_to_one then return pg_catalog.jsonb_build_object('error', 'many_to_one_required'); end if;
     insert into public.h2a_contact_mappings (company_id, portal_id, hubspot_id, albi_contact_id,
-      match_method, reviewed_by, reviewed_at, updated_at)
-    values (p_company_id, p_portal_id, p_source_id, p_target_id, p_match_method, p_reviewed_by,
+      match_method, approved_many_to_one, reviewed_by, reviewed_at, updated_at)
+    values (p_company_id, p_portal_id, p_source_id, p_target_id, p_match_method, p_approve_many_to_one, p_reviewed_by,
       case when p_match_method = 'reviewed' then p_now else null end, p_now)
     on conflict (company_id, portal_id, hubspot_id) do nothing returning * into v_contact;
     if not found then
@@ -73,8 +90,8 @@ begin
     and (m.portal_id <> p_portal_id or m.hubspot_id <> p_source_id))
     and not p_approve_many_to_one then return pg_catalog.jsonb_build_object('error', 'many_to_one_required'); end if;
   insert into public.h2a_organization_mappings (company_id, portal_id, hubspot_id, albi_organization_id,
-    match_method, reviewed_by, reviewed_at, updated_at)
-  values (p_company_id, p_portal_id, p_source_id, p_target_id, p_match_method, p_reviewed_by,
+    match_method, approved_many_to_one, reviewed_by, reviewed_at, updated_at)
+  values (p_company_id, p_portal_id, p_source_id, p_target_id, p_match_method, p_approve_many_to_one, p_reviewed_by,
     case when p_match_method = 'reviewed' then p_now else null end, p_now)
   on conflict (company_id, portal_id, hubspot_id) do nothing returning * into v_organization;
   if not found then
@@ -186,14 +203,14 @@ begin
       if exists (select 1 from public.h2a_contact_mappings m where m.company_id = p_company_id
         and m.portal_id = v_conflict.portal_id and m.hubspot_id = v_conflict.source_id and m.albi_contact_id <> v_target_id)
         then return pg_catalog.jsonb_build_object('error', 'mapping_conflict'); end if;
-      update public.h2a_contact_mappings set match_method = 'reviewed', reviewed_by = p_actor_id,
+      update public.h2a_contact_mappings set match_method = 'reviewed', approved_many_to_one = v_many_to_one, reviewed_by = p_actor_id,
         reviewed_at = p_now, updated_at = p_now
         where company_id = p_company_id and portal_id = v_conflict.portal_id
           and hubspot_id = v_conflict.source_id and albi_contact_id = v_target_id;
       if not found then
         insert into public.h2a_contact_mappings (company_id, portal_id, hubspot_id, albi_contact_id,
-          match_method, reviewed_by, reviewed_at, updated_at)
-        values (p_company_id, v_conflict.portal_id, v_conflict.source_id, v_target_id, 'reviewed', p_actor_id, p_now, p_now)
+          match_method, approved_many_to_one, reviewed_by, reviewed_at, updated_at)
+        values (p_company_id, v_conflict.portal_id, v_conflict.source_id, v_target_id, 'reviewed', v_many_to_one, p_actor_id, p_now, p_now)
         on conflict (company_id, portal_id, hubspot_id) do nothing;
       end if;
     else
@@ -203,14 +220,14 @@ begin
       if exists (select 1 from public.h2a_organization_mappings m where m.company_id = p_company_id
         and m.portal_id = v_conflict.portal_id and m.hubspot_id = v_conflict.source_id and m.albi_organization_id <> v_target_id)
         then return pg_catalog.jsonb_build_object('error', 'mapping_conflict'); end if;
-      update public.h2a_organization_mappings set match_method = 'reviewed', reviewed_by = p_actor_id,
+      update public.h2a_organization_mappings set match_method = 'reviewed', approved_many_to_one = v_many_to_one, reviewed_by = p_actor_id,
         reviewed_at = p_now, updated_at = p_now
         where company_id = p_company_id and portal_id = v_conflict.portal_id
           and hubspot_id = v_conflict.source_id and albi_organization_id = v_target_id;
       if not found then
         insert into public.h2a_organization_mappings (company_id, portal_id, hubspot_id, albi_organization_id,
-          match_method, reviewed_by, reviewed_at, updated_at)
-        values (p_company_id, v_conflict.portal_id, v_conflict.source_id, v_target_id, 'reviewed', p_actor_id, p_now, p_now)
+          match_method, approved_many_to_one, reviewed_by, reviewed_at, updated_at)
+        values (p_company_id, v_conflict.portal_id, v_conflict.source_id, v_target_id, 'reviewed', v_many_to_one, p_actor_id, p_now, p_now)
         on conflict (company_id, portal_id, hubspot_id) do nothing;
       end if;
     end if;

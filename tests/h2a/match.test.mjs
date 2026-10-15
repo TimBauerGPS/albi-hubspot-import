@@ -11,6 +11,19 @@ import {
 const contact = (id, fields) => ({ id, ...fields })
 const org = (id, fields) => ({ id, ...fields })
 
+test('approved tenant and portal scoped many-to-one mapping remains usable on later matches', () => {
+  for (const [decide, source, candidates, targetKey] of [
+    [decideContactMatch, { id: '42', properties: { firstname: 'A', lastname: 'B', email: 'a@example.com' } }, [contact('7', { email: 'a@example.com' })], 'albi_contact_id'],
+    [decideOrganizationMatch, { id: '42', properties: { name: 'A', domain: 'a.example' } }, [org('7', { domain: 'a.example' })], 'albi_organization_id'],
+  ]) {
+    const rows = [{ company_id: 'tenant', portal_id: '123', hubspot_id: '41', [targetKey]: '7' },
+      { company_id: 'tenant', portal_id: '123', hubspot_id: '42', [targetKey]: '7', match_method: 'reviewed', approved_many_to_one: true }]
+    assert.equal(decide({ source, candidates, mappings: rows, existingMapping: rows[1], portalId: '123' }).action, 'link')
+    assert.equal(decide({ source, candidates, mappings: [{ ...rows[0] }, { ...rows[1], approved_many_to_one: false }],
+      existingMapping: { ...rows[1], approved_many_to_one: false }, portalId: '123' }).action, 'conflict')
+  }
+})
+
 test('review candidates retain identity evidence without unrelated name matches or changing decisions', () => {
   const input = { source: { firstname: 'A', lastname: 'Person', email: 'a@example.com', phone: '5551112222' },
     candidates: [contact('z', { email: 'a@example.com' }), contact('a', { phoneNumber: '5551112222' }),
@@ -239,7 +252,7 @@ test('conflicts for organization name only, duplicates, and contradictory eviden
   assert.equal(contradictory.reason, 'contradictory_evidence')
 })
 
-test('applies shared field policy: equal unchanged, blank filled, different nonblank proposed', () => {
+test('applies shared field policy: equal unchanged, explicit blank reviewable, different nonblank proposed', () => {
   const changes = decideFieldChanges({
     entityType: 'contact',
     source: { email: 'JANE@example.com', phone: '(415) 555-0123', address: '1 Oak Rd.' },
@@ -247,7 +260,8 @@ test('applies shared field policy: equal unchanged, blank filled, different nonb
   })
   assert.deepEqual(changes, {
     updates: { phoneNumber: '415-555-0123' },
-    conflicts: { address1: { current: '2 Pine Rd.', proposed: '1 Oak Rd.' } },
+    conflicts: { phoneNumber: { current: null, proposed: '(415) 555-0123' },
+      address1: { current: '2 Pine Rd.', proposed: '1 Oak Rd.' } },
     unchanged: ['email'],
   })
 })

@@ -373,6 +373,7 @@ export function safeResolutionInternalEventDetails(value) {
   const details = safeResolutionEventDetails(value)
   const context = safeResolutionExecutionContext(record(value).executionContext)
   if (context) details.executionContext = context
+  if (isResolutionProviderId(record(value).createReceiptId)) details.createReceiptId = value.createReceiptId
   return details
 }
 

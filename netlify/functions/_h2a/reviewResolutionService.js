@@ -4,6 +4,7 @@ import { ApiError, isRecord, malformed } from './http.js'
 import { H2AReviewError, resolveReviewSample } from './reviewService.js'
 import { buildReviewResolutionPlan, hashResolutionDecision, normalizeResolutionDecision, safeResolutionEventDetails,
   safeResolutionExecutionContext, resolutionCanonicalField, RESOLUTION_EVENT_LIMIT } from './reviewResolution.js'
+import { isResolutionProviderId } from './reviewResolution.js'
 import { safeReviewSnapshot } from './review.js'
 import { decideContactMatch, decideOrganizationMatch } from './match.js'
 import { normalizePhone } from './normalize.js'
@@ -179,13 +180,20 @@ function propertiesMatch(source, properties) {
     (source.properties[key] === null ? '' : source.properties[key]) === value)
 }
 
-function exactCreateTarget(row, plan, current) {
+function exactCreateTarget(row, plan, current, receiptId = null) {
   const verify = plan.verification.create
   const rows = row.object_type === 'contacts' ? current.mappings.contacts : current.mappings.organizations
-  const match = (row.object_type === 'contacts' ? decideContactMatch : decideOrganizationMatch)({ source: { id: row.source_id, ...row.source_snapshot },
-    candidates: current.candidates, mappings: rows, portalId: row.portal_id })
-  if (match.action !== 'link') return null
-  const matches = current.candidates.filter(item => item.id === match.targetId)
+  let targetId = receiptId
+  if (targetId) {
+    const key = row.object_type === 'contacts' ? 'albi_contact_id' : 'albi_organization_id'
+    if (rows.some(item => item[key] === targetId && (item.portal_id !== row.portal_id || item.hubspot_id !== row.source_id))) return null
+  } else {
+    const match = (row.object_type === 'contacts' ? decideContactMatch : decideOrganizationMatch)({ source: { id: row.source_id, ...row.source_snapshot },
+      candidates: current.candidates, mappings: rows, portalId: row.portal_id })
+    if (match.action !== 'link') return null
+    targetId = match.targetId
+  }
+  const matches = current.candidates.filter(item => item.id === targetId)
   if (matches.length !== 1) return null
   const target = matches[0]
   for (const [field, value] of Object.entries(verify.payload)) {
@@ -245,6 +253,9 @@ async function runClaim(deps, input, saved, context) {
     const events = await bounded(deps, () => deps.repository.listReviewResolutionEvents(input.companyId, saved.id), deadline)
     if (!Array.isArray(events)) malformed('resolution')
     const persisted = events.find(event => event.event_type === 'claimed' && event.sanitized_details?.executionContext)
+    const receipts = [...new Set(events.map(event => event.sanitized_details?.createReceiptId).filter(Boolean))]
+    if (receipts.length > 1) malformed('resolution')
+    let createReceiptId = receipts[0] ?? null
     if (!persisted && events.length >= RESOLUTION_EVENT_LIMIT) throw new ApiError('permanent', { code: 'operation_failed' })
     const contextPlan = persisted ? safeResolutionExecutionContext(persisted.sanitized_details.executionContext) : null
     if (persisted && !contextPlan || contextPlan && (contextPlan.decisionHash !== hashResolutionDecision(saved.decision) ||
@@ -295,7 +306,7 @@ async function runClaim(deps, input, saved, context) {
     }
     let createTarget = null
     if (operation?.provider === 'albi') {
-      createTarget = exactCreateTarget(row, plan, current)
+      createTarget = exactCreateTarget(row, plan, current, createReceiptId)
       if (createTarget) reconciled = true
       else if (contextPlan) throw new ApiError('permanent', { code: 'operation_failed' })
       else {
@@ -313,12 +324,20 @@ async function runClaim(deps, input, saved, context) {
           () => clients.hubspotWrite[operation.operation](operation.id, operation.properties), deadline)
         else if (operation.provider === 'hubspot') await bounded(deps,
           () => clients.hubspotWrite.addContactCompanyAssociation(operation.contactId, operation.companyId), deadline)
-        else await bounded(deps, () => clients.albiWrite[operation.operation](operation.payload), deadline)
+        else {
+          const receipt = await bounded(deps, () => clients.albiWrite[operation.operation](operation.payload), deadline)
+          if (!isResolutionProviderId(receipt?.id)) malformed('resolution')
+          createReceiptId = receipt.id
+          // This event is durable before any verification read. A retry can
+          // identify the exact new record even when names are not unique keys.
+          await caps.appendReviewResolutionEvent(input.companyId, saved.id,
+            { actorId: input.actorId, eventType: 'claimed', details: { createReceiptId } })
+        }
       } catch (error) {
         // All ambiguous responses are verified by reads. Permission/validation
         // failures still retain the intent and return a fixed, sanitized outcome.
         const after = await evidence(deps, clients, row, saved.decision, deadline)
-        createTarget = plan.verification.create ? exactCreateTarget(row, plan, after) : null
+        createTarget = plan.verification.create ? exactCreateTarget(row, plan, after, createReceiptId) : null
         const verified = plan.verification.properties ? propertiesMatch(after.source, plan.verification.properties)
           : plan.verification.association ? after.associatedCompanyIds.includes(plan.verification.association.companyId) : !!createTarget
         if (!verified) throw error
@@ -326,7 +345,7 @@ async function runClaim(deps, input, saved, context) {
       }
       if (!reconciled) {
         const after = await evidence(deps, clients, row, saved.decision, deadline)
-        createTarget = plan.verification.create ? exactCreateTarget(row, plan, after) : null
+        createTarget = plan.verification.create ? exactCreateTarget(row, plan, after, createReceiptId) : null
         const verified = plan.verification.properties ? propertiesMatch(after.source, plan.verification.properties)
           : plan.verification.association ? after.associatedCompanyIds.includes(plan.verification.association.companyId) : !!createTarget
         if (!verified) malformed('resolution')
@@ -357,6 +376,8 @@ export async function executeReviewResolution(deps, input) {
     actorId: input.actorId, expectedUpdatedAt: input.expectedUpdatedAt, clientRequestId: input.clientRequestId, decision })
   const saved = rpc(created)
   if (terminal(saved)) return { resolution: saved }
+  if (context.row.status !== 'needs_review' && !(decision.action === 'create_albi' &&
+    context.row.status === 'cleared' && context.row.recheck_outcome === 'safe_to_create')) stale()
   return runClaim(deps, input, saved, context)
 }
 

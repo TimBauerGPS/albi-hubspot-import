@@ -59,10 +59,16 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
     if (associated === null) return unavailable
 
     if (actions.includes('choose_organization') && row.object_type === 'contacts') {
-      const contactTargetId = exactMapping(mappings.contacts, row.portal_id, row.source_id, 'contacts')
-      if (!contactTargetId) return unavailable
       const contacts = await all(args => reads.albiRead.listContacts(args))
       const organizations = await all(args => reads.albiRead.listOrganizations(args))
+      if (!contacts || !organizations) return unavailable
+      const contactMappings = mappings.contacts.filter(item => item?.portal_id === row.portal_id && mappedSource(item) === row.source_id)
+      if (contactMappings.length > 1) return unavailable
+      const contactMatch = decideContactMatch({ source: sourceRows[0], candidates: contacts,
+        mappings: mappings.contacts, portalId: row.portal_id,
+        existingMapping: contactMappings[0] })
+      const contactTargetId = contactMatch.action === 'link' ? contactMatch.targetId : null
+      if (!providerId(contactTargetId)) return unavailable
       const contact = contacts?.find(item => item.id === contactTargetId)
       if (!contact || !organizations) return unavailable
       const currentOrganizationTargetId = contact.organizationId == null || contact.organizationId === '' ? null : contact.organizationId
@@ -71,11 +77,16 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
       const mappedSources = mappings.organizations.filter(item => item?.portal_id === row.portal_id && providerId(mappedSource(item)))
         .map(mappedSource)
       for (const sourceId of [...new Set([...associated, ...mappedSources])].slice(0, 25)) {
-        const targetId = exactMapping(mappings.organizations, row.portal_id, sourceId, 'companies')
-        if (!targetId || !organizations.some(item => item.id === targetId)) continue
         const companies = await hubspot.getCompanies([sourceId])
         if (!Array.isArray(companies) || companies.length !== 1 || companies[0]?.id !== sourceId ||
           companies[0]?.archived === true || !record(companies[0]?.properties)) continue
+        const organizationMappings = mappings.organizations.filter(item => item?.portal_id === row.portal_id && mappedSource(item) === sourceId)
+        if (organizationMappings.length > 1) continue
+        const match = decideOrganizationMatch({ source: companies[0], candidates: organizations,
+          mappings: mappings.organizations, portalId: row.portal_id,
+          existingMapping: organizationMappings[0] })
+        const targetId = match.action === 'link' ? match.targetId : null
+        if (!providerId(targetId) || !organizations.some(item => item.id === targetId)) continue
         organizationOptions.push({ sourceId, targetId, contactTargetId, currentOrganizationTargetId,
           associated: associated.includes(sourceId),
           contactUrl: buildAlbiRecordUrl('contacts', contactTargetId), organizationUrl: buildAlbiRecordUrl('companies', targetId) })
@@ -83,7 +94,7 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
       return { ...unavailable, organizationOptions }
     }
 
-    if (actions.includes('create_albi') && row.status === 'needs_review' &&
+    if (actions.includes('create_albi') && (row.status === 'needs_review' || row.status === 'cleared' && row.recheck_outcome === 'safe_to_create') &&
       Array.isArray(row.candidate_snapshots) && row.candidate_snapshots.length === 0 && associated.length <= 1 &&
       !mappings[row.object_type === 'contacts' ? 'contacts' : 'organizations'].some(item =>
         item?.portal_id === row.portal_id && mappedSource(item) === row.source_id)) {

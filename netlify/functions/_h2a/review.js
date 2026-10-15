@@ -20,6 +20,7 @@ const ERROR_CODES = frozenSet(H2A_REVIEW_ERROR_CODES)
 const REVIEW_OUTCOMES = frozenSet(['still_needs_review', 'safe_to_link', 'safe_to_create', 'source_missing', 'recheck_failed'])
 const EVENT_TYPES = frozenSet(['captured', 'recheck_started', 'still_needs_review', 'cleared', 'no_longer_in_scope', 'recheck_failed'])
 const STATUSES = frozenSet(['needs_review', 'cleared', 'no_longer_in_scope'])
+const RESOLUTION_STATUSES = frozenSet(['pending', 'applying', 'waiting_on_albi', 'ready_to_recheck', 'completed', 'failed', 'superseded'])
 const EVIDENCE = frozenSet(['existing_mapping', 'email', 'phone', 'mobilePhone', 'name', 'domain', 'address'])
 
 export const REVIEW_REASONS = frozenSet(Object.keys(H2A_REVIEW_REASON_CATALOG))
@@ -228,6 +229,7 @@ export function projectReviewRow(row, { detail = false } = {}) {
     id: scalar(stored.id), runId: scalar(stored.run_id), objectType, sourceId: scalar(stored.source_id),
     reason: displayReason(stored.reason), conflictType: REVIEW_CONFLICT_TYPES.has(stored.conflict_type) ? stored.conflict_type : 'other_review_reason',
     status: STATUSES.has(stored.status) ? stored.status : null, recheckOutcome: REVIEW_OUTCOMES.has(stored.recheck_outcome) ? stored.recheck_outcome : null,
+    resolutionStatus: RESOLUTION_STATUSES.has(stored.resolution_status) ? stored.resolution_status : null,
   }
   if (detail) {
     projected.portalId = typeof stored.portal_id === 'string' && /^[1-9]\d{0,99}$/.test(stored.portal_id) ? stored.portal_id : null

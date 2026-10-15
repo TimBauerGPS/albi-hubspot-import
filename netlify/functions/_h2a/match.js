@@ -119,11 +119,18 @@ function fieldValues(record, fields) {
   return result
 }
 
+function hasExplicitBlank(record, aliases) {
+  return aliases.some((alias) => Object.hasOwn(record, alias) &&
+    (record[alias] === null || record[alias] === '' ||
+      typeof record[alias] === 'string' && record[alias].trim() === ''))
+}
+
 function changesFor(entityType, source, target) {
   const changes = EMPTY_CHANGES()
   const fields = canonicalFields(entityType)
   const sourceValues = fieldValues(propertiesOf(source), fields)
-  const targetValues = fieldValues(propertiesOf(target), fields)
+  const targetRecord = propertiesOf(target)
+  const targetValues = fieldValues(targetRecord, fields)
 
   for (const definition of fields) {
     if (!sourceValues.has(definition.name)) continue
@@ -141,11 +148,17 @@ function changesFor(entityType, source, target) {
       }
       if (targetValue === null) {
         changes.updates[definition.name] = phone.writable
+        if (hasExplicitBlank(targetRecord, definition.aliases)) {
+          changes.conflicts[definition.name] = { current: null, proposed: sourceValue }
+        }
         continue
       }
     }
     if (targetValue === null) {
       changes.updates[definition.name] = sourceValue
+      if (hasExplicitBlank(targetRecord, definition.aliases)) {
+        changes.conflicts[definition.name] = { current: null, proposed: sourceValue }
+      }
       continue
     }
     const normalize = definition.phone ? (value) => phoneInfo(value).comparable : definition.normalize
@@ -188,9 +201,13 @@ function resolveMapping(input, entityType, source, candidates) {
   const sourceId = identityId(input, source)
   const mappingSourceId = mappedSourceId(mapping)
   const mappingPortalId = mapping.portal_id ?? mapping.portalId
+  const owners = input.mappings ?? input.existingMappings ?? []
+  const approvedSharedTarget = mapping.approved_many_to_one === true && mapping.match_method === 'reviewed' &&
+    (input.companyId == null || mapping.company_id === input.companyId) &&
+    owners.every(owner => !mapping.company_id || !owner.company_id || owner.company_id === mapping.company_id)
   if (!targetId || sourceId === null || mappingSourceId === null || mappingSourceId !== sourceId ||
       input.portalId != null && mappingPortalId !== undefined && String(mappingPortalId) !== String(input.portalId) ||
-      ownershipConflict(sourceId, targetId, input.mappings ?? input.existingMappings ?? [], input.portalId ?? null)) {
+      ownershipConflict(sourceId, targetId, owners, input.portalId ?? null) && !approvedSharedTarget) {
     return result('conflict', 'target_already_mapped', targetId)
   }
   const candidate = candidates.find((item) => idOf(item) === targetId)

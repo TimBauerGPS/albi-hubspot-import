@@ -6,7 +6,7 @@ export const HUBSPOT_API_VERSION = '2026-09'
 const ROOT = `/crm/objects/${HUBSPOT_API_VERSION}`
 const WRITE_ROOT = '/crm/v3/objects'
 // HubSpot-defined contact -> company association (direction-specific type).
-export const HUBSPOT_CONTACT_TO_COMPANY_ASSOCIATION_TYPE = 1
+export const HUBSPOT_CONTACT_TO_COMPANY_ASSOCIATION_TYPE = 279
 const WRITABLE = Object.freeze({
   contacts: new Set(['firstname', 'lastname', 'email', 'phone', 'mobilephone', 'jobtitle', 'address', 'address2', 'city', 'state', 'zip', 'country']),
   companies: new Set(['name', 'domain', 'phone', 'address', 'address2', 'city', 'state', 'zip', 'country']),

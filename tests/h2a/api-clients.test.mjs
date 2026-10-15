@@ -61,10 +61,28 @@ test('HubSpot adds only the default contact-to-company association with a bodyle
   const f = transport([{ arbitrary: { secret: 'private' } }])
   const c = new HubSpotClient({ token: 'token', fetch: f.fetch })
   assert.deepEqual(await c.addContactCompanyAssociation('123', '456'), { contactId: '123', companyId: '456' })
-  assert.equal(hubspotAdapter.HUBSPOT_CONTACT_TO_COMPANY_ASSOCIATION_TYPE, 1)
+  assert.equal(hubspotAdapter.HUBSPOT_CONTACT_TO_COMPANY_ASSOCIATION_TYPE, 279)
   assert.equal(f.calls[0].method, 'PUT')
-  assert.equal(f.calls[0].url.toString(), 'https://api.hubapi.com/crm/v3/objects/contacts/123/associations/companies/456/1')
+  assert.equal(f.calls[0].url.toString(), 'https://api.hubapi.com/crm/v3/objects/contacts/123/associations/companies/456/279')
   assert.equal(f.calls[0].body, undefined)
+})
+
+test('write adapter rejects accessor, symbol and custom prototype properties before network', async () => {
+  const f = transport([]), c = new HubSpotClient({ token: 'token', fetch: f.fetch })
+  const accessor = Object.defineProperty({}, 'phone', { enumerable: true, get() { throw Error('must not read') } })
+  const symbol = { phone: '555' }; symbol[Symbol('hidden')] = 'secret'
+  const custom = Object.assign(Object.create({ inherited: true }), { phone: '555' })
+  for (const value of [accessor, symbol, custom]) {
+    await assert.rejects(c.updateContact('123', value), { category: 'validation' })
+  }
+  assert.equal(f.calls.length, 0)
+})
+
+test('write adapter accepts exactly 500 characters without truncation', async () => {
+  const f = transport([{ id: '123', properties: { phone: 'x'.repeat(500) } }])
+  const c = new HubSpotClient({ token: 'token', fetch: f.fetch })
+  assert.equal((await c.updateContact('123', { phone: 'x'.repeat(500) })).properties.phone.length, 500)
+  assert.equal(f.calls[0].body.properties.phone.length, 500)
 })
 
 test('HubSpot review mutations reject invalid IDs and properties before requesting', async () => {

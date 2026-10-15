@@ -61,7 +61,7 @@ export function createReviewResolutionHandler(options = {}) {
     try {
       const input = request(event)
       const auth = await (options.requireRequest ?? requireH2ARequest)(event, { supabase: options.supabase,
-        getSupabase: options.getSupabase, requireAdmin: isWrite, requestedCompanyId: input.companyId })
+        getSupabase: options.getSupabase, requireAdmin: isWrite, requireAppAccess: true, requestedCompanyId: input.companyId })
       const mode = resolutionMode((options.env ?? process.env).H2A_REVIEW_RESOLUTION_MODE)
       if (isWrite) {
         if (auth.role !== 'admin' && !auth.isSuperAdmin) fail(403, 'Administrator access is required.')

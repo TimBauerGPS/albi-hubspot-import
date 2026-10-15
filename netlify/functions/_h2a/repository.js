@@ -405,10 +405,21 @@ export function createH2ARepository(supabase) {
         requireReviewIdentity(run?.id)
         return run.id
       }))]
+      if (!ids.length) return []
+      // The database supersedes old nonleased intents and returns every run
+      // whose review rows are still needed for immutable resolution history.
+      const retained = checked(await supabase.rpc('h2a_retain_review_resolution_runs', {
+        p_company_id: companyId, p_keep_run_id: keepRunId,
+      }))
+      if (!Array.isArray(retained) || retained.some(id => typeof id !== 'string')) {
+        throw new Error('Invalid review retention response')
+      }
+      const protectedRuns = new Set(retained)
+      const deletable = ids.filter(id => !protectedRuns.has(id))
       const removed = []
-      for (let start = 0; start < ids.length; start += 100) {
+      for (let start = 0; start < deletable.length; start += 100) {
         const result = checked(await supabase.from('h2a_dry_run_reviews').delete().eq('company_id', companyId)
-          .in('run_id', ids.slice(start, start + 100)).select('id'))
+          .in('run_id', deletable.slice(start, start + 100)).select('id'))
         if (!Array.isArray(result)) throw new Error('Invalid review cleanup response')
         removed.push(...result)
       }

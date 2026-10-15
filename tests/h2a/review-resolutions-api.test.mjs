@@ -11,7 +11,7 @@ const clientRequestId = '00000000-0000-4000-8000-000000000003'
 const actorId = '00000000-0000-4000-8000-000000000004'
 const stamp = '2026-10-14T10:00:00.123456Z'
 const input = { companyId: 'company-a', reviewId, expectedUpdatedAt: stamp, clientRequestId, action: 'create_albi' }
-function fixture({ role = 'admin', superAdmin = false, mode = 'admins' } = {}) {
+function fixture({ role = 'admin', superAdmin = false, mode = 'admins', appAccess = true } = {}) {
   const calls = []
   const row = { id: resolutionId, company_id: 'company-a', run_id: resolutionId, review_id: reviewId, portal_id: '123',
     source_id: '10', object_type: 'contacts', action: 'create_albi', decision: { action: 'create_albi', token: 'secret' },
@@ -19,7 +19,8 @@ function fixture({ role = 'admin', superAdmin = false, mode = 'admins' } = {}) {
     lease_owner: 'secret', provider_response: 'secret' }
   const events = Array.from({ length: 110 }, () => ({ id: resolutionId, actor_id: actorId, event_type: 'completed',
     created_at: stamp, sanitized_details: { code: 'completed', message: 'secret', executionContext: { secret: 'secret' } } }))
-  const tables = { super_admins: superAdmin ? [{ user_id: actorId }] : [],
+  const tables = { user_app_access: appAccess ? [{ user_id: actorId, app_name: 'albi-hubspot-import' }] : [],
+    super_admins: superAdmin ? [{ user_id: actorId }] : [],
     company_members: [{ user_id: actorId, company_id: 'company-a', role }], companies: [{ id: 'company-a', name: 'A' }, { id: 'company-b', name: 'B' }] }
   const supabase = { auth: { getUser: async token => { calls.push('auth'); return { data: { user: token === 'valid' ? { id: actorId } : null } } } },
     from(table) {
@@ -79,6 +80,15 @@ test('super admin selected company is resolved by existing authorization', async
   assert.equal(result.statusCode, 200)
   assert.equal(f.calls.find(call => call[0] === 'create')[1], 'company-b')
 })
+for (const settings of [{ appAccess: false }, { appAccess: false, superAdmin: true, mode: 'super_admin' }]) {
+  test('revoked app access blocks resolution before credentials for every admin tier', async () => {
+    const f = fixture(settings)
+    const result = await f.request()
+    assert.equal(result.statusCode, 403)
+    assert.equal(f.calls.some(call => Array.isArray(call)), false)
+    assert.equal(f.calls.includes('clients'), false)
+  })
+}
 for (const change of [{ reviewId: 'bad' }, { clientRequestId: 'bad' }, { expectedUpdatedAt: '2026-02-30T10:00:00Z' },
   { expectedUpdatedAt: '2026-10-14T24:00:00Z' },
   { expectedUpdatedAt: 'tomorrow' }, { action: 'delete' }, { action: 'resolve_fields', fieldChoices: { email: 'secret' } },
@@ -92,6 +102,12 @@ for (const change of [{ reviewId: 'bad' }, { clientRequestId: 'bad' }, { expecte
   assert.equal(response.statusCode, 400)
   assert.equal(f.calls.length, 0)
   assert.equal(response.body.includes('secret'), false)
+})
+test('missing app access also blocks read-only resolution history before storage', async () => {
+  const f = fixture({ appAccess: false, role: 'member' })
+  const result = await f.request(undefined, { method: 'GET', query: { companyId: 'company-a', reviewId } })
+  assert.equal(result.statusCode, 403)
+  assert.equal(f.calls.some(call => Array.isArray(call)), false)
 })
 
 test('all accepted action inputs are normalized before passing server actor and company to execution', async () => {

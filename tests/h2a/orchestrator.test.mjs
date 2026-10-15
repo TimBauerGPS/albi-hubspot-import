@@ -896,7 +896,10 @@ test('activity payload includes a known HubSpot owner name', async () => {
 })
 
 function storedReviewRepository(deps) {
-  return createH2ARepository({ rpc: async () => ({}), from(table) {
+  return createH2ARepository({ rpc: async name => {
+    assert.equal(name, 'h2a_retain_review_resolution_runs')
+    return { data: [] }
+  }, from(table) {
     assert.ok(['h2a_sync_runs', 'h2a_dry_run_reviews'].includes(table))
     const filters = [], orders = []
     let rowLimit, rangeStart = 0, rangeEnd, countOnly = false, deleting = false

@@ -9,6 +9,8 @@ const secondaryButton = 'rounded-lg border border-gray-300 bg-white px-3 py-2 te
 const selectClass = 'mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500'
 const statusLabels = { needs_review: 'Needs review', cleared: 'Cleared', no_longer_in_scope: 'No longer in scope' }
 const statusTone = { needs_review: 'bg-amber-50 text-amber-800 ring-amber-600/20', cleared: 'bg-green-50 text-green-800 ring-green-600/20', no_longer_in_scope: 'bg-green-50 text-green-800 ring-green-600/20' }
+const resolutionLabels = { pending: 'Needs decision', applying: 'Applying', waiting_on_albi: 'Waiting on Albi',
+  ready_to_recheck: 'Ready to recheck', completed: 'Completed', failed: 'Action failed', superseded: 'Superseded' }
 const initialFilters = { status: '', objectType: '', reason: '' }
 
 function queuePresentation(item) {
@@ -58,7 +60,7 @@ export default function SampleReviewPage() {
 
   const replaceItem = useCallback(item => {
     if (!item?.id) return
-    setItems(current => current.map(existing => existing.id === item.id ? item : existing))
+    setItems(current => current.map(existing => existing.id === item.id ? { ...existing, ...item } : existing))
   }, [])
 
   useEffect(() => {
@@ -307,6 +309,7 @@ export default function SampleReviewPage() {
                     className={`w-full px-4 py-3 text-left transition focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-500 ${selectedId === review.id ? 'bg-brand-50' : 'hover:bg-gray-50'}`}>
                     <div className="flex flex-wrap items-start justify-between gap-2"><span className="min-w-0 break-words text-sm font-semibold text-gray-900">{review.displayName}</span><span className={`rounded-md px-1.5 py-0.5 text-[0.68rem] font-semibold ring-1 ring-inset ${statusTone[review.status]}`}>{statusLabels[review.status]}</span></div>
                     <p className="mt-1 text-xs font-medium text-gray-600">{review.objectType === 'companies' ? 'Organization' : 'Contact'} · {review.reasonLabel}</p>
+                    {review.resolutionStatus && <span className="mt-1 inline-flex rounded-md bg-blue-50 px-1.5 py-0.5 text-[0.68rem] font-semibold text-blue-800 ring-1 ring-inset ring-blue-600/20">{resolutionLabels[review.resolutionStatus]}</span>}
                     <div className="mt-2 space-y-1 break-words text-xs text-gray-700">{[review.source.email, review.source.phoneNumber, review.source.organizationName, review.source.domain].filter(Boolean).map((value, index) => <p key={index}>{value}</p>)}</div>
                     <p className="mt-2 break-all text-xs text-gray-600">HubSpot ID: {review.sourceId}</p><p className="mt-1 text-xs text-gray-500">Last recheck: {recheckTime(review.lastRecheckedAt)}</p>
                   </button></li>

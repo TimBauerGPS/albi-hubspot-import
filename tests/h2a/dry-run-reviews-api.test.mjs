@@ -50,6 +50,15 @@ test('review list requires admin and every read uses the server-authorized compa
   assert.deepEqual(JSON.parse(Buffer.from(body.nextCursor, 'base64url').toString()), { createdAt: stamp, id: reviewId })
 })
 
+test('review list exposes only the allowlisted current resolution status', async () => {
+  const f = fixture()
+  f.repository.getCurrentReviewResolution = async () => ({ status: 'waiting_on_albi', provider_outcome_code: 'secret', lease_owner: 'secret' })
+  const response = await f.handler(get({}))
+  assert.equal(response.statusCode, 200)
+  assert.equal(JSON.parse(response.body).items[0].resolutionStatus, 'waiting_on_albi')
+  assert.equal(response.body.includes('secret'), false)
+})
+
 test('detail exposes allowlisted snapshots and projected events under current run only', async () => {
   const f = fixture()
   const response = await f.handler(get({ companyId: 'selected-company', reviewId }))
@@ -124,6 +133,29 @@ test('reviewable no-match detail reaches a create decision only through fresh se
   assert.equal(presentSampleReviewItem(item).actions.includes('create_albi'), true)
   const ui = await mountSampleReviewResolution(item, async () => ({ resolution: { status: 'ready_to_recheck' } }))
   assert.equal(ui.find('button', 'Create in Albi') != null, true)
+})
+
+test('source correction and safe-to-create recheck expose authorized create while other cleared states remain closed', async () => {
+  const f = fixture()
+  f.options.env = { H2A_REVIEW_RESOLUTION_MODE: 'admins' }
+  f.options.requireRequest = async () => ({ companyId: 'authorized-company', role: 'admin', isSuperAdmin: false })
+  f.row.reason = 'missing_required_name'; f.row.status = 'cleared'; f.row.recheck_outcome = 'safe_to_create'
+  f.row.candidate_snapshots = []; f.row.source_snapshot = { id: '10', firstName: 'A', lastName: 'Person' }
+  f.repository.getMappings = async () => ({ contacts: [], organizations: [], options: [{ mapping_kind: 'default_contact_type',
+    source_key: 'default', albi_id: '12', confirmed: true }] })
+  f.options.makeClients = async () => ({ hubspot: {
+    getContacts: async () => [{ id: '10', properties: { firstname: 'A', lastname: 'Person' } }], getCompanies: async () => [],
+    getAssociations: async () => [{ fromId: '10', toObjectType: 'companies', toIds: [] }],
+  }, albi: { listContacts: async () => ({ records: [], cursor: null }), listOrganizations: async () => ({ records: [], cursor: null }) } })
+  const item = JSON.parse((await f.handler(get({ reviewId }))).body).item
+  assert.equal(item.createReadiness.ready, true)
+  assert.deepEqual(presentSampleReviewItem(item).actions, ['create_albi'])
+  const ui = await mountSampleReviewResolution(item, async () => ({ resolution: { status: 'ready_to_recheck' } }))
+  assert.equal(ui.find('button', 'Create in Albi') != null, true)
+  f.row.recheck_outcome = 'safe_to_link'
+  const blocked = JSON.parse((await f.handler(get({ reviewId }))).body).item
+  assert.equal(blocked.createReadiness.ready, false)
+  assert.deepEqual(presentSampleReviewItem(blocked).actions, [])
 })
 
 test('missing and cross-tenant detail is a fixed non-enumerating 404', async () => {

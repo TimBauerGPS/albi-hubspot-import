@@ -19,13 +19,13 @@ export const H2A_REVIEW_REASON_CATALOG = Object.freeze({
   name_only_candidate: reason("name_only_candidate", "Match is based on name only", "identity", ["link_existing","create_albi"], "Add reliable email, supported phone, or organization domain evidence; avoid creating a duplicate."),
   missing_required_name: reason("missing_required_name", "A required name is missing", "identity", ["link_existing","create_albi"], "Restore the required HubSpot name fields or remove the record from the intended sync scope."),
   contradictory_evidence: reason("contradictory_evidence", "Matching evidence conflicts", "identity", ["link_existing","create_albi"], "Correct the conflicting identity values in HubSpot or Albi."),
-  albi_organization_update_contract_unverified: reason("albi_organization_update_contract_unverified", "Organization update needs verification", "configuration", [], "Correct the existing Albi organization or HubSpot source directly."),
-  albi_contact_update_contract_unverified: reason("albi_contact_update_contract_unverified", "Contact update needs verification", "configuration", [], "Correct the existing Albi contact or HubSpot source directly."),
+  albi_organization_update_contract_unverified: reason("albi_organization_update_contract_unverified", "Organization update needs verification", "field", ["resolve_fields"], "Choose the correct source of truth for supported differences; Albi corrections remain manual."),
+  albi_contact_update_contract_unverified: reason("albi_contact_update_contract_unverified", "Contact update needs verification", "field", ["resolve_fields"], "Choose the correct source of truth for supported differences; Albi corrections remain manual."),
   nonblank_field_difference: reason("nonblank_field_difference", "HubSpot and Albi have different values", "field", ["resolve_fields"], "Choose the correct source of truth and make the conflicting values agree."),
   organization_fields_require_review: reason("organization_fields_require_review", "Related organization fields need review", "field", ["resolve_fields"], "Correct the organization values directly in HubSpot or Albi."),
   contact_fields_require_review: reason("contact_fields_require_review", "Related contact fields need review", "field", ["resolve_fields"], "Correct the contact values directly in HubSpot or Albi."),
-  albi_contact_association_contract_unverified: reason("albi_contact_association_contract_unverified", "Contact organization link needs verification", "configuration", [], "Correct the contact-organization relationship directly in Albi or its HubSpot association."),
-  association_contract_unverified: reason("association_contract_unverified", "Related contact-organization link needs review", "configuration", [], "Correct the contact-organization relationship directly in Albi or its HubSpot association."),
+  albi_contact_association_contract_unverified: reason("albi_contact_association_contract_unverified", "Contact organization link needs verification", "association", ["choose_organization"], "Choose the intended organization context; Albi reassociation remains manual."),
+  association_contract_unverified: reason("association_contract_unverified", "Related contact-organization link needs review", "association", ["choose_organization"], "Choose the intended organization context; Albi reassociation remains manual."),
   organization_type_confirmation_required: reason("organization_type_confirmation_required", "Organization type needs confirmation", "configuration", [], "Confirm the intended organization type in the H2A settings."),
   contact_type_confirmation_required: reason("contact_type_confirmation_required", "Contact type needs confirmation", "configuration", [], "Confirm the intended contact type in the H2A settings."),
   activity_type_confirmation_required: reason("activity_type_confirmation_required", "Activity type needs confirmation", "configuration", [], "Confirm the intended activity type in the H2A settings."),
@@ -77,4 +77,3 @@ export function listH2AReviewReasonOptions(codes) {
 }
 
 export const H2A_REVIEW_GUIDANCE = Object.freeze({ ...H2A_REVIEW_REASON_CATALOG, other_review_reason: OTHER_REASON })
-

@@ -68,7 +68,7 @@ async function detail(repository, companyId, runId, row, auth, options, config) 
   const resolutionCapability = projectResolutionCapability(auth, (options.env ?? process.env).H2A_REVIEW_RESOLUTION_MODE, projected.hubspotWrites)
   const actions = getH2AReviewReason(row.reason).actions
   let resolutionOptions = { organizationOptions: [], createReadiness: { ready: false } }
-  if (resolutionCapability.canResolve && row.status === 'needs_review' &&
+  if (resolutionCapability.canResolve && (row.status === 'needs_review' || row.status === 'cleared' && row.recheck_outcome === 'safe_to_create') &&
     (actions.includes('choose_organization') || actions.includes('create_albi') &&
       Array.isArray(row.candidate_snapshots) && row.candidate_snapshots.length === 0)) {
     try {
@@ -80,7 +80,8 @@ async function detail(repository, companyId, runId, row, auth, options, config) 
       }
     } catch { /* The chooser remains disabled when live evidence cannot be read. */ }
   }
-  return { ...projectReviewRow(row, { detail: true }), events: events.map(projectReviewEvent), resolution: projected.resolution,
+  return { ...projectReviewRow(row, { detail: true }), resolutionStatus: projected.resolution?.status ?? null,
+    events: events.map(projectReviewEvent), resolution: projected.resolution,
     resolutionCapability, ...resolutionOptions }
 }
 
@@ -126,9 +127,14 @@ export function createDryRunReviewHandler(options = {}) {
       if (!sample) return reply(200, { sample: metadata, progress: emptyProgress(), items: [], nextCursor: null,
         ...(metadata?.historical ? { message: 'Run a new sample to create detailed review data.' } : {}) })
       const page = await repository.listDryRunReviews(companyId, sample.id, input.filters)
+      const resolutionStatuses = typeof repository.getCurrentReviewResolution === 'function'
+        ? await Promise.all(page.items.map(async row => {
+          const resolution = await repository.getCurrentReviewResolution(companyId, row.id)
+          return resolution?.run_id === sample.id || resolution?.run_id === undefined ? resolution?.status : null
+        })) : []
       const last = page.items.at(-1)
       return reply(200, { sample: metadata, progress: await reviewProgress(repository, companyId, sample, config.initial_start_locked_at),
-        items: page.items.map(row => projectReviewRow(row)), nextCursor: page.hasMore && last
+        items: page.items.map((row, index) => projectReviewRow({ ...row, resolution_status: resolutionStatuses[index] })), nextCursor: page.hasMore && last
           ? Buffer.from(JSON.stringify({ createdAt: last.created_at, id: last.id })).toString('base64url') : null })
     } catch (error) {
       const typed = error instanceof H2AReviewError || error instanceof H2AAuthError

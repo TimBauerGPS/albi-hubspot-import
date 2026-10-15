@@ -203,6 +203,53 @@ test('ambiguous create is adopted only by unique production matcher plus exact c
   assert.equal(f.events.at(-1).eventType, 'provider_reconciled'); assert.equal(mutations(f).length, 1)
 })
 
+test('successful name-only create persists an exact receipt before verification and maps that record', async () => {
+  const f = fixture(), createInput = asCreate(f)
+  delete f.source.properties.email; delete f.source.properties.phone
+  delete f.row.source_snapshot.email; delete f.row.source_snapshot.phoneNumber
+  f.row.proposed_changes = { conflicts: {}, updates: {} }
+  f.createdTarget = { id: '30', firstName: 'A', lastName: 'B', contactTypeIds: ['12'] }
+  f.deps.albiRead.listContacts = async () => {
+    if (f.calls.some(call => Array.isArray(call) && call[0] === 'CREATE')) {
+      assert.ok(f.events.some(event => event.details?.createReceiptId === '30'))
+    }
+    return { records: structuredClone(f.contacts), cursor: null }
+  }
+  const result = await executeReviewResolution(f.deps, createInput)
+  assert.equal(result.resolution.status, 'ready_to_recheck')
+  assert.equal(f.mappings.contacts[0].albi_contact_id, '30')
+  assert.equal(mutations(f).length, 1)
+})
+
+test('successful organization create with name-only evidence maps the receipt target', async () => {
+  const f = fixture()
+  f.row.object_type = 'companies'; f.row.reason = 'no_match'; f.row.conflict_type = 'organization_match'
+  f.row.source_snapshot = { id: '42', name: 'Acme' }; f.row.candidate_snapshots = []
+  f.row.proposed_changes = { conflicts: {}, updates: {} }
+  f.source.properties = { name: 'Acme' }
+  f.deps.hubspotRead.getCompanies = async () => [structuredClone(f.source)]
+  f.mappings.options = [{ mapping_kind: 'default_organization_type', source_key: 'default', albi_id: '12', confirmed: true }]
+  f.deps.albiRead.listOrganizations = async () => ({ records: structuredClone(f.organizations), cursor: null })
+  f.deps.albiWrite.createOrganization = async payload => { f.calls.push(['CREATE', structuredClone(payload)])
+    f.organizations.push({ id: '60', name: 'Acme', organizationTypeIds: ['12'] }); return { id: '60' } }
+  const result = await executeReviewResolution(f.deps, { ...input, decision: { action: 'create_albi' } })
+  assert.equal(result.resolution.status, 'ready_to_recheck')
+  assert.equal(f.mappings.organizations[0].albi_organization_id, '60')
+  assert.equal(mutations(f).length, 1)
+})
+
+test('corrected cleared review creates only from fresh safe-to-create outcome', async () => {
+  const f = fixture(), createInput = asCreate(f)
+  f.row.status = 'cleared'; f.row.recheck_outcome = 'safe_to_create'
+  const created = await executeReviewResolution(f.deps, createInput)
+  assert.equal(created.resolution.status, 'ready_to_recheck')
+  assert.equal(mutations(f).length, 1)
+  const blocked = fixture(), blockedInput = asCreate(blocked)
+  blocked.row.status = 'cleared'; blocked.row.recheck_outcome = 'safe_to_link'
+  await assert.rejects(executeReviewResolution(blocked.deps, blockedInput), error => error.statusCode === 409)
+  assert.equal(mutations(blocked).length, 0)
+})
+
 for (const kind of ['absent', 'duplicate', 'wrong_type', 'missing_field', 'owned']) test(`ambiguous create ${kind} is never blindly repeated`, async () => {
   const f = fixture(), createInput = asCreate(f)
   if (kind === 'absent') f.createdTarget = null

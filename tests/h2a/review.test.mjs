@@ -6,6 +6,8 @@ import {
   safeReviewEvidence, safeReviewChanges, projectReviewRow, projectReviewEvent,
   assertReviewClassification, REVIEW_REASONS, REVIEW_CONFLICT_TYPES,
 } from '../../netlify/functions/_h2a/review.js'
+import { presentSampleReviewItem } from '../../src/features/hubspotToAlbi/sampleReview.js'
+import { buildReviewResolutionPlan } from '../../netlify/functions/_h2a/reviewResolution.js'
 
 const contact = { id: 'hs-1', properties: { firstname: 'A', lastname: 'Person', email: 'a@example.com' } }
 const company = { id: 'hs-2', properties: { name: 'Allied', domain: 'allied.example' } }
@@ -73,6 +75,53 @@ test('reviewed company creation remains eligible when the contact is genuinely n
   const result = evaluateContactReview({ ...reviewedContext, organizationChoice: reviewedChoice, source: contact,
     candidates: [], organization: { outcome: 'safe_to_create', targetId: null }, optionMappings: [contactType] })
   assert.equal(result.outcome, 'safe_to_create')
+})
+
+test('evaluator update-contract reasons retain safe field decisions with known target values', () => {
+  const source = { id: '42', properties: { firstname: 'Alex', lastname: 'Stone', email: 'alex@example.com', jobtitle: 'Manager' } }
+  const candidate = { id: '99', firstName: 'Alec', lastName: 'Stone', email: 'alex@example.com' }
+  const result = evaluateContactReview({ source, candidates: [candidate] })
+  assert.equal(result.reason, 'albi_contact_update_contract_unverified')
+  const item = presentSampleReviewItem(projectReviewRow({ object_type: 'contacts', source_id: '42', status: 'needs_review',
+    reason: result.reason, source_snapshot: safeReviewSnapshot(source, 'contacts'),
+    candidate_snapshots: safeReviewCandidates(result.candidates, 'contacts'), proposed_changes: result.proposedChanges }, { detail: true }))
+  assert.equal(item.actions.includes('resolve_fields'), true)
+  assert.deepEqual(item.resolutionFields.map(field => field.key), ['firstName'])
+  assert.equal(item.resolutionFields.some(field => field.key === 'jobTitle'), false)
+  const plan = buildReviewResolutionPlan({ review: { objectType: 'contacts', sourceId: '42', reason: result.reason,
+    candidateSnapshots: [{ id: '99' }], proposedChanges: result.proposedChanges },
+  hubspot: source, albi: candidate, decision: { action: 'resolve_fields', fieldChoices: { firstName: 'albi' } } })
+  assert.deepEqual(plan.providerOperation.properties, { firstname: 'Alec' })
+})
+
+test('organization update-contract evaluator exposes only known Albi differences', () => {
+  const source = { id: '43', properties: { name: 'New name', domain: 'acme.example', phone: '5551112222' } }
+  const candidate = { id: '98', name: 'Old name', domain: 'acme.example' }
+  const result = evaluateOrganizationReview({ source, candidates: [candidate] })
+  assert.equal(result.reason, 'albi_organization_update_contract_unverified')
+  const item = presentSampleReviewItem(projectReviewRow({ object_type: 'companies', source_id: '43', status: 'needs_review',
+    reason: result.reason, source_snapshot: safeReviewSnapshot(source, 'companies'),
+    candidate_snapshots: safeReviewCandidates(result.candidates, 'companies'), proposed_changes: result.proposedChanges }, { detail: true }))
+  assert.equal(item.actions.includes('resolve_fields'), true)
+  assert.deepEqual(item.resolutionFields.map(field => field.key), ['name'])
+  assert.equal(item.resolutionFields.some(field => field.key === 'phoneNumber'), false)
+})
+
+test('explicit blank Albi fields remain actionable while absent fields stay unknown', () => {
+  const source = { id: '44', properties: { firstname: 'Alex', lastname: 'Stone', email: 'alex@example.com', jobtitle: 'Manager', city: 'LA' } }
+  const candidate = { id: '97', firstName: 'Alex', lastName: 'Stone', email: 'alex@example.com', jobTitle: null }
+  const result = evaluateContactReview({ source, candidates: [candidate] })
+  assert.equal(result.reason, 'albi_contact_update_contract_unverified')
+  assert.deepEqual(result.proposedChanges.conflicts.jobTitle, { current: null, proposed: 'Manager' })
+  assert.equal(Object.hasOwn(result.proposedChanges.conflicts, 'city'), false)
+  const item = presentSampleReviewItem(projectReviewRow({ object_type: 'contacts', source_id: '44', status: 'needs_review',
+    reason: result.reason, source_snapshot: safeReviewSnapshot(source, 'contacts'),
+    candidate_snapshots: safeReviewCandidates(result.candidates, 'contacts'), proposed_changes: result.proposedChanges }, { detail: true }))
+  assert.deepEqual(item.resolutionFields.map(field => [field.key, field.albi]), [['jobTitle', null]])
+  const plan = buildReviewResolutionPlan({ review: { objectType: 'contacts', sourceId: '44', reason: result.reason,
+    candidateSnapshots: [{ id: '97' }], proposedChanges: result.proposedChanges }, hubspot: source, albi: candidate,
+    decision: { action: 'resolve_fields', fieldChoices: { jobTitle: 'albi' } } })
+  assert.deepEqual(plan.providerOperation.properties, { jobtitle: '' })
 })
 
 test('production evaluation recognizes same-numbered foreign-portal target ownership', () => {
@@ -247,7 +296,7 @@ const row = { id: 'review', run_id: 'run', object_type: 'contacts', source_id: '
   last_rechecked_at: null, last_rechecked_by: null, created_at: 'created', updated_at: 'updated', authorization: 'SECRET' }
 
 test('list projection constructs the exact summary shape from safe source identity', () => {
-  assert.deepEqual(projectReviewRow(row), { id: 'review', runId: 'run', objectType: 'contacts', sourceId: 'hs', reason: 'name_only_candidate', conflictType: 'contact_match', status: 'needs_review', recheckOutcome: null,
+  assert.deepEqual(projectReviewRow(row), { id: 'review', runId: 'run', objectType: 'contacts', sourceId: 'hs', reason: 'name_only_candidate', conflictType: 'contact_match', status: 'needs_review', recheckOutcome: null, resolutionStatus: null,
     displayName: 'A Person', identity: { email: 'a@example.com', phone: '5551112222', organizationName: 'Allied', domain: null }, lastRecheckedAt: null, createdAt: 'created', updatedAt: 'updated' })
 })
 
@@ -260,7 +309,7 @@ test('only detailed review projection exposes a validated portal for fixed-origi
 })
 
 test('detail projection independently re-sanitizes stored JSON into the exact detail shape', () => {
-  assert.deepEqual(projectReviewRow(row, { detail: true }), { id: 'review', runId: 'run', objectType: 'contacts', sourceId: 'hs', reason: 'name_only_candidate', conflictType: 'contact_match', status: 'needs_review', recheckOutcome: null,
+  assert.deepEqual(projectReviewRow(row, { detail: true }), { id: 'review', runId: 'run', objectType: 'contacts', sourceId: 'hs', reason: 'name_only_candidate', conflictType: 'contact_match', status: 'needs_review', recheckOutcome: null, resolutionStatus: null,
     portalId: null,
     sourceSnapshot: { id: 'hs', firstName: 'A', lastName: 'Person', email: 'a@example.com', phoneNumber: '5551112222', organizationName: 'Allied' },
     candidateSnapshots: [{ id: 'albi', firstName: 'A' }], matchEvidence: ['email'],

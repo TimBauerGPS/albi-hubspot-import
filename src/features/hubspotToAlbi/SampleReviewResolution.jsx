@@ -40,7 +40,8 @@ export default function SampleReviewResolution({ item, busy = false, onResolve }
   const selectedOrganization = organizationOptions.find(option => option.sourceId === organizationSourceId)
   const canCreate = item?.createReadiness?.ready === true && review.candidates.length === 0
   const effectiveBusy = busy || submitting
-  const canAct = capability.canResolve && review.actions.length > 0 && review.status === 'needs_review'
+  const canAct = capability.canResolve && review.actions.length > 0 && (review.status === 'needs_review' ||
+    review.status === 'cleared' && item?.recheckOutcome === 'safe_to_create')
 
   useEffect(() => {
     setChoices({}); setCandidateId(''); setOrganizationSourceId(''); setApproveAssociation(false); setApproveManyToOne(false)

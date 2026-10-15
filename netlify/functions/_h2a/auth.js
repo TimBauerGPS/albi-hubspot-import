@@ -45,10 +45,20 @@ async function authenticate(supabase, jwt) {
   return result.data.user.id
 }
 
-export async function resolveH2AContext({ supabase, jwt, requestedCompanyId, requireAdmin = false }) {
+export async function resolveH2AContext({ supabase, jwt, requestedCompanyId, requireAdmin = false, requireAppAccess = false }) {
   if (!supabase) fail(500, 'H2A authorization is not configured.')
 
   const userId = await authenticate(supabase, jwt)
+  if (requireAppAccess) {
+    let accessResult
+    try {
+      accessResult = await supabase.from('user_app_access').select('user_id').eq('user_id', userId)
+        .eq('app_name', 'albi-hubspot-import').maybeSingle()
+    } catch {
+      fail(500, 'Unable to resolve H2A authorization context.')
+    }
+    if (!checkLookup(accessResult)) fail(403, 'You are not authorized to access H2A.')
+  }
   let superAdminResult
   let memberResult
   try {
@@ -152,5 +162,6 @@ export async function requireH2ARequest(event, options = {}) {
     jwt: options.jwt ?? getBearerToken(event),
     requestedCompanyId,
     requireAdmin: options.requireAdmin,
+    requireAppAccess: options.requireAppAccess,
   })
 }

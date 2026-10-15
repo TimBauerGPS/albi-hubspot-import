@@ -67,6 +67,22 @@ test('selectable reasons cannot send the presentation fallback rejected by the A
   assert.equal(presentation.presentSampleReviewItem({ reason: 'unknown-secret' }).reasonLabel, 'Other review reason')
 })
 
+test('queue shows applying, waiting and failed resolution badges without internal details', async () => {
+  const ui = await mount({ getH2ADryRunReviews: () => Promise.resolve(page([
+    { ...row('a'), resolutionStatus: 'applying' }, { ...row('b'), resolutionStatus: 'waiting_on_albi' },
+    { ...row('c'), resolutionStatus: 'failed', leaseOwner: 'secret' },
+  ])) })
+  assert.equal(ui.nodes().filter(node => node.type === 'li').length, 3)
+  assert.deepEqual(ui.nodes().filter(node => node.type === 'li').map(node => [node.props.key,
+    JSON.stringify(node).includes('Applying'), JSON.stringify(node).includes('Waiting on Albi'), JSON.stringify(node).includes('Action failed')]),
+  [['a', true, false, false], ['b', false, true, false], ['c', false, false, true]])
+  assert.match(ui.text(), /Applying/)
+  assert.match(ui.text(), /Waiting on Albi/)
+  assert.match(ui.text(), /Action failed/)
+  assert.doesNotMatch(ui.text(), /secret/)
+  ui.unmount()
+})
+
 test('Overview reason query initializes only catalog filters and clears invalid parameters', async () => {
   const valid = await mount({ locationSearch: '?objectType=contacts&reason=nonblank_field_difference' })
   assert.equal(valid.calls[0].args[2].objectType, 'contacts')
