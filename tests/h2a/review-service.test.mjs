@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { recheckDryRunReview } from '../../netlify/functions/_h2a/reviewService.js'
 import * as reviewService from '../../netlify/functions/_h2a/reviewService.js'
+import { readOnlyH2ACapabilities } from '../../netlify/functions/_h2a/providerClients.js'
 
 const reviewId = '00000000-0000-4000-8000-000000000001'
 const actorId = '00000000-0000-4000-8000-000000000002'
@@ -85,6 +86,40 @@ test('safe exact contact link clears only diagnostic state and preserves origina
   assert.equal(JSON.stringify(payload).includes('secret'), false)
   assert.ok(f.calls.findIndex(call => call[0] === 'event') < f.calls.findIndex(call => call[0] === 'contacts'))
   assert.deepEqual(f.calls.find(call => call[0] === 'contacts'), ['contacts', ['10']])
+})
+
+test('contact recheck prefers the direct current record over the bulk snapshot path', async () => {
+  const f = fixture({ contacts: [{ id: '20', firstName: 'A', lastName: 'Person', email: 'fresh@example.com' }] })
+  f.row.source_snapshot = { id: '10', firstName: 'A', lastName: 'Person', email: 'old@example.com' }
+  f.deps.hubspotRead.getContacts = async ids => {
+    f.calls.push(['contacts', ids])
+    return [{ id: '10', properties: { firstname: 'A', lastname: 'Person', email: 'old@example.com' } }]
+  }
+  f.deps.hubspotRead.getContact = async id => {
+    f.calls.push(['contact', id])
+    return { id: '10', properties: { firstname: 'A', lastname: 'Person', email: 'fresh@example.com' } }
+  }
+  await recheckDryRunReview(f.deps, input)
+  assert.deepEqual(f.applied[0][1].sourceSnapshot, {
+    id: '10', firstName: 'A', lastName: 'Person', email: 'fresh@example.com',
+  })
+  assert.deepEqual(f.calls.find(call => call[0] === 'contact'), ['contact', '10'])
+  assert.equal(f.calls.some(call => call[0] === 'contacts'), false)
+})
+
+test('legacy read capability keeps malformed batch responses fail-closed', async () => {
+  const f = fixture()
+  const capabilities = readOnlyH2ACapabilities({
+    hubspot: {
+      getContacts: async () => ({}), getCompanies: async () => [], getAssociations: async () => [],
+    },
+    albi: {
+      listContacts: async () => ({ records: [], cursor: null }),
+      listOrganizations: async () => ({ records: [], cursor: null }),
+    },
+  })
+  await assert.rejects(recheckDryRunReview({ ...f.deps, ...capabilities }, input), error => error.statusCode === 502)
+  assert.equal(f.applied.length, 0)
 })
 
 test('confirmed contact default clears a safe create without creating a provider record', async () => {

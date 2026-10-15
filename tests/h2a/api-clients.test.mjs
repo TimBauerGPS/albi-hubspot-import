@@ -28,7 +28,7 @@ function transport(responses) {
 
 test('contract metadata covers every adapter method and records unsupported Albi contracts', () => {
   assert.deepEqual(Object.keys(contractMetadata.hubspot.methods).sort(), [
-    'addContactCompanyAssociation', 'estimateActivities', 'getAccountInfo', 'getActivity', 'getAssociations', 'getCompanies', 'getContacts', 'listActivities', 'listOwners', 'updateCompany', 'updateContact',
+    'addContactCompanyAssociation', 'estimateActivities', 'getAccountInfo', 'getActivity', 'getAssociations', 'getCompanies', 'getCompany', 'getContact', 'getContacts', 'listActivities', 'listOwners', 'updateCompany', 'updateContact',
   ])
   assert.deepEqual(Object.keys(contractMetadata.albi.methods).sort(), [
     'associateContact', 'createActivity', 'createContact', 'createOrganization', 'listActivities', 'listContacts', 'listOptions',
@@ -179,6 +179,18 @@ test('associations traverse all pages and normalize IDs; contacts/companies use 
   assert.equal((await c.getCompanies(['301']))[0].id, '301')
   assert.equal(f.calls[2].url.pathname, '/crm/objects/2026-09/contacts/batch/read')
   assert.deepEqual(f.calls[2].body.inputs, [{ id: '201' }])
+})
+
+test('targeted contact and company reads use the direct record endpoint', async () => {
+  const f = transport([hs.contacts.results[0], hs.companies.results[0], { statusCode: 404 }])
+  const c = new HubSpotClient({ token: 'token', fetch: f.fetch })
+  assert.equal((await c.getContact('201')).properties.email, 'contact@example.invalid')
+  assert.equal((await c.getCompany('301')).id, '301')
+  assert.equal(await c.getContact('999'), null)
+  assert.equal(f.calls[0].url.pathname, '/crm/objects/2026-09/contacts/201')
+  assert.equal(f.calls[0].url.searchParams.get('archived'), 'false')
+  assert.equal(f.calls[0].url.searchParams.get('properties').includes('email'), true)
+  assert.equal(f.calls[1].url.pathname, '/crm/objects/2026-09/companies/301')
 })
 
 test('targeted activity read requests exactly the conflict activity identity', async () => {

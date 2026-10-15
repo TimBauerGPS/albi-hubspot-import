@@ -16,8 +16,13 @@ export async function createH2AProviderClients({ companyId, repository, keyring,
 
 // Select and bind read methods explicitly; never enumerate a client or touch a write getter.
 export function readOnlyH2ACapabilities({ hubspot, albi }) {
+  const direct = {
+    ...(typeof hubspot.getContact === 'function' ? { getContact: hubspot.getContact.bind(hubspot) } : {}),
+    ...(typeof hubspot.getCompany === 'function' ? { getCompany: hubspot.getCompany.bind(hubspot) } : {}),
+  }
   return {
-    hubspotRead: Object.freeze({ getContacts: hubspot.getContacts.bind(hubspot), getCompanies: hubspot.getCompanies.bind(hubspot),
+    hubspotRead: Object.freeze({ ...direct,
+      getContacts: hubspot.getContacts.bind(hubspot), getCompanies: hubspot.getCompanies.bind(hubspot),
       getAssociations: hubspot.getAssociations.bind(hubspot) }),
     albiRead: Object.freeze({ listContacts: albi.listContacts.bind(albi), listOrganizations: albi.listOrganizations.bind(albi) }),
   }

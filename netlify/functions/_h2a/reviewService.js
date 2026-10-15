@@ -112,6 +112,17 @@ function exactSource(records, sourceId) {
   return records[0]
 }
 
+async function currentSource(deps, hubspot, objectType, sourceId, deadline) {
+  const direct = objectType === 'contacts' ? hubspot.getContact : hubspot.getCompany
+  if (typeof direct === 'function') {
+    const record = await read(deps, () => direct.call(hubspot, sourceId), deadline)
+    return exactSource(record === null ? [] : [record], sourceId)
+  }
+  const records = await read(deps, () => objectType === 'contacts'
+    ? hubspot.getContacts([sourceId]) : hubspot.getCompanies([sourceId]), deadline)
+  return exactSource(records, sourceId)
+}
+
 function associations(records, sourceId) {
   if (!Array.isArray(records) || records.length !== 1) malformed('review')
   const row = records[0]
@@ -159,7 +170,7 @@ export async function recheckDryRunReview(deps, { companyId, reviewId, actorId, 
   try {
     const capabilities = deps.getReadClients ? await bounded(deps, () => deps.getReadClients(companyId, config, { signal: controller.signal }), deadline) : deps
     const hubspot = capabilities.hubspotRead, albi = capabilities.albiRead
-    source = exactSource(await read(deps, () => row.object_type === 'contacts' ? hubspot.getContacts([row.source_id]) : hubspot.getCompanies([row.source_id]), deadline), row.source_id)
+    source = await currentSource(deps, hubspot, row.object_type, row.source_id, deadline)
     if (!source) evaluation = { outcome: 'source_missing', evidence: [], candidates: [], proposedChanges: {} }
     else {
       const associatedCompanyIds = row.object_type === 'contacts' ? associations(await read(deps, () => hubspot.getAssociations({
@@ -184,7 +195,7 @@ export async function recheckDryRunReview(deps, { companyId, reviewId, actorId, 
           availableCompanies: associatedCompanyIds.map(id => ({ id })), companyId, portalId: row.portal_id, contactId: row.source_id })
         if (context.companyId) {
           const id = context.companyId
-          const company = exactSource(await read(deps, () => hubspot.getCompanies([id]), deadline), id)
+          const company = await currentSource(deps, hubspot, 'companies', id, deadline)
           if (!company || company.archived === true) organization = { outcome: 'needs_review' }
           else {
             availableCompanies.push(company)

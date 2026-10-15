@@ -153,6 +153,19 @@ export class HubSpotClient {
   }
   async getContacts(ids) { return this.#getRecords('contacts', ids) }
   async getCompanies(ids) { return this.#getRecords('companies', ids) }
+  async #getRecord(objectType, targetId) {
+    const target = id(targetId, 'getRecord')
+    const query = new URLSearchParams({ archived: 'false', properties: PROPERTIES[objectType].join(',') })
+    try {
+      const data = await this.#request(`${ROOT}/${objectType}/${target}?${query}`, { operation: 'getRecord' })
+      return record(data, objectType, 'getRecord')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return null
+      throw error
+    }
+  }
+  async getContact(targetId) { return this.#getRecord('contacts', targetId) }
+  async getCompany(targetId) { return this.#getRecord('companies', targetId) }
   async #updateRecord(objectType, targetId, properties, operation) {
     const target = id(targetId, operation)
     const body = { properties: writeProperties(properties, objectType, operation) }
