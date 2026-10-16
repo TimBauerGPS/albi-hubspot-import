@@ -78,6 +78,8 @@ test('forced create confirmation names the duplicate risk and submits the audite
     calls.push(args); return { resolution: { status: 'ready_to_recheck' } }
   })
   ui.find('button', 'Create a separate Albi record').props.onClick(); await ui.flush()
+  assert.match(ui.text(), /You’ll update this in Albi/)
+  assert.match(ui.text(), /New Record created/)
   assert.match(ui.text(), /ignores 1 listed candidate/i)
   assert.match(ui.text(), /duplicate may be created/i)
   await ui.find('button', 'Confirm resolution').props.onClick(); await ui.flush()

@@ -326,6 +326,9 @@ export function safeResolutionEventDetails(value) {
   const details = {}
   if (RESOLUTION_OUTCOME_CODES.includes(input.code)) details.code = input.code
   if (H2A_REVIEW_ERROR_CATEGORIES.includes(input.category)) details.category = input.category
+  if (Number.isInteger(input.providerStatus) && input.providerStatus >= 400 && input.providerStatus <= 599) {
+    details.providerStatus = input.providerStatus
+  }
   if (RESOLUTION_OUTCOME_CODES.includes(input.outcome)) details.outcome = input.outcome
   if (Array.isArray(input.manualTasks)) details.manualTasks = safeManualTasks(input.manualTasks)
   return details

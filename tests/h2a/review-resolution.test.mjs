@@ -445,11 +445,15 @@ test('projection fails closed for unsafe identities and codes and caps manual ta
   assert.equal(result.decision, null); assert.equal(result.events.length, 100)
   assert.deepEqual(result.events[0].details, {})
   const details = safeResolutionEventDetails({ execution_phase: 'waiting_on_albi', code: 'timeout',
+    providerStatus: 422,
     manualTasks: Array.from({ length: 20 }, () => ({ provider: 'albi', objectType: 'contacts', targetId: '1',
       fields: [{ field: 'organizationId', value: '12' }, { field: 'email', value: 'a'.repeat(600) },
         { field: 'city', value: { token: 'secret' } }] })) })
   assert.equal(details.execution_phase, undefined)
+  assert.equal(details.providerStatus, 422)
   assert.equal(details.manualTasks.length, 10)
   assert.deepEqual(details.manualTasks[0].fields, [{ field: 'organizationId', value: '12' }, { field: 'email', value: 'a'.repeat(500) }])
   assert.deepEqual(projectReviewResolutionEvent({ event_type: 'claimed', sanitized_details: { execution_phase: 'waiting_on_albi' } }).details, {})
+  assert.deepEqual(safeResolutionEventDetails({ providerStatus: '422' }), {})
+  assert.deepEqual(safeResolutionEventDetails({ providerStatus: 700 }), {})
 })

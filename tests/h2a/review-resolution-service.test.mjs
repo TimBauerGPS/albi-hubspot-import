@@ -189,6 +189,21 @@ for (const [category, code, outcome] of [
   assert.equal(JSON.stringify(f.events).includes('secret'), false)
 })
 
+test('failed provider validation preserves only its safe HTTP status for diagnosis', async () => {
+  const f = fixture()
+  f.writeError = Object.assign(new Error('secret provider response body'), {
+    category: 'validation', code: 'validation', status: 422,
+  })
+
+  const result = await executeReviewResolution(f.deps, input)
+
+  assert.equal(result.resolution.status, 'failed')
+  assert.deepEqual(f.events.at(-1).details, {
+    category: 'validation', code: 'operation_failed', providerStatus: 422,
+  })
+  assert.equal(JSON.stringify(f.events).includes('secret'), false)
+})
+
 function asCreate(f) {
   f.contacts = []; f.row.reason = 'no_match'; f.row.conflict_type = 'contact_match'; f.row.candidate_snapshots = []
   f.mappings.options = [{ mapping_kind: 'default_contact_type', source_key: 'default', albi_id: '12', confirmed: true }]

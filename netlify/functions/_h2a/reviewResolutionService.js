@@ -49,7 +49,9 @@ function fixedFailure(error) {
   const category = H2A_REVIEW_ERROR_CATEGORIES.includes(error?.category) ? error.category : 'error'
   const code = ['auth', 'permission'].includes(category) ? 'authorization_rejected'
     : H2A_REVIEW_ERROR_CODES.includes(error?.code) ? error.code : 'operation_failed'
-  return { category, code }
+  const providerStatus = Number.isInteger(error?.status) && error.status >= 400 && error.status <= 599
+    ? error.status : undefined
+  return { category, code, ...(providerStatus ? { providerStatus } : {}) }
 }
 
 async function bounded(deps, call, deadline) {
