@@ -704,3 +704,21 @@ test('choosing HubSpot for fields Albi does not return ends as a manual Albi tas
   assert.deepEqual(f.events.at(-1).details.manualTasks, [{ provider: 'albi', objectType: 'contacts', targetId: '20',
     fields: [{ field: 'city', value: 'Newport Beach' }, { field: 'jobTitle', value: 'Director of engineering' }] }])
 })
+
+test('a manual-only field resolution uses the captured Albi record and never enumerates Albi', async () => {
+  const f = fixture()
+  f.deps.albiRead.listContacts = async () => { throw Error('must not enumerate Albi contacts') }
+  f.deps.albiRead.listOrganizations = async () => { throw Error('must not enumerate Albi organizations') }
+  const result = await executeReviewResolution(f.deps, { ...input, decision: { action: 'resolve_fields', fieldChoices: { email: 'hubspot' } } })
+  assert.equal(result.resolution.status, 'waiting_on_albi')
+  assert.deepEqual(mutations(f), [])
+  assert.deepEqual(f.events.at(-1).details.manualTasks[0].fields, [{ field: 'email', value: 'hs@example.com' }])
+})
+
+test('a field resolution that writes HubSpot still verifies against live Albi evidence', async () => {
+  const f = fixture(); let listed = 0
+  const original = f.deps.albiRead.listContacts
+  f.deps.albiRead.listContacts = async (...args) => { listed++; return original(...args) }
+  await executeReviewResolution(f.deps, { ...input, decision: { action: 'resolve_fields', fieldChoices: { email: 'albi' } } })
+  assert.ok(listed > 0)
+})

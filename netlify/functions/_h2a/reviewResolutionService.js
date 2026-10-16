@@ -124,14 +124,20 @@ async function evidence(deps, clients, row, decision, deadline) {
     associatedCompanyIds = [...new Set(records[0].toIds)]
   }
   const capturedForceCreate = decision.action === 'force_create_albi'
+  // A field resolution where HubSpot wins every field writes nothing anywhere: it only produces a manual
+  // Albi task. It can use the captured Albi record instead of re-walking the whole (slow, flaky) Albi list;
+  // a later recheck verifies the result against live data.
+  const capturedManualOnly = decision.action === 'resolve_fields' &&
+    Object.values(decision.fieldChoices ?? {}).every(winner => winner === 'hubspot')
+  const captured = capturedForceCreate || capturedManualOnly
   const contacts = row.object_type === 'contacts'
-    ? capturedForceCreate ? structuredClone(row.candidate_snapshots) : await listAll(deps, args => clients.albiRead.listContacts(args), deadline)
+    ? captured ? structuredClone(row.candidate_snapshots) : await listAll(deps, args => clients.albiRead.listContacts(args), deadline)
     : []
-  const needsOrganizations = !capturedForceCreate &&
+  const needsOrganizations = !captured &&
     (row.object_type === 'companies' || decision.action === 'choose_organization' || decision.action === 'create_albi')
   const organizations = needsOrganizations
     ? await listAll(deps, args => clients.albiRead.listOrganizations(args), deadline)
-    : capturedForceCreate && row.object_type === 'companies' ? structuredClone(row.candidate_snapshots) : []
+    : captured && row.object_type === 'companies' ? structuredClone(row.candidate_snapshots) : []
   const candidates = row.object_type === 'contacts' ? contacts : organizations
   const organizationEvidence = []
   const organizationSources = [...new Set([...associatedCompanyIds,
