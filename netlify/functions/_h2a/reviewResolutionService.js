@@ -12,7 +12,15 @@ import { normalizePhone } from './normalize.js'
 import { H2A_REVIEW_ERROR_CATEGORIES, H2A_REVIEW_ERROR_CODES } from '../../../shared/h2aReviewReasons.js'
 
 const fail = (status, message) => { throw new H2AReviewError(status, message) }
-const stale = () => fail(409, 'This sample review changed. Refresh and confirm the resolution again.')
+// Each freshness rejection names its check (and differing field names, never values) for the audit.
+const stale = (check = 'other', fields = []) => {
+  const error = new H2AReviewError(409, 'This sample review changed. Refresh and confirm the resolution again.')
+  error.staleCheck = check
+  error.staleFields = fields
+  throw error
+}
+const differingFields = (left, right) => [...new Set([...Object.keys(left ?? {}), ...Object.keys(right ?? {})])]
+  .filter(key => !isDeepStrictEqual(left?.[key], right?.[key])).sort()
 const terminal = row => ['completed', 'superseded'].includes(row.status)
 const clock = deps => (deps.clockMs ?? Date.now)()
 
@@ -57,7 +65,8 @@ function fixedFailure(error) {
   const providerShape = typeof error?.providerShape === 'string' && error.providerShape.length <= 240
     ? error.providerShape : undefined
   return { category, code, ...(providerStatus ? { providerStatus } : {}), ...(providerReason ? { providerReason } : {}),
-    ...(providerShape ? { providerShape } : {}) }
+    ...(providerShape ? { providerShape } : {}),
+    ...(typeof error?.staleCheck === 'string' ? { staleCheck: error.staleCheck, staleFields: error.staleFields ?? [] } : {}) }
 }
 
 async function bounded(deps, call, deadline) {
@@ -93,7 +102,11 @@ async function listAll(deps, method, deadline) {
 }
 
 async function sourceRead(deps, clients, type, id, deadline) {
-  const rows = await bounded(deps, () => type === 'contacts' ? clients.hubspotRead.getContacts([id]) : clients.hubspotRead.getCompanies([id]), deadline)
+  // Recheck captures the snapshot with the single-record read; compare against the same read.
+  const direct = type === 'contacts' ? clients.hubspotRead.getContact : clients.hubspotRead.getCompany
+  const rows = typeof direct === 'function'
+    ? await bounded(deps, async () => { const record = await direct.call(clients.hubspotRead, id); return record === null ? [] : [record] }, deadline)
+    : await bounded(deps, () => type === 'contacts' ? clients.hubspotRead.getContacts([id]) : clients.hubspotRead.getCompanies([id]), deadline)
   if (!Array.isArray(rows) || rows.length > 1 || rows.some(row => !isRecord(row) || row.id !== id ||
     row.archived === true || !isRecord(row.properties))) malformed('resolution')
   return rows[0] ?? null
@@ -148,7 +161,7 @@ async function evidence(deps, clients, row, decision, deadline) {
     const rows = mappings.organizations
     if (capturedForceCreate) {
       const mapped = rows.filter(mapping => mapping.hubspot_id === id && mapping.portal_id === row.portal_id)
-      if (mapped.length > 1) stale()
+      if (mapped.length > 1) stale('mapping')
       if (mapped.length === 1 && isResolutionProviderId(mapped[0].albi_organization_id)) {
         organizationEvidence.push({ source: company, targetId: mapped[0].albi_organization_id, organizationTypeId: null })
       }
@@ -168,7 +181,7 @@ async function evidence(deps, clients, row, decision, deadline) {
     const match = decideContactMatch({ source, candidates, mappings: rows, portalId: row.portal_id,
       existingMapping: rows.find(mapping => mapping.portal_id === row.portal_id && mapping.hubspot_id === row.source_id) })
     if (match.action === 'link') targetId = match.targetId
-    else if (match.action !== 'create') stale()
+    else if (match.action !== 'create') stale('candidates')
   }
   return { source, albi: candidates.find(item => item.id === targetId), candidates, mappings,
     associatedCompanyIds, organizations: organizationEvidence, ...(createDefaults?.ok ? { createDefaults } : {}), createDefaultsReady: createDefaults?.ok === true }
@@ -202,18 +215,21 @@ function assertComparison(row, current, plan, replay, verifiedCreateTargetId = n
     // Allow only the exact intended write result to differ from the captured source.
     const expectedSource = row.source_snapshot
     for (const [key, value] of Object.entries(plan.verification.properties)) {
-      if (!Object.hasOwn(source.properties, key)) stale()
+      if (!Object.hasOwn(source.properties, key)) stale('source', [key])
       if ((source.properties[key] === null ? '' : source.properties[key]) !== value) continue
       const field = resolutionCanonicalField(row.object_type, key)
       if (field) source.properties[key] = expectedSource[field] ?? ''
     }
   }
-  if (!isDeepStrictEqual(safeReviewSnapshot(source, row.object_type), row.source_snapshot)) stale()
+  const liveSource = safeReviewSnapshot(source, row.object_type)
+  if (!isDeepStrictEqual(liveSource, row.source_snapshot)) stale('source', differingFields(liveSource, row.source_snapshot))
   if (current.albi && ['resolve_fields', 'link_existing'].includes(plan.action)) {
     const before = row.candidate_snapshots?.find(item => item.id === current.albi.id)
-    if (!before || !isDeepStrictEqual(safeReviewSnapshot(current.albi, row.object_type), safeReviewSnapshot(before, row.object_type))) stale()
+    const liveTarget = safeReviewSnapshot(current.albi, row.object_type)
+    if (!before) stale('target')
+    if (!isDeepStrictEqual(liveTarget, safeReviewSnapshot(before, row.object_type))) stale('target', differingFields(liveTarget, safeReviewSnapshot(before, row.object_type)))
   }
-  if (['resolve_fields', 'link_existing'].includes(plan.action) && !current.albi) stale()
+  if (['resolve_fields', 'link_existing'].includes(plan.action) && !current.albi) stale('target_missing')
   if (plan.action === 'force_create_albi') {
     const matchInput = { source: current.source, sourceId: row.source_id, candidates: current.candidates,
       mappings: row.object_type === 'contacts' ? current.mappings.contacts : current.mappings.organizations, portalId: row.portal_id }
@@ -221,12 +237,12 @@ function assertComparison(row, current, plan, replay, verifiedCreateTargetId = n
     const selected = selectAllReviewCandidates(matchInput, decision, row.object_type === 'contacts' ? 'contact' : 'organization')
       .map(item => item.id).filter(id => id !== verifiedCreateTargetId)
       .sort((a, b) => BigInt(a) < BigInt(b) ? -1 : BigInt(a) > BigInt(b) ? 1 : 0)
-    if (!isDeepStrictEqual(selected, plan.ignoredCandidateIds)) stale()
+    if (!isDeepStrictEqual(selected, plan.ignoredCandidateIds)) stale('candidates')
     for (const candidateId of plan.ignoredCandidateIds) {
       const before = row.candidate_snapshots?.find(item => item.id === candidateId)
       const after = current.candidates.filter(item => item.id === candidateId)
       if (!before || after.length !== 1 ||
-        !isDeepStrictEqual(safeReviewSnapshot(after[0], row.object_type), safeReviewSnapshot(before, row.object_type))) stale()
+        !isDeepStrictEqual(safeReviewSnapshot(after[0], row.object_type), safeReviewSnapshot(before, row.object_type))) stale('candidates')
     }
   }
 }
@@ -295,7 +311,7 @@ async function currentReview(deps, companyId, reviewId) {
   if (!resolved.sample) fail(409, 'This sample is no longer current. Run a new sample review.')
   const row = await deps.repository.getDryRunReview(companyId, resolved.sample.id, reviewId)
   if (!row || !['contacts', 'companies'].includes(row.object_type)) fail(404, 'Sample review item not found.')
-  if (row.portal_id !== resolved.config.portal_id) stale()
+  if (row.portal_id !== resolved.config.portal_id) stale('portal')
   return { ...resolved, row: { ...row, company_id: companyId } }
 }
 
@@ -352,7 +368,7 @@ async function runClaim(deps, input, saved, context) {
     clients = deps.getResolutionClients ? await bounded(deps, () => deps.getResolutionClients(input.companyId, context.config), deadline) : deps
     current = await evidence(deps, clients, row, saved.decision, deadline)
     if (phase !== 'applying') return finish(phase, phase === 'waiting_on_albi' ? 'waiting_on_albi' : 'recheck_requested')
-    if (row.updated_at !== saved.expected_review_updated_at) stale()
+    if (row.updated_at !== saved.expected_review_updated_at) stale('review')
     if (contextPlan) {
       plan = contextPlan
       if (saved.action === 'resolve_fields') {
@@ -361,7 +377,7 @@ async function runClaim(deps, input, saved, context) {
           if (Object.hasOwn(change, 'proposed')) original[field] = change.proposed ?? ''
         }
         const proof = safeResolutionExecutionContext(buildReviewResolutionPlan(planEvidence(row, saved.decision, current, original, current.albi)))
-        if (!isDeepStrictEqual(proof, contextPlan)) stale()
+        if (!isDeepStrictEqual(proof, contextPlan)) stale('plan')
       }
       if (saved.action === 'link_existing') {
         // The approval is durable; ownership can still change between attempts.
@@ -377,7 +393,7 @@ async function runClaim(deps, input, saved, context) {
       const livePlan = safeResolutionExecutionContext(buildReviewResolutionPlan(planEvidence(row, saved.decision, current, current.source, current.albi)))
       plan = safeResolutionExecutionContext(capturedPlan(row, saved.decision, current))
       if (!plan) malformed('resolution')
-      if (!isDeepStrictEqual(livePlan, plan)) stale()
+      if (!isDeepStrictEqual(livePlan, plan)) stale('plan')
     }
     const verifiedReceiptTarget = plan.action === 'force_create_albi' && createReceiptId
       ? forcedReceiptTarget(row, current, createReceiptId) : null
@@ -388,7 +404,7 @@ async function runClaim(deps, input, saved, context) {
     if (!await stillCurrent(deps, row, context.config)) return finish('superseded', 'superseded')
     // Revalidate the review after HTTP reads and before obtaining a mutation method.
     const newest = await deps.repository.getDryRunReview(input.companyId, row.run_id, row.id)
-    if (!newest || newest.updated_at !== row.updated_at) stale()
+    if (!newest || newest.updated_at !== row.updated_at) stale('review')
     if (!contextPlan) await caps.appendReviewResolutionEvent(input.companyId, saved.id,
       { actorId: input.actorId, eventType: 'claimed', details: { executionContext: plan } })
     const operation = plan.providerOperation
@@ -396,7 +412,7 @@ async function runClaim(deps, input, saved, context) {
       // Albi pagination can be slow. Refresh the source comparison at the write
       // boundary so intervening source edits require a new confirmation.
       current.source = await sourceRead(deps, clients, row.object_type, row.source_id, deadline)
-      if (!current.source) stale()
+      if (!current.source) stale('source')
       assertComparison(row, current, plan, true, verifiedReceiptTarget)
       if (plan.action === 'force_create_albi') {
         const mappings = await bounded(deps, () => deps.repository.getMappings(row.company_id), deadline)
@@ -405,7 +421,7 @@ async function runClaim(deps, input, saved, context) {
         const rows = row.object_type === 'contacts' ? mappings.contacts : mappings.organizations
         const mapped = rows.filter(item => item.portal_id === row.portal_id && item.hubspot_id === row.source_id)
         const key = row.object_type === 'contacts' ? 'albi_contact_id' : 'albi_organization_id'
-        if (mapped.length > 1 || mapped.length === 1 && mapped[0][key] !== verifiedReceiptTarget) stale()
+        if (mapped.length > 1 || mapped.length === 1 && mapped[0][key] !== verifiedReceiptTarget) stale('mapping')
       }
     }
     let createTarget = null
@@ -419,7 +435,7 @@ async function runClaim(deps, input, saved, context) {
         // A new create cannot override newly appeared or contradictory identity evidence.
         const matched = (row.object_type === 'contacts' ? decideContactMatch : decideOrganizationMatch)({ source: current.source,
           candidates: current.candidates, mappings: row.object_type === 'contacts' ? current.mappings.contacts : current.mappings.organizations, portalId: row.portal_id })
-        if (matched.action !== 'create') stale()
+        if (matched.action !== 'create') stale('candidates')
       }
     } else if (plan.verification.properties) reconciled = propertiesMatch(current.source, plan.verification.properties)
     else if (plan.verification.association) reconciled = current.associatedCompanyIds.includes(plan.verification.association.companyId)
@@ -489,7 +505,7 @@ export async function executeReviewResolution(deps, input) {
   const saved = rpc(created)
   if (terminal(saved)) return { resolution: saved }
   if (context.row.status !== 'needs_review' && !(decision.action === 'create_albi' &&
-    context.row.status === 'cleared' && context.row.recheck_outcome === 'safe_to_create')) stale()
+    context.row.status === 'cleared' && context.row.recheck_outcome === 'safe_to_create')) stale('review')
   return runClaim(deps, input, saved, context)
 }
 

@@ -722,3 +722,23 @@ test('a field resolution that writes HubSpot still verifies against live Albi ev
   await executeReviewResolution(f.deps, { ...input, decision: { action: 'resolve_fields', fieldChoices: { email: 'albi' } } })
   assert.ok(listed > 0)
 })
+
+test('the resolution reads the HubSpot source the same way recheck does (single-record read when available)', async () => {
+  const f = fixture()
+  f.deps.hubspotRead.getContact = async id => { f.calls.push('read-direct'); return structuredClone(f.source) }
+  f.deps.hubspotRead.getContacts = async () => { throw Error('must use the direct read') }
+  const result = await executeReviewResolution(f.deps, { ...input, decision: { action: 'resolve_fields', fieldChoices: { email: 'hubspot' } } })
+  assert.equal(result.resolution.status, 'waiting_on_albi')
+  assert.ok(f.calls.includes('read-direct'))
+})
+
+test('a stale rejection records which check failed and the differing field names, never values', async () => {
+  const f = fixture()
+  f.source.properties.phone = '5559990000'
+  await assert.rejects(executeReviewResolution(f.deps, { ...input, decision: { action: 'resolve_fields', fieldChoices: { email: 'hubspot' } } }),
+    error => error.statusCode === 409)
+  const details = f.events.at(-1).details
+  assert.equal(details.staleCheck, 'source')
+  assert.deepEqual(details.staleFields, ['phoneNumber'])
+  assert.equal(JSON.stringify(f.events).includes('5559990000'), false)
+})

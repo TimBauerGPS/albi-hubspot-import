@@ -341,6 +341,11 @@ export function safeResolutionEventDetails(value) {
   if (typeof input.providerShape === 'string' && input.providerShape.length > 0 && input.providerShape.length <= 240) {
     details.providerShape = input.providerShape
   }
+  if (['source', 'target', 'target_missing', 'plan', 'review', 'candidates', 'mapping', 'portal', 'other'].includes(input.staleCheck)) {
+    details.staleCheck = input.staleCheck
+    details.staleFields = (Array.isArray(input.staleFields) ? input.staleFields : [])
+      .filter(field => typeof field === 'string' && /^\w{1,40}$/.test(field)).slice(0, 10)
+  }
   if (RESOLUTION_OUTCOME_CODES.includes(input.outcome)) details.outcome = input.outcome
   if (Array.isArray(input.manualTasks)) details.manualTasks = safeManualTasks(input.manualTasks)
   return details

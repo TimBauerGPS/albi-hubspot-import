@@ -497,3 +497,9 @@ test('HubSpot-wins choices on fields Albi does not return become manual tasks in
   input.decision.fieldChoices = { city: 'albi' }
   assert.throws(() => plan(input), TypeError)
 })
+
+test('stale diagnostics are allowlisted in public event details', () => {
+  assert.deepEqual(safeResolutionEventDetails({ staleCheck: 'source', staleFields: ['email', 'bad field!', 'x'.repeat(50)] }),
+    { staleCheck: 'source', staleFields: ['email'] })
+  assert.deepEqual(safeResolutionEventDetails({ staleCheck: 'secret', staleFields: 'email' }), {})
+})
