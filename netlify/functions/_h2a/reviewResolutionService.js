@@ -296,13 +296,28 @@ async function runClaim(deps, input, saved, context) {
   try {
     const events = await bounded(deps, () => deps.repository.listReviewResolutionEvents(input.companyId, saved.id), deadline)
     if (!Array.isArray(events)) malformed('resolution')
-    const persisted = events.find(event => event.event_type === 'claimed' && event.sanitized_details?.executionContext)
+    let persistedIndex = -1
+    for (let index = events.length - 1; index >= 0; index--) {
+      if (events[index].event_type === 'claimed' && events[index].sanitized_details?.executionContext) {
+        persistedIndex = index
+        break
+      }
+    }
+    const persisted = persistedIndex >= 0 ? events[persistedIndex] : null
     const receipts = [...new Set(events.map(event => event.sanitized_details?.createReceiptId).filter(Boolean))]
     if (receipts.length > 1) malformed('resolution')
     let createReceiptId = receipts[0] ?? null
     if (!persisted && events.length >= RESOLUTION_EVENT_LIMIT) throw new ApiError('permanent', { code: 'operation_failed' })
-    const contextPlan = persisted ? safeResolutionExecutionContext(persisted.sanitized_details.executionContext) : null
-    if (persisted && !contextPlan || contextPlan && (contextPlan.decisionHash !== hashResolutionDecision(saved.decision) ||
+    // A provider validation response is definitive: Albi rejected the request and
+    // did not return a create receipt. Rebuild the plan so a corrected deployment
+    // can safely retry the same audited decision. Ambiguous failures still keep
+    // their immutable context and are never blindly repeated.
+    const rebuildAfterValidation = !createReceiptId && ['create_albi', 'force_create_albi'].includes(saved.action) &&
+      events.slice(persistedIndex + 1).some(event =>
+        event.event_type === 'failed' && event.sanitized_details?.category === 'validation')
+    const contextPlan = persisted && !rebuildAfterValidation
+      ? safeResolutionExecutionContext(persisted.sanitized_details.executionContext) : null
+    if (persisted && !rebuildAfterValidation && !contextPlan || contextPlan && (contextPlan.decisionHash !== hashResolutionDecision(saved.decision) ||
       contextPlan.action !== saved.action || contextPlan.providerOperation?.id && contextPlan.providerOperation.id !== saved.source_id ||
       contextPlan.mapping && contextPlan.mapping.sourceId !== saved.source_id ||
       contextPlan.verification.create && (contextPlan.verification.create.sourceId !== saved.source_id ||

@@ -188,8 +188,10 @@ function createPayload(input, hubspot, type, associations) {
   if (!Number.isSafeInteger(Number(typeId))) invalidPlan()
   const payload = {}
   // Only properties accepted by the existing Albi create contracts are copied.
-  for (const field of type === 'contacts' ? ['firstName', 'lastName', 'email', 'phoneNumber', 'jobTitle',
-    'address1', 'address2', 'city', 'state', 'zipcode', 'country'] : ['name', 'phoneNumber', 'address1', 'address2', 'city', 'state', 'zipcode', 'country']) {
+  // Keep creates on the same minimal contract exercised by the production sync.
+  // Richer provider fields remain available for comparison and manual resolution,
+  // but have not been proven safe on Albi's create endpoints.
+  for (const field of type === 'contacts' ? ['firstName', 'lastName', 'email', 'phoneNumber'] : ['name', 'phoneNumber']) {
     const meta = FIELD_METADATA[type][field]
     let value = fieldValue(hubspot, [meta.hubspot, field], false)
     if (value !== null) value = value.trim()

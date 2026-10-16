@@ -271,6 +271,41 @@ test('forced create retry reconciles its exact receipt and existing mapping with
   assert.equal(f.events.at(-1).eventType, 'provider_reconciled')
 })
 
+test('forced create retries a definitive validation rejection with a freshly rebuilt plan', async () => {
+  const f = fixture(), createInput = asForcedCreate(f)
+  f.writeError = new ApiError('validation', { code: 'operation_failed' })
+  const first = await executeReviewResolution(f.deps, createInput)
+  assert.equal(first.resolution.status, 'failed')
+  assert.equal(mutations(f).length, 1)
+
+  const persisted = f.events.find(event => event.eventType === 'claimed' && event.details?.executionContext)
+  persisted.details.executionContext.providerOperation.payload.jobTitle = 'legacy optional field'
+  persisted.details.executionContext.verification.create.payload.jobTitle = 'legacy optional field'
+  f.writeError = null
+
+  const second = await executeReviewResolution(f.deps, createInput)
+  assert.equal(second.resolution.status, 'ready_to_recheck')
+  assert.equal(mutations(f).length, 2)
+  assert.equal(mutations(f)[1][1].jobTitle, undefined)
+})
+
+test('a transient failure after a validation retry is never blindly repeated', async () => {
+  const f = fixture(), createInput = asForcedCreate(f)
+  f.writeError = new ApiError('validation', { code: 'operation_failed' })
+  await executeReviewResolution(f.deps, createInput)
+
+  f.createdTarget = null
+  f.writeError = new ApiError('transient', { code: 'timeout' })
+  const ambiguous = await executeReviewResolution(f.deps, createInput)
+  assert.equal(ambiguous.resolution.status, 'failed')
+  assert.equal(mutations(f).length, 2)
+
+  f.writeError = null
+  const blocked = await executeReviewResolution(f.deps, createInput)
+  assert.equal(blocked.resolution.status, 'failed')
+  assert.equal(mutations(f).length, 2)
+})
+
 test('forced create stops before Albi when a source mapping exists or the decision changes the captured candidate set', async () => {
   const mapped = fixture(), mappedInput = asForcedCreate(mapped)
   mapped.mappings.contacts.push({ portal_id: '123', hubspot_id: '42', albi_contact_id: '20' })

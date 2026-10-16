@@ -168,7 +168,7 @@ test('create plans rebuild supported payloads from current HubSpot and confirmed
   const input = createInput('contacts'); input.hubspot.properties.mobilephone = '111'; input.hubspot.properties.zip = '90001'
   const result = plan(input)
   assert.equal(result.providerOperation.payload.mobileNumber, undefined)
-  assert.equal(result.providerOperation.payload.zipCode, '90001')
+  assert.equal(result.providerOperation.payload.zipCode, undefined)
 })
 
 test('create plans canonicalize surrounding HubSpot whitespace before comparing captured evidence', () => {
@@ -180,7 +180,19 @@ test('create plans canonicalize surrounding HubSpot whitespace before comparing 
 
   assert.deepEqual(plan(input).providerOperation.payload, {
     firstName: 'John', lastName: 'Robinson', email: 'john@example.com', phoneNumber: '949-662-6181',
-    jobTitle: 'Director of engineering', address1: '1 Main St', city: 'Newport Beach', contactTypeIds: ['12'],
+    contactTypeIds: ['12'],
+  })
+})
+
+test('create plans use the production-proven minimal Albi contact contract', () => {
+  const input = createInput('contacts')
+  Object.assign(input.hubspot.properties, {
+    jobtitle: 'Director of engineering', address: '1 Main St', address2: 'Suite 2', city: 'Newport Beach',
+    state: 'CA', zip: '92663', country: 'US',
+  })
+
+  assert.deepEqual(plan(input).providerOperation.payload, {
+    firstName: 'A', lastName: 'B', email: 'a@example.com', phoneNumber: '555-111-2222', contactTypeIds: ['12'],
   })
 })
 
