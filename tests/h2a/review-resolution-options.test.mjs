@@ -241,3 +241,16 @@ test('an associated organization that is not in Albi yet is named so it can be c
   const mapped = await loadReviewResolutionOptions({ row, repository: { getMappings: async () => mappings }, reads })
   assert.equal(mapped.organizationGate, undefined)
 })
+
+test('an unmapped associated organization is gated from cheap evidence without enumerating Albi', async () => {
+  const throwing = { ...reads, albiRead: { ...reads.albiRead,
+    listContacts: async () => { throw Error('must not enumerate Albi contacts') },
+    listOrganizations: async () => { throw Error('must not enumerate Albi organizations') } } }
+  const result = await loadReviewResolutionOptions({ row: { ...row, company_id: 'c', run_id: 'r', reason: 'albi_contact_update_contract_unverified' },
+    repository: { getMappings: async () => ({ ...mappings, organizations: [] }), findDryRunReviewBySource: async () => ({ id: '00000000-0000-4000-8000-0000000000dd' }) },
+    reads: throwing })
+  assert.deepEqual(result.organizationOptions, [])
+  assert.deepEqual(result.organizationGate, { sourceId: '777', reviewId: '00000000-0000-4000-8000-0000000000dd' })
+  const mapped = await loadReviewResolutionOptions({ row, repository: { getMappings: async () => mappings }, reads })
+  assert.equal(mapped.organizationOptions.length, 1)
+})

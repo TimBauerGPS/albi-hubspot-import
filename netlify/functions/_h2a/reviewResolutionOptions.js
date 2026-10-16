@@ -64,6 +64,19 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
     if (associated === null) return unavailable
 
     if (actions.includes('choose_organization') && row.object_type === 'contacts') {
+      // A single associated organization with no tenant mapping must be synced first. Decide that from cheap
+      // evidence so the slow full Albi enumeration (which exceeds the detail deadline) is not needed to show it.
+      if (associated.length === 1 && !mappings.organizations.some(item => item?.portal_id === row.portal_id && mappedSource(item) === associated[0])) {
+        const companies = await hubspot.getCompanies([associated[0]])
+        if (Array.isArray(companies) && companies.length === 1 && companies[0]?.id === associated[0] &&
+          companies[0]?.archived !== true && record(companies[0]?.properties)) {
+          const found = typeof repository.findDryRunReviewBySource === 'function'
+            ? await repository.findDryRunReviewBySource(row.company_id, row.run_id, 'companies', associated[0]) : null
+          return { ...unavailable, organizationOptions: [],
+            organizationGate: { sourceId: associated[0], reviewId: typeof found?.id === 'string' ? found.id : null } }
+        }
+        return unavailable
+      }
       const contacts = await all(args => reads.albiRead.listContacts(args))
       const organizations = await all(args => reads.albiRead.listOrganizations(args))
       if (!contacts || !organizations) return unavailable

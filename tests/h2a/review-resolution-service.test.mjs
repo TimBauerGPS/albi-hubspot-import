@@ -690,3 +690,17 @@ test('create sends Referrer type, Active status and the owner-matched salesperso
   const payload = mutations(f)[0][1]
   assert.deepEqual([payload.contactTypeIds, payload.relationshipStatusId, payload.salespersonId], [['12'], '2', '70'])
 })
+
+test('choosing HubSpot for fields Albi does not return ends as a manual Albi task, not a failure', async () => {
+  const f = fixture()
+  Object.assign(f.source.properties, { city: 'Newport Beach', jobtitle: 'Director of engineering' })
+  Object.assign(f.row.source_snapshot, { city: 'Newport Beach', jobTitle: 'Director of engineering' })
+  f.row.proposed_changes = { updates: { city: 'Newport Beach', jobTitle: 'Director of engineering' }, unchanged: [],
+    conflicts: { city: { current: null, proposed: 'Newport Beach' }, jobTitle: { current: null, proposed: 'Director of engineering' } } }
+  f.row.reason = 'albi_contact_update_contract_unverified'
+  const result = await executeReviewResolution(f.deps, { ...input, decision: { action: 'resolve_fields', fieldChoices: { city: 'hubspot', jobTitle: 'hubspot' } } })
+  assert.equal(result.resolution.status, 'waiting_on_albi')
+  assert.deepEqual(mutations(f), [])
+  assert.deepEqual(f.events.at(-1).details.manualTasks, [{ provider: 'albi', objectType: 'contacts', targetId: '20',
+    fields: [{ field: 'city', value: 'Newport Beach' }, { field: 'jobTitle', value: 'Director of engineering' }] }])
+})
