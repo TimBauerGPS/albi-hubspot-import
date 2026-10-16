@@ -475,3 +475,34 @@ test('a failed organization preparation reports the error and keeps the contact 
   assert.equal(ui.calls.filter(call => call.name === 'getH2ADryRunReview').at(-1).args[2], 'review-1')
   ui.unmount()
 })
+
+test('a waiting-on-Albi record shows a prominent reminder with the exact edits, an Albi link and recheck', async () => {
+  const source = await readFile(detailUrl, 'utf8')
+  const code = transformSync(source.replace(/^import[\s\S]*?from ['"][^'"]+['"]\s*$/gm, '').replace('export default function', 'function'),
+    { loader: 'jsx', jsxFactory: 'h' }).code
+  const Detail = vm.runInNewContext(`${code}\nSampleReviewDetail`, { ...presentation, h: createElement, Intl, Date, SampleReviewResolution: () => null })
+  const resolution = { id: '00000000-0000-4000-8000-0000000000aa', reviewId: '00000000-0000-4000-8000-0000000000ab', runId: '00000000-0000-4000-8000-0000000000ac',
+    portalId: '321', sourceId: '123', objectType: 'contacts', action: 'resolve_fields', status: 'waiting_on_albi',
+    events: [{ id: '00000000-0000-4000-8000-0000000000ad', eventType: 'waiting_on_albi', details: { code: 'waiting_on_albi',
+      manualTasks: [{ provider: 'albi', objectType: 'contacts', targetId: '2838373', fields: [{ field: 'city', value: 'Newport Beach' }, { field: 'jobTitle', value: 'Director of engineering' }] }] } }] }
+  const html = renderToStaticMarkup(createElement(Detail, { item: { ...full(), resolution }, onRecheck() {} }))
+  assert.match(html, /Update this contact in Albi/)
+  assert.match(html, /Newport Beach/); assert.match(html, /Director of engineering/)
+  assert.match(html, /https:\/\/app\.albiware\.com\/Relationships\/Contact\/2838373/)
+  assert.match(html, /updated Albi — Recheck/)
+  const none = renderToStaticMarkup(createElement(Detail, { item: full(), onRecheck() {} }))
+  assert.doesNotMatch(none, /Update this contact in Albi/)
+})
+
+test('the queue reminds the reviewer which records are waiting on an Albi update and selects one', async () => {
+  const ui = await mount({ getH2ADryRunReviews: () => Promise.resolve(page([row('a'), { ...row('b'), displayName: 'Bea Waiting', resolutionStatus: 'waiting_on_albi' }])) })
+  assert.match(ui.text(), /1 record waiting on an Albi update/)
+  const banner = ui.nodes().filter(node => node.type === 'button' && String(node.props.className).includes('amber'))
+  assert.deepEqual(banner.map(node => node.children), [['Bea Waiting']])
+  banner[0].props.onClick(); await ui.flush()
+  assert.equal(ui.calls.filter(call => call.name === 'getH2ADryRunReview').at(-1).args[2], 'b')
+  ui.unmount()
+  const clear = await mount()
+  assert.doesNotMatch(clear.text(), /waiting on an Albi update/)
+  clear.unmount()
+})

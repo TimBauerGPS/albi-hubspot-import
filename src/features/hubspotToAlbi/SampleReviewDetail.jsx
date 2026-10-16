@@ -45,6 +45,11 @@ export default function SampleReviewDetail({ item, busy, recheckPending, onReche
     hubspot, albi: 'No candidate found',
   })) }]
 
+  // Albi's API cannot edit existing records, so a waiting resolution is a reminder for a person to do it.
+  const albiEdits = review.resolution?.status === 'waiting_on_albi'
+    ? [...(review.resolution.events ?? [])].reverse().find(event => event.manualTasks?.length)?.manualTasks ?? [] : []
+  const copy = value => { try { globalThis.navigator?.clipboard?.writeText(String(value)) } catch { /* Copy is a convenience only. */ } }
+
   return (
     <section className="min-w-0 overflow-hidden rounded-xl border border-gray-200 bg-white" aria-labelledby="sample-review-detail-title">
       <header className="border-b border-gray-200 px-5 py-4">
@@ -54,6 +59,18 @@ export default function SampleReviewDetail({ item, busy, recheckPending, onReche
       </header>
 
       <div className="space-y-6 px-5 py-5">
+        {albiEdits.length > 0 && <section className="rounded-lg border-2 border-amber-400 bg-amber-50 px-4 py-4" role="status" aria-labelledby="sample-review-albi-reminder-title">
+          <h4 id="sample-review-albi-reminder-title" className="text-sm font-semibold text-amber-950">Update this {review.objectType === 'companies' ? 'organization' : 'contact'} in Albi</h4>
+          <p className="mt-1 text-xs leading-5 text-amber-900">Albi’s API can’t edit existing records, so make these changes in Albi yourself, then recheck here.</p>
+          {albiEdits.map((task, index) => <div key={`${task.targetId}-${index}`} className="mt-3">
+            <ul className="space-y-1.5">{task.fields.map(field => <li key={field.field} className="flex flex-wrap items-center gap-2 text-sm text-gray-900">
+              <span className="font-medium">{field.label}:</span><span className="break-words">{field.value === '' ? 'Blank' : field.value}</span>
+              {field.value !== '' && <button type="button" onClick={() => copy(field.value)} className="rounded border border-amber-300 bg-white px-1.5 py-0.5 text-xs font-medium text-amber-900 hover:bg-amber-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500">Copy</button>}
+            </li>)}</ul>
+            {task.url && <a href={task.url} target="_blank" rel="noreferrer" className="mt-3 inline-flex text-sm font-semibold text-amber-950 underline underline-offset-4">Open {task.objectType === 'companies' ? 'organization' : 'contact'} in Albi</a>}
+          </div>)}
+          <button type="button" disabled={recheckPending} onClick={onRecheck} className="mt-4 rounded-lg bg-amber-600 px-3 py-2 text-sm font-semibold text-white hover:bg-amber-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 disabled:cursor-not-allowed disabled:opacity-50">I’ve updated Albi — Recheck</button>
+        </section>}
         <section className={`rounded-lg border px-4 py-3 ${review.status === 'needs_review' ? 'border-amber-200 bg-amber-50' : 'border-green-200 bg-green-50'}`} aria-labelledby="sample-review-guidance-title">
           <h4 id="sample-review-guidance-title" className="text-sm font-semibold text-gray-900">{review.reasonLabel}</h4>
           <p className="mt-1 text-sm leading-6 text-gray-700">{review.guidance}</p>

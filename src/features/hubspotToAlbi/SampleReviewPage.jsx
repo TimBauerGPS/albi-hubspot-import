@@ -316,6 +316,7 @@ export default function SampleReviewPage() {
   }
 
   const visible = stateTenant === tenantKey
+  const waitingOnAlbi = (visible ? items : []).filter(item => item?.resolutionStatus === 'waiting_on_albi')
   const counters = presentSampleReviewProgress(visible ? progress : null)
   const historical = sample && (sample.historical || sample.reviewCaptureVersion !== 1)
   const clean = sample?.reviewCaptureVersion === 1 && progress?.total === 0 && progress?.fullDryRunReady === true
@@ -373,6 +374,12 @@ export default function SampleReviewPage() {
                 {nextCursor && <div className="border-t border-gray-100 px-4 py-3"><button type="button" onClick={loadMore} disabled={loadingMore || Boolean(busyId)} className={`${secondaryButton} w-full`}>{loadingMore ? 'Loading…' : 'Load more'}</button></div>}
               </aside>
               <div className="min-w-0 space-y-3">
+              {waitingOnAlbi.length > 0 && <div className="rounded-lg border-2 border-amber-400 bg-amber-50 px-4 py-3 text-sm text-amber-950" role="status">
+                <p className="font-semibold">{`${waitingOnAlbi.length} ${waitingOnAlbi.length === 1 ? 'record' : 'records'} waiting on an Albi update`}</p>
+                <p className="mt-0.5 text-xs text-amber-900">Make the listed edits in Albi, then recheck each record.</p>
+                <div className="mt-2 flex flex-wrap gap-2">{waitingOnAlbi.map(item => <button key={item.id} type="button"
+                  onClick={() => { setSelectedId(item.id); setActionError(''); setNotice('') }}
+                  className="rounded-md border border-amber-300 bg-white px-2 py-1 text-xs font-semibold text-amber-900 hover:bg-amber-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500">{typeof item.displayName === 'string' && item.displayName.trim() ? item.displayName : 'Unnamed record'}</button>)}</div></div>}
               {returnToId && returnToId !== selectedId && <div className="rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm text-gray-800">
                 <button type="button" onClick={() => { setSelectedId(returnToId); setReturnToId(null); setActionError(''); setNotice('') }} className={secondaryButton}>Back to contact review</button>
                 <span className="ml-3 text-xs text-gray-600">Create the organization here, then return to create the contact.</span></div>}
