@@ -71,6 +71,13 @@ export function getH2AReviewReason(code) {
   return Object.hasOwn(H2A_REVIEW_REASON_CATALOG, code) ? H2A_REVIEW_REASON_CATALOG[code] : OTHER_REASON
 }
 
+// Contact field differences can also correct which organization the contact belongs to.
+export function getH2AReviewActions(code, objectType) {
+  const entry = getH2AReviewReason(code)
+  return objectType === 'contacts' && entry.category === 'field' && !entry.actions.includes('choose_organization')
+    ? Object.freeze([...entry.actions, 'choose_organization']) : entry.actions
+}
+
 export function listH2AReviewReasonOptions(codes) {
   const values = codes === undefined ? Object.keys(H2A_REVIEW_REASON_CATALOG) : Array.isArray(codes) ? codes : []
   return Object.freeze([...new Set(values)].filter(code => Object.hasOwn(H2A_REVIEW_REASON_CATALOG, code))

@@ -44,6 +44,8 @@ export default function SampleReviewResolution({ item, busy = false, onResolve, 
     idPattern.test(option?.sourceId) && idPattern.test(option?.targetId) && typeof option.associated === 'boolean' &&
     idPattern.test(option?.contactTargetId) && idPattern.test(option?.currentOrganizationTargetId ?? option.targetId)) : []
   const canChooseOrganization = organizationOptions.length > 0
+  const organizationGate = !canChooseOrganization && idPattern.test(item?.organizationGate?.sourceId)
+    ? { sourceId: item.organizationGate.sourceId, reviewId: typeof item.organizationGate.reviewId === 'string' && item.organizationGate.reviewId ? item.organizationGate.reviewId : null } : null
   const selectedOrganization = organizationOptions.find(option => option.sourceId === organizationSourceId)
   const sourceList = review.candidates.length === 0 ? item?.createReadiness?.referralSources : item?.forceCreateReadiness?.referralSources
   const referralSources = Array.isArray(sourceList) ? sourceList.filter(source => idPattern.test(source?.id) && typeof source?.label === 'string' && source.label.trim() !== '').slice(0, 100) : []
@@ -91,11 +93,11 @@ export default function SampleReviewResolution({ item, busy = false, onResolve, 
       <option value="">Choose referral source</option>{referralSources.map(source => <option key={source.id} value={source.id}>{source.label}</option>)}</select>
     <span className="mt-1 block text-xs font-normal text-gray-600">Albi requires a referral source for every new record.</span></label>
 
-  const organizationFirst = () => <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3">
+  const organizationFirst = (gateTarget = unsyncedOrganization) => <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3">
     <p className="text-sm font-semibold text-amber-950">Create the organization first</p>
     <p className="mt-1 text-xs leading-5 text-amber-900">This contact’s HubSpot organization is not in Albi yet. Create it on its own audited review, then return here to create the contact linked to it.</p>
     <button type="button" className={`${secondary} mt-3`} disabled={effectiveBusy || !onOpenOrganization}
-      onClick={() => onOpenOrganization?.(unsyncedOrganization)}>{unsyncedOrganization?.reviewId ? 'Open organization review' : 'Prepare organization review'}</button></div>
+      onClick={() => onOpenOrganization?.(gateTarget)}>{gateTarget?.reviewId ? 'Open organization review' : 'Prepare organization review'}</button></div>
 
   function chooseReferral(value) {
     setReferralSourceId(value); requestRef.current = null; setMessage(''); setConfirmation(null)
@@ -185,6 +187,12 @@ export default function SampleReviewResolution({ item, busy = false, onResolve, 
       {review.candidateLinks.map(link => <TaskLink key={link.id} url={link.url}>Open {review.objectType === 'contacts' ? 'contact' : 'organization'} in Albi</TaskLink>)}
     </div>
 
+    {review.objectType === 'contacts' && item?.hubspotOrganizations !== undefined && <p className="mt-3 text-xs leading-5 text-gray-700">
+      <span className="font-semibold text-gray-900">HubSpot organization: </span>
+      {Array.isArray(item.hubspotOrganizations) ? item.hubspotOrganizations.length
+        ? item.hubspotOrganizations.filter(organization => idPattern.test(organization?.sourceId) && typeof organization?.name === 'string').map(organization => organization.name).join(', ')
+        : 'No organization is associated in HubSpot.' : 'The HubSpot association could not be read right now.'}</p>}
+
     {canAct && review.actions.includes('resolve_fields') && eligibleFields && <div className="mt-5 space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2"><h5 className="text-sm font-semibold text-gray-900">Choose each field</h5>
         <div className="flex flex-wrap gap-2"><button type="button" disabled={effectiveBusy} className={secondary} onClick={() => changed(Object.fromEntries(fields.map(field => [field.key, 'hubspot'])), candidateId, organizationSourceId, approveManyToOne)}>Use HubSpot for all</button>
@@ -215,12 +223,13 @@ export default function SampleReviewResolution({ item, busy = false, onResolve, 
       {unsyncedOrganization ? organizationFirst() : canForceCreate ? <>{referralSelect()}
         <button type="button" className={`${primary} mt-3`} disabled={effectiveBusy} onClick={() => open('force_create_albi')}>Create a separate Albi record</button></>
         : <p className="mt-2 text-xs text-red-900">{blockedCopy ?? 'This option is unavailable until the source, candidate, mapping, and type checks are current. Recheck this record first.'}</p>}</div>}
-    {canAct && review.actions.includes('choose_organization') && <div className="mt-5 rounded-lg border border-gray-200 p-4"><h5 className="text-sm font-semibold text-gray-900">Organization context</h5>
+    {canAct && review.objectType === 'contacts' && review.actions.includes('choose_organization') && <div className="mt-5 rounded-lg border border-gray-200 p-4"><h5 className="text-sm font-semibold text-gray-900">Organization context</h5>
       <p className="mt-1 text-xs leading-5 text-gray-700">Existing HubSpot associations will not be removed. The selected organization becomes the saved context; an Albi relationship may need a manual update.</p>
       {canChooseOrganization ? <><label className="mt-3 block text-xs font-medium text-gray-700">Organization<select value={organizationSourceId} onChange={event => changed(choices, candidateId, event.target.value, approveManyToOne)} className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:ring-2 focus:ring-brand-500"><option value="">Choose organization</option>{organizationOptions.map(option => <option key={option.sourceId} value={option.sourceId}>HubSpot {option.sourceId} → Albi {option.targetId}{option.associated ? ' · currently associated' : ' · add association'}</option>)}</select></label>
         {selectedOrganization && !selectedOrganization.associated && <label className="mt-3 flex items-start gap-2 text-xs text-gray-700"><input type="checkbox" checked={approveAssociation} onChange={event => { setApproveAssociation(event.target.checked); requestRef.current = null; setConfirmation(null) }} className="mt-0.5 text-brand-600 focus:ring-brand-500" />Add this organization as a HubSpot association. Existing HubSpot associations will not be removed.</label>}
         <button type="button" className={`${primary} mt-3`} disabled={effectiveBusy || !selectedOrganization || !selectedOrganization.associated && !approveAssociation} onClick={() => open('choose_organization')}>Choose organization</button></>
-        : <p className="mt-2 text-xs text-amber-800">Fresh server association evidence is unavailable. Recheck or reload this record before choosing an organization.</p>}</div>}
+        : organizationGate ? organizationFirst(organizationGate)
+          : <p className="mt-2 text-xs text-amber-800">Fresh server association evidence is unavailable. Recheck or reload this record before choosing an organization.</p>}</div>}
 
     {!confirmation && feedback}
     {resolution && <section className="mt-5 border-t border-gray-200 pt-4" aria-label="Resolution progress and audit"><h5 className="text-sm font-semibold text-gray-900">Resolution progress</h5>

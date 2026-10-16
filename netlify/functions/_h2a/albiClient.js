@@ -114,8 +114,12 @@ function listEnvelope(value, expectedPage, expectedPageSize, operation) {
 export class AlbiClient {
   #request
   #companyPromise
+  #sleep
+  #random
   constructor({ apiKey, ...http } = {}) {
     if (!text(apiKey)) invalid('credentials')
+    this.#sleep = http.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)))
+    this.#random = http.random ?? Math.random
     this.#request = createHttpClient({ ...http, baseUrl: 'https://albi.guardianrestoration.com', captureValidationReason: true, headers: { 'X-API-Key': apiKey } })
   }
   async #discoverCompany() {
@@ -183,7 +187,19 @@ export class AlbiClient {
     if (!/^\d+$/.test(String(cursor)) || !Number.isSafeInteger(Number(cursor)) || Number(cursor) < 1 ||
       !Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) invalid('list')
     const query = new URLSearchParams({ page: String(cursor), pageSize: String(pageSize), ...filters })
-    const data = await this.#scopedRequest(`${await this.#path(resource)}?${query}`, { operation }, SCOPES[operation])
+    let data
+    for (let attempt = 0; ; attempt++) {
+      try {
+        data = await this.#scopedRequest(`${await this.#path(resource)}?${query}`, { operation }, SCOPES[operation])
+        break
+      } catch (error) {
+        // Albi intermittently answers a read with a generic 400 that succeeds on retry. Reads are idempotent.
+        const flaky = error instanceof ApiError && error.status === 400 && /unexpected error/i.test(error.providerReason ?? '')
+        if (flaky && attempt < 2) { await this.#sleep(250 * (2 ** attempt) * (1 + Math.min(1, Math.max(0, this.#random())))); continue }
+        if (flaky) error.providerShape = `list=${resource};page=${cursor};${error.providerShape ?? ''}`.slice(0, 240)
+        throw error
+      }
+    }
     const page = listEnvelope(data, Number(cursor), pageSize, operation)
     return { records: page.records.map(value => normalizeRecord(value, fields, operation)), cursor: page.cursor }
   }

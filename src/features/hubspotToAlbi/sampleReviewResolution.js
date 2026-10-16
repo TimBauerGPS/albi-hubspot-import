@@ -1,4 +1,4 @@
-import { getH2AReviewReason, H2A_REVIEW_ERROR_CATEGORIES, H2A_REVIEW_ERROR_CODES } from '../../../shared/h2aReviewReasons.js'
+import { getH2AReviewActions, getH2AReviewReason, H2A_REVIEW_ERROR_CATEGORIES, H2A_REVIEW_ERROR_CODES } from '../../../shared/h2aReviewReasons.js'
 import { buildAlbiRecordUrl, buildHubSpotRecordUrl } from '../../../shared/h2aProviderLinks.js'
 
 export const RESOLUTION_FIELDS = Object.freeze({
@@ -124,7 +124,7 @@ export function presentReviewResolution(item) {
 export function buildResolutionConfirmation({ review, decision: input } = {}) {
   if (!object(review) || !ownMember(RESOLUTION_FIELDS, review.objectType)) fail()
   const selected = decision(input)
-  if (!getH2AReviewReason(review.reason).actions.includes(selected.action)) fail()
+  if (!getH2AReviewActions(review.reason, review.objectType).includes(selected.action)) fail()
   const result = { hubspotWrites: [], albiTasks: [], mapping: null, association: null }
   if (selected.action === 'resolve_fields') {
     const candidates = Array.isArray(review.candidates) ? review.candidates : []

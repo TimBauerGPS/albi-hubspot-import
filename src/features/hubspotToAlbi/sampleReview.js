@@ -1,4 +1,4 @@
-import { getH2AReviewReason, H2A_REVIEW_GUIDANCE, listH2AReviewReasonOptions } from '../../../shared/h2aReviewReasons.js'
+import { getH2AReviewActions, getH2AReviewReason, H2A_REVIEW_GUIDANCE, listH2AReviewReasonOptions } from '../../../shared/h2aReviewReasons.js'
 import { buildAlbiRecordUrl, buildHubSpotRecordUrl } from '../../../shared/h2aProviderLinks.js'
 import { RESOLUTION_FIELDS, resolutionDisplayValue, presentReviewResolution, presentResolutionCapability } from './sampleReviewResolution.js'
 
@@ -90,7 +90,7 @@ export function presentSampleReviewItem(item) {
     displayName: displayName || source.name || 'Not provided', source,
     candidates, matchEvidence: Array.isArray(input.matchEvidence) ? [...new Set(input.matchEvidence.filter(value => EVIDENCE.has(value)))] : [],
     proposedChanges: safeChanges(input.proposedChanges),
-    resolutionFields, actions: input.status === 'needs_review' || input.status === undefined ? [...copy.actions]
+    resolutionFields, actions: input.status === 'needs_review' || input.status === undefined ? [...getH2AReviewActions(input.reason, objectType)]
       : input.status === 'cleared' && input.recheckOutcome === 'safe_to_create' && copy.actions.includes('create_albi') ? ['create_albi'] : [],
     portalId, hubspotUrl: buildHubSpotRecordUrl(portalId, objectType, input.sourceId ?? source.id),
     candidateLinks: candidates.map(candidate => ({ id: candidate.id, url: buildAlbiRecordUrl(objectType, candidate.id) })),

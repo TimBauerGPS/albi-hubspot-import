@@ -494,3 +494,22 @@ test('HubSpot owner lookup reads only the owner property and tolerates unowned r
   assert.equal(f.calls[0].url.searchParams.get('properties'), 'hubspot_owner_id')
   await assert.rejects(c.getOwnerId('deals', '1'))
 })
+
+test('an intermittent Albi list failure is retried; persistent ones name the failing page', async () => {
+  const flaky = { statusCode: 400, body: { message: 'There was an unexpected error getting contacts according to this search criteria', validationErrors: [] } }
+  const ok = { data: [{ id: 5, firstName: 'A', lastName: 'B' }] }
+  const delays = []
+  const retried = transport([accessibleCompany, flaky, flaky, ok])
+  const client = new AlbiClient({ apiKey: 'k', fetch: retried.fetch, sleep: async ms => delays.push(ms), random: () => 0 })
+  assert.deepEqual((await client.listContacts({ cursor: '3', pageSize: 100 })).records.map(record => record.id), ['5'])
+  assert.equal(retried.calls.length, 4)
+  assert.equal(delays.length, 2)
+  const failing = transport([accessibleCompany, flaky, flaky, flaky])
+  const error = await new AlbiClient({ apiKey: 'k', fetch: failing.fetch, sleep: async () => {}, random: () => 0 })
+    .listContacts({ cursor: '7', pageSize: 100 }).catch(e => e)
+  assert.equal(error.status, 400)
+  assert.match(error.providerShape, /^list=contacts;page=7/)
+  const other = transport([accessibleCompany, { statusCode: 400, body: { message: 'Invalid request.' } }])
+  await new AlbiClient({ apiKey: 'k', fetch: other.fetch, sleep: async () => {} }).listContacts().catch(() => {})
+  assert.equal(other.calls.length, 2)
+})

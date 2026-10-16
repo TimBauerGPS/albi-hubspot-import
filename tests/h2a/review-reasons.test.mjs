@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { REVIEW_REASONS } from '../../netlify/functions/_h2a/review.js'
-import { H2A_REVIEW_REASON_CATALOG, getH2AReviewReason, listH2AReviewReasonOptions } from '../../shared/h2aReviewReasons.js'
+import { H2A_REVIEW_REASON_CATALOG, getH2AReviewActions, getH2AReviewReason, listH2AReviewReasonOptions } from '../../shared/h2aReviewReasons.js'
 import { buildAlbiRecordUrl, buildHubSpotRecordUrl } from '../../shared/h2aProviderLinks.js'
 
 test('stored review reasons have safe shared presentation and action metadata', () => {
@@ -47,4 +47,15 @@ test('provider links accept only positive decimal IDs and fixed object types', (
   }
   assert.equal(buildAlbiRecordUrl('__proto__', '123'), null)
   assert.equal(buildHubSpotRecordUrl('123', 'notes', '456'), null)
+})
+
+test('a contact field difference can also correct the organization context; nothing else gains actions', () => {
+  for (const reason of ['albi_contact_update_contract_unverified', 'nonblank_field_difference', 'contact_fields_require_review']) {
+    assert.deepEqual(getH2AReviewActions(reason, 'contacts'), ['resolve_fields', 'choose_organization'])
+    assert.deepEqual(getH2AReviewActions(reason, 'companies'), ['resolve_fields'])
+  }
+  assert.deepEqual(getH2AReviewActions('no_match', 'contacts'), getH2AReviewReason('no_match').actions)
+  assert.deepEqual(getH2AReviewActions('organization_unresolved', 'contacts'), ['choose_organization'])
+  assert.deepEqual(getH2AReviewActions('secret', 'contacts'), [])
+  assert.ok(Object.isFrozen(getH2AReviewActions('nonblank_field_difference', 'contacts')))
 })

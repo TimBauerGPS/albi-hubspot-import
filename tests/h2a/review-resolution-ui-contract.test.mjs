@@ -242,3 +242,23 @@ test('an unsynced organization blocks contact creation and offers to open or pre
   const html = await render(blocked({ sourceId: '777', reviewId: null }))
   assert.doesNotMatch(html, /deferred/i)
 })
+
+test('the live HubSpot organization association is shown by name so it matches HubSpot', async () => {
+  const named = await render({ ...base, hubspotOrganizations: [{ sourceId: '777', name: 'Lido House' }] })
+  assert.match(named, /HubSpot organization/); assert.match(named, /Lido House/)
+  assert.match(await render({ ...base, hubspotOrganizations: [] }), /No organization is associated in HubSpot/)
+  assert.match(await render({ ...base, hubspotOrganizations: null }), /could not be read right now/)
+  assert.doesNotMatch(await render({ ...base }), /HubSpot organization/)
+  assert.doesNotMatch(await render({ ...base, objectType: 'companies', hubspotOrganizations: [] }), /HubSpot organization/)
+})
+
+test('organization context offers the organization-first review when the organization is not in Albi', async () => {
+  const review = '00000000-0000-4000-8000-0000000000aa'
+  const item = { ...base, reason: 'albi_contact_update_contract_unverified', organizationOptions: [], organizationGate: { sourceId: '777', reviewId: review } }
+  const calls = []
+  const ui = await mount(item, undefined, organization => calls.push(organization))
+  assert.match(ui.text(), /Create the organization first/)
+  ui.find('button', 'Open organization review').props.onClick(); await ui.flush()
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [{ sourceId: '777', reviewId: review }])
+  assert.doesNotMatch(await render({ ...base, reason: 'albi_contact_update_contract_unverified', organizationOptions: [] }), /Create the organization first/)
+})

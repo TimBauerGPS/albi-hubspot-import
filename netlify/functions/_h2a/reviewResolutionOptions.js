@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from 'node:util'
-import { getH2AReviewReason } from '../../../shared/h2aReviewReasons.js'
+import { getH2AReviewActions } from '../../../shared/h2aReviewReasons.js'
 import { buildAlbiRecordUrl } from '../../../shared/h2aProviderLinks.js'
 import { resolveContactType } from './options.js'
 import { decideContactMatch, decideOrganizationMatch } from './match.js'
@@ -46,7 +46,7 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
   const unavailable = { organizationOptions: [], createReadiness: { ready: false }, forceCreateReadiness: { eligible: false, ready: false } }
   if (!record(row) || !providerId(row.source_id) || !providerId(row.portal_id) ||
     !['contacts', 'companies'].includes(row.object_type) || !reads?.hubspotRead || !reads?.albiRead) return unavailable
-  const actions = getH2AReviewReason(row.reason).actions
+  const actions = getH2AReviewActions(row.reason, row.object_type)
   if (!actions.includes('choose_organization') && !actions.includes('create_albi') && !actions.includes('force_create_albi')) return unavailable
   try {
     const hubspot = reads.hubspotRead
@@ -79,6 +79,7 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
       const currentOrganizationTargetId = contact.organizationId == null || contact.organizationId === '' ? null : contact.organizationId
       if (currentOrganizationTargetId !== null && !providerId(currentOrganizationTargetId)) return unavailable
       const organizationOptions = []
+      let gate = null
       const mappedSources = mappings.organizations.filter(item => item?.portal_id === row.portal_id && providerId(mappedSource(item)))
         .map(mappedSource)
       for (const sourceId of [...new Set([...associated, ...mappedSources])].slice(0, 25)) {
@@ -91,12 +92,20 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
           mappings: mappings.organizations, portalId: row.portal_id,
           existingMapping: organizationMappings[0] })
         const targetId = match.action === 'link' ? match.targetId : null
-        if (!providerId(targetId) || !organizations.some(item => item.id === targetId)) continue
+        if (!providerId(targetId) || !organizations.some(item => item.id === targetId)) {
+          // An associated organization with no Albi record must be created first, on its own review.
+          if (!gate && associated.includes(sourceId) && organizationMappings.length === 0) {
+            const found = typeof repository.findDryRunReviewBySource === 'function'
+              ? await repository.findDryRunReviewBySource(row.company_id, row.run_id, 'companies', sourceId) : null
+            gate = { sourceId, reviewId: typeof found?.id === 'string' ? found.id : null }
+          }
+          continue
+        }
         organizationOptions.push({ sourceId, targetId, contactTargetId, currentOrganizationTargetId,
           associated: associated.includes(sourceId),
           contactUrl: buildAlbiRecordUrl('contacts', contactTargetId), organizationUrl: buildAlbiRecordUrl('companies', targetId) })
       }
-      return { ...unavailable, organizationOptions }
+      return { ...unavailable, organizationOptions, ...(organizationOptions.length === 0 && gate ? { organizationGate: gate } : {}) }
     }
 
     const forced = actions.includes('force_create_albi') && row.status === 'needs_review' &&

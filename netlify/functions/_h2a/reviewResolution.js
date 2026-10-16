@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
-import { H2A_REVIEW_ERROR_CATEGORIES, H2A_REVIEW_ERROR_CODES, getH2AReviewReason } from '../../../shared/h2aReviewReasons.js'
+import { H2A_REVIEW_ERROR_CATEGORIES, H2A_REVIEW_ERROR_CODES, getH2AReviewActions } from '../../../shared/h2aReviewReasons.js'
 import { buildAlbiRecordUrl } from '../../../shared/h2aProviderLinks.js'
 import { resolveContactType } from './options.js'
 import { normalizePhone } from './normalize.js'
@@ -223,7 +223,7 @@ export function buildReviewResolutionPlan(input) {
     'optionMappings', 'associatedCompanyIds', 'organizations', 'portalId', 'createDefaults'].includes(key))) invalidPlan()
   const decision = normalizeResolutionDecision(input.decision)
   const review = record(input.review), type = review.objectType
-  if (!['contacts', 'companies'].includes(type) || !getH2AReviewReason(review.reason).actions.includes(decision.action)) invalidPlan()
+  if (!['contacts', 'companies'].includes(type) || !getH2AReviewActions(review.reason, type).includes(decision.action)) invalidPlan()
   const sourceId = positiveId(review.sourceId)
   const portalId = input.portalId ?? review.portalId ?? null
   if (portalId !== null) positiveId(portalId)

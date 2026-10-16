@@ -441,3 +441,23 @@ test('preparing refuses stale reviews, non-contacts and anything but exactly one
   assert.equal((await prepare(f)).statusCode, 409)
   assert.equal(f.recorded.length, 0)
 })
+
+test('contact detail shows the live HubSpot organization association by name, or null when unreadable', async () => {
+  const f = fixture()
+  f.options.env = { H2A_REVIEW_RESOLUTION_MODE: 'admins' }
+  f.options.requireRequest = async () => ({ companyId: 'authorized-company', role: 'admin', isSuperAdmin: false })
+  f.repository.getMappings = async () => ({ contacts: [], organizations: [], options: [] })
+  f.options.makeClients = async () => ({ hubspot: {
+    getContacts: async () => [], getAssociations: async () => [{ fromId: '10', toObjectType: 'companies', toIds: ['30', '31'] }],
+    getCompanies: async ids => [{ id: ids[0], properties: { name: ids[0] === '30' ? 'Lido House' : 'Other Co', apiKey: 'secret' } }] }, albi: {
+    listContacts: async () => ({ records: [], cursor: null }), listOrganizations: async () => ({ records: [], cursor: null }) } })
+  const body = JSON.parse((await createDryRunReviewHandler(f.options)(get({ reviewId }))).body)
+  assert.deepEqual(body.item.hubspotOrganizations, [{ sourceId: '30', name: 'Lido House' }, { sourceId: '31', name: 'Other Co' }])
+  assert.equal(JSON.stringify(body).includes('secret'), false)
+  f.options.makeClients = async () => ({ hubspot: { getAssociations: async () => { throw new Error('down') } }, albi: {} })
+  assert.equal(JSON.parse((await createDryRunReviewHandler(f.options)(get({ reviewId }))).body).item.hubspotOrganizations, null)
+  const none = fixture()
+  none.options.env = f.options.env; none.options.requireRequest = f.options.requireRequest
+  none.options.makeClients = async () => ({ hubspot: { getAssociations: async () => [{ fromId: '10', toObjectType: 'companies', toIds: [] }] }, albi: {} })
+  assert.deepEqual(JSON.parse((await createDryRunReviewHandler(none.options)(get({ reviewId }))).body).item.hubspotOrganizations, [])
+})

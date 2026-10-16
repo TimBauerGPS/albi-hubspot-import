@@ -225,3 +225,19 @@ test('create readiness names the missing Albi default instead of offering a crea
     { getOwnerId: async () => '5', listOwners: async () => [{ id: '5', firstName: 'Ali', lastName: 'Brown' }] })
   assert.deepEqual((await load(owned)).createReadiness, { ready: false, blockedReason: 'salesperson_not_found' })
 })
+
+test('an associated organization that is not in Albi yet is named so it can be created first', async () => {
+  const unmapped = { ...mappings, organizations: [] }
+  const lookups = []
+  const load = find => loadReviewResolutionOptions({ row: { ...row, company_id: 'c', run_id: 'r' },
+    repository: { getMappings: async () => unmapped, findDryRunReviewBySource: find },
+    reads: { ...reads, albiRead: { ...reads.albiRead, listOrganizations: async () => ({ records: [], cursor: null }) } } })
+  const none = await load(async (...args) => { lookups.push(args); return null })
+  assert.deepEqual(none.organizationOptions, [])
+  assert.deepEqual(none.organizationGate, { sourceId: '777', reviewId: null })
+  assert.deepEqual(lookups[0], ['c', 'r', 'companies', '777'])
+  const known = await load(async () => ({ id: '00000000-0000-4000-8000-0000000000dd' }))
+  assert.deepEqual(known.organizationGate, { sourceId: '777', reviewId: '00000000-0000-4000-8000-0000000000dd' })
+  const mapped = await loadReviewResolutionOptions({ row, repository: { getMappings: async () => mappings }, reads })
+  assert.equal(mapped.organizationGate, undefined)
+})

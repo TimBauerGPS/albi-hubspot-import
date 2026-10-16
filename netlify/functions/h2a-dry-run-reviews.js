@@ -8,12 +8,13 @@ import { ApiError } from './_h2a/http.js'
 import { currentResolutionProjection } from './h2a-dry-run-review-resolutions.js'
 import { projectResolutionCapability } from './_h2a/resolutionCapability.js'
 import { loadReviewResolutionOptions } from './_h2a/reviewResolutionOptions.js'
-import { getH2AReviewReason } from '../../shared/h2aReviewReasons.js'
+import { getH2AReviewActions } from '../../shared/h2aReviewReasons.js'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/
 const validTime = value => typeof value === 'string' && TIMESTAMP.test(value) && Number.isFinite(Date.parse(value)) &&
   new Date(`${value.slice(0, 10)}T00:00:00Z`).toISOString().slice(0, 10) === value.slice(0, 10)
+const providerId = value => typeof value === 'string' && /^[1-9]\d{0,99}$/.test(value)
 const fail = (status, message) => { throw new H2AReviewError(status, message) }
 const reply = (statusCode, body) => ({ statusCode, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store',
   'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Content-Type, Authorization',
@@ -76,7 +77,7 @@ async function detail(repository, companyId, runId, row, auth, options, config) 
   const events = await repository.listDryRunReviewEvents(companyId, runId, row.id)
   const projected = await currentResolutionProjection(repository, companyId, row.id, row.portal_id)
   const resolutionCapability = projectResolutionCapability(auth, (options.env ?? process.env).H2A_REVIEW_RESOLUTION_MODE, projected.hubspotWrites)
-  const actions = getH2AReviewReason(row.reason).actions
+  const actions = getH2AReviewActions(row.reason, row.object_type)
   let resolutionOptions = { organizationOptions: [], createReadiness: { ready: false }, forceCreateReadiness: { eligible: false, ready: false } }
   if (resolutionCapability.canResolve && (row.status === 'needs_review' || row.status === 'cleared' && row.recheck_outcome === 'safe_to_create') &&
     (actions.includes('choose_organization') || actions.includes('create_albi') &&
@@ -97,12 +98,33 @@ async function detail(repository, companyId, runId, row, auth, options, config) 
       if (loaded) resolutionOptions = loaded
     } catch { /* The chooser remains disabled when live evidence cannot be read. */ }
   }
+  // Live association names (the contact's own snapshot only carries a free-text company property).
+  // null means unknown, [] means HubSpot has none.
+  let hubspotOrganizations = null
+  if (row.object_type === 'contacts' && resolutionCapability.canResolve) {
+    try {
+      hubspotOrganizations = await advisoryWithin(async () => {
+        const clients = options.makeClients ? await options.makeClients(companyId) : await createH2AProviderClients({
+          companyId, repository, keyring: options.keyring, env: options.env, fetch: options.fetch })
+        if (!options.makeClients && (await clients.hubspot.getAccountInfo()).portalId !== config.portal_id) return null
+        const associations = await clients.hubspot.getAssociations({ objectType: 'contacts', objectIds: [row.source_id], toObjectTypes: ['companies'] })
+        if (!Array.isArray(associations) || associations.length !== 1 || associations[0]?.fromId !== row.source_id ||
+          associations[0]?.toObjectType !== 'companies' || !Array.isArray(associations[0].toIds)) return null
+        const found = []
+        for (const sourceId of [...new Set(associations[0].toIds)].filter(providerId).slice(0, 5)) {
+          const companies = await clients.hubspot.getCompanies([sourceId])
+          const company = Array.isArray(companies) && companies.length === 1 && companies[0]?.id === sourceId && companies[0]?.archived !== true ? companies[0] : null
+          const name = typeof company?.properties?.name === 'string' ? company.properties.name.trim().slice(0, 200) : ''
+          found.push({ sourceId, name: name || 'Unnamed organization' })
+        }
+        return found
+      }, Number.isFinite(options.detailDeadlineMs) ? Math.min(10000, Math.max(1, options.detailDeadlineMs)) : 5000)
+    } catch { hubspotOrganizations = null }
+  }
   return { ...projectReviewRow(row, { detail: true }), resolutionStatus: projected.resolution?.status ?? null,
     events: events.map(projectReviewEvent), resolution: projected.resolution,
-    resolutionCapability, ...resolutionOptions }
+    resolutionCapability, hubspotOrganizations, ...resolutionOptions }
 }
-
-const providerId = value => typeof value === 'string' && /^[1-9]\d{0,99}$/.test(value)
 
 // Captures (or finds) the review for a contact's one unmapped organization so it can be created and
 // audited on its own. Reads HubSpot only; the Albi create is a separate resolution on that review.
