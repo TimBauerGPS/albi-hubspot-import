@@ -742,3 +742,16 @@ test('a stale rejection records which check failed and the differing field names
   assert.deepEqual(details.staleFields, ['phoneNumber'])
   assert.equal(JSON.stringify(f.events).includes('5559990000'), false)
 })
+
+test('surrounding whitespace in live HubSpot values does not make a field resolution stale', async () => {
+  const f = fixture()
+  Object.assign(f.source.properties, { city: 'Newport Beach ', jobtitle: ' Director of engineering' })
+  Object.assign(f.row.source_snapshot, { city: 'Newport Beach', jobTitle: 'Director of engineering' })
+  f.row.proposed_changes = { updates: {}, unchanged: [],
+    conflicts: { city: { current: null, proposed: 'Newport Beach' }, jobTitle: { current: null, proposed: 'Director of engineering' } } }
+  f.row.reason = 'albi_contact_update_contract_unverified'
+  const result = await executeReviewResolution(f.deps, { ...input, decision: { action: 'resolve_fields', fieldChoices: { city: 'hubspot', jobTitle: 'hubspot' } } })
+  assert.equal(result.resolution.status, 'waiting_on_albi')
+  assert.deepEqual(f.events.at(-1).details.manualTasks[0].fields,
+    [{ field: 'city', value: 'Newport Beach' }, { field: 'jobTitle', value: 'Director of engineering' }])
+})

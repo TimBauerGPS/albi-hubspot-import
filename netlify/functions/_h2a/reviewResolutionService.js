@@ -393,7 +393,11 @@ async function runClaim(deps, input, saved, context) {
       const livePlan = safeResolutionExecutionContext(buildReviewResolutionPlan(planEvidence(row, saved.decision, current, current.source, current.albi)))
       plan = safeResolutionExecutionContext(capturedPlan(row, saved.decision, current))
       if (!plan) malformed('resolution')
-      if (!isDeepStrictEqual(livePlan, plan)) stale('plan')
+      if (!isDeepStrictEqual(livePlan, plan)) {
+        const planFields = value => ({ ...Object.fromEntries((value?.manualTasks ?? []).flatMap(task => task.fields.map(item => [item.field, item.value]))),
+          ...(value?.providerOperation?.properties ?? {}) })
+        stale('plan', differingFields(planFields(livePlan), planFields(plan)))
+      }
     }
     const verifiedReceiptTarget = plan.action === 'force_create_albi' && createReceiptId
       ? forcedReceiptTarget(row, current, createReceiptId) : null
