@@ -9,7 +9,7 @@ const ACTION_FIELDS = Object.freeze({
   resolve_fields: new Set(['fieldChoices']),
   link_existing: new Set(['candidateId', 'approveManyToOne']),
   create_albi: new Set([]),
-  force_create_albi: new Set(['ignoredCandidateIds']),
+  force_create_albi: new Set(['ignoredCandidateIds', 'deferOrganizationAssociation']),
   choose_organization: new Set(['organizationSourceId', 'addHubSpotAssociation']),
 })
 const CONTACT_FIELDS = ['firstName', 'lastName', 'email', 'phoneNumber', 'mobileNumber', 'jobTitle',
@@ -54,6 +54,10 @@ export function normalizeResolutionDecision(input) {
       input.ignoredCandidateIds.some(value => !isResolutionProviderId(value)) ||
       new Set(input.ignoredCandidateIds).size !== input.ignoredCandidateIds.length) throw new TypeError('Invalid ignored candidates')
     decision.ignoredCandidateIds = [...input.ignoredCandidateIds].sort((a, b) => BigInt(a) < BigInt(b) ? -1 : BigInt(a) > BigInt(b) ? 1 : 0)
+    if (Object.hasOwn(input, 'deferOrganizationAssociation')) {
+      if (input.deferOrganizationAssociation !== true) throw new TypeError('Invalid deferred organization approval')
+      decision.deferOrganizationAssociation = true
+    }
   }
   for (const field of ['candidateId', 'organizationSourceId']) {
     if (ACTION_FIELDS[input.action].has(field)) {
@@ -250,7 +254,12 @@ export function buildReviewResolutionPlan(input) {
       if (!captured.length || !isDeepStrictEqual(captured, decision.ignoredCandidateIds)) invalidPlan()
       result.ignoredCandidateIds = [...decision.ignoredCandidateIds]
     }
-    const create = createPayload(input, hubspot, type, associations)
+    let createAssociations = associations
+    if (decision.deferOrganizationAssociation === true) {
+      if (type !== 'contacts' || associations.length !== 1 || list(input.organizations).length !== 0) invalidPlan()
+      createAssociations = []
+    }
+    const create = createPayload(input, hubspot, type, createAssociations)
     result.providerOperation = { provider: 'albi', operation: type === 'contacts' ? 'createContact' : 'createOrganization', payload: create.payload }
     result.mapping = { objectType: type, sourceId, targetId: null, approveManyToOne: false }
     // Existing record creates have no provider source-marker field. Identity is for fenced service reconciliation.

@@ -124,15 +124,19 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
       const props = sourceRows[0].properties
       const nameReady = row.object_type === 'contacts' ? Boolean(String(props.firstname ?? '').trim() && String(props.lastname ?? '').trim())
         : Boolean(String(props.name ?? '').trim())
-      let organizationTypeId = null, organizationReady = true
+      let organizationTypeId = null, organizationReady = true, deferredOrganizationSourceId = null
       if (associated.length === 1) {
         const sourceId = associated[0]
+        const associationMappings = mappings.organizations.filter(item => item?.portal_id === row.portal_id && mappedSource(item) === sourceId)
+        if (associationMappings.length > 1) return unavailable
         const targetId = exactMapping(mappings.organizations, row.portal_id, sourceId, 'companies')
         const companies = await hubspot.getCompanies([sourceId])
         const organizations = forced ? null : await all(args => reads.albiRead.listOrganizations(args))
         const target = organizations?.find(item => item.id === targetId)
-        organizationReady = Boolean(targetId && (forced || target) && Array.isArray(companies) && companies.length === 1 &&
-          companies[0]?.id === sourceId && companies[0]?.archived !== true && record(companies[0]?.properties))
+        const companyReady = Array.isArray(companies) && companies.length === 1 && companies[0]?.id === sourceId &&
+          companies[0]?.archived !== true && record(companies[0]?.properties)
+        organizationReady = Boolean(companyReady && (forced ? targetId || associationMappings.length === 0 : targetId && target))
+        if (forced && companyReady && associationMappings.length === 0) deferredOrganizationSourceId = sourceId
         if (organizationReady && Array.isArray(target?.organizationTypeIds) && target.organizationTypeIds.length === 1 &&
           providerId(target.organizationTypeIds[0])) organizationTypeId = target.organizationTypeIds[0]
       }
@@ -144,7 +148,8 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
       const typeReady = type.action === 'resolved' && providerId(type.contactTypeId) &&
         Number.isSafeInteger(Number(type.contactTypeId))
       const ready = nameReady && organizationReady && typeReady
-      return { ...unavailable, ...(forced ? { forceCreateReadiness: { eligible: true, ready } } : { createReadiness: { ready } }) }
+      return { ...unavailable, ...(forced ? { forceCreateReadiness: { eligible: true, ready,
+        ...(deferredOrganizationSourceId ? { deferredOrganizationSourceId } : {}) } } : { createReadiness: { ready } }) }
     }
   } catch { /* A failed read cannot become an actionable projection. */ }
   return unavailable

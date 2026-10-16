@@ -123,6 +123,7 @@ async function evidence(deps, clients, row, decision, deadline) {
     const rows = mappings.organizations
     if (capturedForceCreate) {
       const mapped = rows.filter(mapping => mapping.hubspot_id === id && mapping.portal_id === row.portal_id)
+      if (mapped.length > 1) stale()
       if (mapped.length === 1 && isResolutionProviderId(mapped[0].albi_organization_id)) {
         organizationEvidence.push({ source: company, targetId: mapped[0].albi_organization_id, organizationTypeId: null })
       }

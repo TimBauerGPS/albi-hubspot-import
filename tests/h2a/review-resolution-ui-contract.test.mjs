@@ -85,6 +85,19 @@ test('forced create confirmation names the duplicate risk and submits the audite
     { action: 'force_create_albi', ignoredCandidateIds: ['456'] })
 })
 
+test('forced create explicitly confirms when its Albi organization association is deferred', async () => {
+  const calls = []
+  const ui = await mount({ ...base, reason: 'name_only_candidate', proposedChanges: {},
+    forceCreateReadiness: { eligible: true, ready: true, deferredOrganizationSourceId: '777' } }, async (...args) => {
+    calls.push(args); return { resolution: { status: 'ready_to_recheck' } }
+  })
+  ui.find('button', 'Create a separate Albi record').props.onClick(); await ui.flush()
+  assert.match(ui.text(), /organization link will be deferred/i)
+  await ui.find('button', 'Confirm resolution').props.onClick(); await ui.flush()
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[0][0])),
+    { action: 'force_create_albi', ignoredCandidateIds: ['456'], deferOrganizationAssociation: true })
+})
+
 test('waiting audit keeps provider success and validated manual task links visible', async () => {
   const html = await render({ ...base, resolution: { id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', reviewId: base.id,
     runId: base.runId, portalId: '321', sourceId: '123', objectType: 'contacts', action: 'resolve_fields', status: 'waiting_on_albi',

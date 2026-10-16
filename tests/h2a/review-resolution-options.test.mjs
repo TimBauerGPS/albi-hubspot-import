@@ -143,6 +143,24 @@ test('forced contact creation uses a mapped association without enumerating Albi
   assert.deepEqual(result.forceCreateReadiness, { eligible: true, ready: true })
 })
 
+test('forced contact creation can explicitly defer one current unmapped organization', async () => {
+  const forceRow = { ...row, reason: 'name_only_candidate', candidate_snapshots: [{ id: '456', firstName: 'Alex', lastName: 'Stone' }],
+    source_snapshot: { id: '123', firstName: 'Alex', lastName: 'Stone' } }
+  const currentMappings = { contacts: [], organizations: [], options: [{ mapping_kind: 'default_contact_type',
+    source_key: 'default', albi_id: '12', confirmed: true }] }
+  const currentReads = { ...reads, hubspotRead: { ...reads.hubspotRead,
+    getContacts: async () => [{ id: '123', properties: { firstname: 'Alex', lastname: 'Stone' } }],
+    getCompanies: async () => [{ id: '777', properties: { name: 'Unmapped Company' } }],
+    getAssociations: async () => [{ fromId: '123', toObjectType: 'companies', toIds: ['777'] }] },
+  albiRead: { listContacts: async () => { throw Error('must not enumerate Albi contacts') },
+    listOrganizations: async () => { throw Error('must not enumerate Albi organizations') } } }
+
+  const result = await loadReviewResolutionOptions({ row: forceRow,
+    repository: { getMappings: async () => currentMappings }, reads: currentReads })
+
+  assert.deepEqual(result.forceCreateReadiness, { eligible: true, ready: true, deferredOrganizationSourceId: '777' })
+})
+
 test('fresh zero-association evidence can offer a mapped organization as an explicit addition', async () => {
   const result = await loadReviewResolutionOptions({ row, repository: { getMappings: async () => mappings },
     reads: { ...reads, hubspotRead: { ...reads.hubspotRead,

@@ -88,7 +88,9 @@ export default function SampleReviewResolution({ item, busy = false, onResolve }
       decision = { action }
     } else if (action === 'force_create_albi') {
       if (!canForceCreate) return
-      decision = { action, ignoredCandidateIds: eligibleCandidates.map(candidate => candidate.id) }
+      decision = { action, ignoredCandidateIds: eligibleCandidates.map(candidate => candidate.id),
+        ...(idPattern.test(item?.forceCreateReadiness?.deferredOrganizationSourceId)
+          ? { deferOrganizationAssociation: true } : {}) }
     } else {
       if (!canChooseOrganization || !selectedOrganization || !selectedOrganization.associated && !approveAssociation) {
         setMessage('Choose a current associated organization.'); return
@@ -207,7 +209,7 @@ export default function SampleReviewResolution({ item, busy = false, onResolve }
         <div className="mt-4 grid gap-3 sm:grid-cols-2"><section className="rounded-lg border border-blue-200 bg-blue-50 p-3"><h4 className="text-sm font-semibold text-blue-900">Updates HubSpot now</h4>{confirmation.preview.hubspotWrites.length ? <ul className="mt-2 space-y-1 text-xs text-blue-900">{confirmation.preview.hubspotWrites.map(write => <li key={write.field}>{write.field}: {display(write.value)}</li>)}</ul> : <p className="mt-2 text-xs text-blue-800">None</p>}</section>
           <section className="rounded-lg border border-amber-200 bg-amber-50 p-3"><h4 className="text-sm font-semibold text-amber-900">You’ll update this in Albi</h4>{confirmation.preview.albiTasks.length ? <ul className="mt-2 space-y-1 text-xs text-amber-900">{confirmation.preview.albiTasks.map(task => <li key={task.field}>{task.field}: {display(task.value)}</li>)}</ul> : <p className="mt-2 text-xs text-amber-800">None</p>}</section></div>
         {confirmation.preview.mapping && <p className={`mt-3 rounded-lg p-3 text-sm ${confirmation.preview.mapping.forced ? 'border border-red-200 bg-red-50 text-red-950' : 'bg-gray-50 text-gray-800'}`}>{confirmation.preview.mapping.forced
-          ? `Creates a separate Albi record, ignores ${confirmation.preview.mapping.ignoredCandidateIds.length} listed candidate${confirmation.preview.mapping.ignoredCandidateIds.length === 1 ? '' : 's'}, and saves the new mapping. A duplicate may be created.`
+          ? `Creates a separate Albi record, ignores ${confirmation.preview.mapping.ignoredCandidateIds.length} listed candidate${confirmation.preview.mapping.ignoredCandidateIds.length === 1 ? '' : 's'}, and saves the new mapping. A duplicate may be created.${confirmation.preview.mapping.deferOrganizationAssociation ? ' The Albi organization link will be deferred for later review.' : ''}`
           : confirmation.preview.mapping.createAlbi ? 'Creates an Albi record and saves its mapping.' : `Saves a mapping to Albi record ${confirmation.preview.mapping.targetId}.`}</p>}
         {confirmation.preview.association && <p className="mt-3 rounded-lg bg-gray-50 p-3 text-sm text-gray-800">Saves HubSpot organization {confirmation.preview.association.organizationSourceId} as context. {confirmation.preview.association.addHubSpotAssociation ? 'Adds HubSpot association. ' : ''}Existing HubSpot associations will not be removed.</p>}
         <div className="mt-5 flex flex-row-reverse flex-wrap gap-2" aria-busy={effectiveBusy}><button ref={confirmRef} type="button" className={primary} disabled={effectiveBusy} onClick={submit}>{effectiveBusy ? 'Applying…' : message.startsWith('Resolution failed') ? 'Retry resolution' : 'Confirm resolution'}</button>

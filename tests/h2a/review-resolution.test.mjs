@@ -185,6 +185,21 @@ test('forced create records the exact ignored candidates and still builds a crea
   assert.throws(() => plan(input), TypeError)
 })
 
+test('forced contact create requires an explicit decision before deferring one unmapped organization', () => {
+  const input = createInput('contacts')
+  input.review.reason = 'name_only_candidate'
+  input.review.candidateSnapshots = [{ id: '20', firstName: 'A', lastName: 'B' }]
+  input.associatedCompanyIds = ['99']
+  input.decision = { action: 'force_create_albi', ignoredCandidateIds: ['20'], deferOrganizationAssociation: true }
+
+  const result = plan(input)
+
+  assert.equal(result.providerOperation.payload.organizationId, undefined)
+  assert.equal(result.verification.create.organizationId, null)
+  delete input.decision.deferOrganizationAssociation
+  assert.throws(() => plan(input), TypeError)
+})
+
 test('create prerequisites reject missing names, options, unresolved context and unsafe phone formats', () => {
   for (const change of [
     input => { input.hubspot.properties.lastname = '' }, input => { input.optionMappings[0].confirmed = false },
