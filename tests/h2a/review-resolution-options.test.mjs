@@ -99,6 +99,32 @@ test('forced create readiness uses the captured candidate set without enumeratin
   assert.deepEqual(result.forceCreateReadiness, { eligible: true, ready: true })
 })
 
+test('forced create readiness starts independent repository and HubSpot reads together', async () => {
+  const forceRow = { ...row, reason: 'name_only_candidate', candidate_snapshots: [{ id: '456', firstName: 'Alex', lastName: 'Stone' }],
+    source_snapshot: { id: '123', firstName: 'Alex', lastName: 'Stone' } }
+  const started = new Set()
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  const begin = async name => {
+    started.add(name)
+    if (started.size === 3) release()
+    await gate
+  }
+  const result = await Promise.race([
+    loadReviewResolutionOptions({ row: forceRow, repository: { getMappings: async () => {
+      await begin('mappings')
+      return { contacts: [], organizations: [], options: [{ mapping_kind: 'default_contact_type', source_key: 'default', albi_id: '12', confirmed: true }] }
+    } }, reads: { hubspotRead: {
+      getContacts: async () => { await begin('source'); return [{ id: '123', properties: { firstname: 'Alex', lastname: 'Stone' } }] },
+      getCompanies: async () => [],
+      getAssociations: async () => { await begin('associations'); return [{ fromId: '123', toObjectType: 'companies', toIds: [] }] },
+    }, albiRead: { listContacts: async () => { throw Error('must not enumerate Albi contacts') }, listOrganizations: async () => ({ records: [], cursor: null }) } } }),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('independent readiness reads were serialized')), 100)),
+  ])
+
+  assert.deepEqual(result.forceCreateReadiness, { eligible: true, ready: true })
+})
+
 test('forced contact creation uses a mapped association without enumerating Albi organizations', async () => {
   const forceRow = { ...row, reason: 'name_only_candidate', candidate_snapshots: [{ id: '456', firstName: 'Alex', lastName: 'Stone' }],
     source_snapshot: { id: '123', firstName: 'Alex', lastName: 'Stone' } }

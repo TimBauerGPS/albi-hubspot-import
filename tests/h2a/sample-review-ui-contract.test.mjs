@@ -363,6 +363,24 @@ test('failed recheck keeps the selected evidence while 409 reloads its current v
   ui.unmount()
 })
 
+test('an invalid recheck response reloads detail and recognizes a server-completed recheck', async () => {
+  let details = 0
+  const ui = await mount({
+    getH2ADryRunReview: (_s, _c, id) => Promise.resolve({ item: { ...full(id),
+      updatedAt: ++details === 1 ? '2026-10-12T12:00:00.000Z' : '2026-10-12T12:02:00.000Z',
+      lastRecheckedAt: details === 1 ? null : '2026-10-12T12:01:59.000Z' } }),
+    recheckH2ADryRunReview: () => Promise.reject(Object.assign(new Error('HubSpot to Albi returned an invalid response.'), { status: 502 })),
+  })
+
+  await ui.detail().props.onRecheck(); await ui.flush()
+
+  assert.equal(details, 2)
+  assert.equal(ui.detail().props.item.lastRecheckedAt, '2026-10-12T12:01:59.000Z')
+  assert.match(ui.text(), /Recheck complete/)
+  assert.equal(ui.nodes().some(node => node.props?.role === 'alert' && JSON.stringify(node.children).includes('Recheck failed')), false)
+  ui.unmount()
+})
+
 test('historical, missing, clean and filtered-empty samples have distinct recovery guidance', async () => {
   for (const [response, expected] of [
     [page([], { sample: { historical: true, reviewCaptureVersion: null } }), /Run a new sample to create detailed review data/],

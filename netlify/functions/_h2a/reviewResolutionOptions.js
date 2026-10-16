@@ -48,14 +48,18 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
   const actions = getH2AReviewReason(row.reason).actions
   if (!actions.includes('choose_organization') && !actions.includes('create_albi') && !actions.includes('force_create_albi')) return unavailable
   try {
-    const mappings = await repository.getMappings(row.company_id)
-    if (!mappings || !['contacts', 'organizations', 'options'].every(key => Array.isArray(mappings[key]))) return unavailable
     const hubspot = reads.hubspotRead
-    const sourceRows = row.object_type === 'contacts' ? await hubspot.getContacts([row.source_id]) : await hubspot.getCompanies([row.source_id])
+    const [mappings, sourceRows, associationRows] = await Promise.all([
+      repository.getMappings(row.company_id),
+      row.object_type === 'contacts' ? hubspot.getContacts([row.source_id]) : hubspot.getCompanies([row.source_id]),
+      row.object_type === 'contacts' ? hubspot.getAssociations({
+        objectType: 'contacts', objectIds: [row.source_id], toObjectTypes: ['companies'],
+      }) : Promise.resolve([]),
+    ])
+    if (!mappings || !['contacts', 'organizations', 'options'].every(key => Array.isArray(mappings[key]))) return unavailable
     if (!Array.isArray(sourceRows) || sourceRows.length !== 1 || sourceRows[0]?.id !== row.source_id ||
       sourceRows[0]?.archived === true || !record(sourceRows[0]?.properties)) return unavailable
-    const associated = row.object_type === 'contacts' ? associationIds(await hubspot.getAssociations({
-      objectType: 'contacts', objectIds: [row.source_id], toObjectTypes: ['companies'] }), row.source_id) : []
+    const associated = row.object_type === 'contacts' ? associationIds(associationRows, row.source_id) : []
     if (associated === null) return unavailable
 
     if (actions.includes('choose_organization') && row.object_type === 'contacts') {

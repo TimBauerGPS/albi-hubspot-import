@@ -87,9 +87,11 @@ async function detail(repository, companyId, runId, row, auth, options, config) 
       const loaded = await advisoryWithin(async () => {
         const clients = options.makeClients ? await options.makeClients(companyId) : await createH2AProviderClients({
           companyId, repository, keyring: options.keyring, env: options.env, fetch: options.fetch })
-        if (!options.makeClients && (await clients.hubspot.getAccountInfo()).portalId !== config.portal_id) return null
-        return loadReviewResolutionOptions({ row: { ...row, company_id: companyId }, repository,
+        const optionsPromise = loadReviewResolutionOptions({ row: { ...row, company_id: companyId }, repository,
           reads: readOnlyH2ACapabilities(clients) })
+        if (options.makeClients) return optionsPromise
+        const [account, loadedOptions] = await Promise.all([clients.hubspot.getAccountInfo(), optionsPromise])
+        return account.portalId === config.portal_id ? loadedOptions : null
       }, timeoutMs)
       if (loaded) resolutionOptions = loaded
     } catch { /* The chooser remains disabled when live evidence cannot be read. */ }

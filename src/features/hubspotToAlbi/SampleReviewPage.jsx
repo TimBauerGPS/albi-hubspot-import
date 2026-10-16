@@ -199,7 +199,35 @@ export default function SampleReviewPage() {
           if (selectedIdRef.current === reviewId) { setDetail(null); setDetailError('This sample review changed and could not be refreshed. Retry loading the record or reload the current queue.') }
           setActionError('The current sample may have changed. Reload the queue to review the latest sample.')
         }
-      } else setActionError(`Recheck failed. ${cause.message} Your previous evidence is unchanged. Try Recheck this record again.`)
+      } else {
+        // A gateway may lose the response after the server has already committed
+        // the atomic recheck. Reload once before telling the reviewer it failed.
+        try {
+          const fresh = await getH2ADryRunReview(session, companyId, reviewId, { signal: controller.signal })
+          if (!current()) return
+          const item = fresh?.item
+          const priorRecheck = detail.lastRecheckedAt ? Date.parse(detail.lastRecheckedAt) : NaN
+          const currentRecheck = item?.lastRecheckedAt ? Date.parse(item.lastRecheckedAt) : NaN
+          const completed = item?.updatedAt && item.updatedAt !== detail.updatedAt && Number.isFinite(currentRecheck) &&
+            (!Number.isFinite(priorRecheck) || currentRecheck > priorRecheck)
+          if (completed) {
+            replaceItem(item)
+            if (selectedIdRef.current === reviewId) { ++detailRevision.current; setDetail(item); setDetailLoading(false) }
+            setProgress(previous => {
+              if (!previous || detail.status === item.status) return previous
+              const keys = { needs_review: 'needsReview', cleared: 'cleared', no_longer_in_scope: 'noLongerInScope' }
+              const from = keys[detail.status], to = keys[item.status]
+              if (!from || !to) return previous
+              return { ...previous, [from]: Math.max(0, Number(previous[from] ?? 0) - 1), [to]: Number(previous[to] ?? 0) + 1 }
+            })
+            setNotice('Recheck complete. The record and review progress are up to date.')
+          } else setActionError(`Recheck failed. ${cause.message} Your previous evidence is unchanged. Try Recheck this record again.`)
+        } catch (refreshCause) {
+          if (current() && refreshCause?.name !== 'AbortError') {
+            setActionError(`Recheck failed. ${cause.message} Your previous evidence is unchanged. Try Recheck this record again.`)
+          }
+        }
+      }
     } finally {
       controllers.current.delete(controller)
       if (recheckLock.current === controller) recheckLock.current = null
