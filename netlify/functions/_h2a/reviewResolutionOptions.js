@@ -4,6 +4,7 @@ import { buildAlbiRecordUrl } from '../../../shared/h2aProviderLinks.js'
 import { resolveContactType } from './options.js'
 import { decideContactMatch, decideOrganizationMatch } from './match.js'
 import { safeReviewSnapshot } from './review.js'
+import { loadCreateDefaults } from './createDefaults.js'
 
 const providerId = value => typeof value === 'string' && /^[1-9]\d{0,99}$/.test(value)
 const record = value => value && typeof value === 'object' && !Array.isArray(value)
@@ -151,9 +152,13 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
       const sources = baseReady ? await reads.albiRead.listReferralSources() : []
       const referralSources = Array.isArray(sources) ? sources.filter(option => providerId(option?.id) && typeof option.label === 'string')
         .map(option => ({ id: option.id, label: option.label })).slice(0, 100) : []
-      const ready = baseReady && referralSources.length > 0
-      return { ...unavailable, ...(forced ? { forceCreateReadiness: { eligible: true, ready, ...(ready ? { referralSources } : {}),
-        ...(deferredOrganizationSourceId ? { deferredOrganizationSourceId } : {}) } } : { createReadiness: { ready, ...(ready ? { referralSources } : {}) } }) }
+      const defaults = baseReady && referralSources.length > 0 ? await loadCreateDefaults({ hubspotRead: hubspot, albiRead: reads.albiRead,
+        objectType: row.object_type, sourceId: row.source_id }) : null
+      const ready = baseReady && referralSources.length > 0 && defaults?.ok === true
+      const blockedReason = defaults && defaults.ok !== true ? defaults.reason : undefined
+      const details = { ready, ...(ready ? { referralSources } : {}), ...(blockedReason ? { blockedReason } : {}) }
+      return { ...unavailable, ...(forced ? { forceCreateReadiness: { eligible: true, ...details,
+        ...(deferredOrganizationSourceId ? { deferredOrganizationSourceId } : {}) } } : { createReadiness: details }) }
     }
   } catch { /* A failed read cannot become an actionable projection. */ }
   return unavailable

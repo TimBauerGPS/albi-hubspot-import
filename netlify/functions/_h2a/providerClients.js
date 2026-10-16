@@ -23,9 +23,12 @@ export function readOnlyH2ACapabilities({ hubspot, albi }) {
   return {
     hubspotRead: Object.freeze({ ...direct,
       getContacts: hubspot.getContacts.bind(hubspot), getCompanies: hubspot.getCompanies.bind(hubspot),
-      getAssociations: hubspot.getAssociations.bind(hubspot) }),
+      getAssociations: hubspot.getAssociations.bind(hubspot),
+      ...(typeof hubspot.getOwnerId === 'function' ? { getOwnerId: hubspot.getOwnerId.bind(hubspot) } : {}),
+      ...(typeof hubspot.listOwners === 'function' ? { listOwners: hubspot.listOwners.bind(hubspot) } : {}) }),
     albiRead: Object.freeze({ listContacts: albi.listContacts.bind(albi), listOrganizations: albi.listOrganizations.bind(albi),
-      ...(typeof albi.listReferralSources === 'function' ? { listReferralSources: albi.listReferralSources.bind(albi) } : {}) }),
+      ...(typeof albi.listReferralSources === 'function' ? { listReferralSources: albi.listReferralSources.bind(albi) } : {}),
+      ...(typeof albi.listCreateOptions === 'function' ? { listCreateOptions: albi.listCreateOptions.bind(albi) } : {}) }),
   }
 }
 

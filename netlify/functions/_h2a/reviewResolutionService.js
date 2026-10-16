@@ -1,3 +1,4 @@
+import { loadCreateDefaults } from './createDefaults.js'
 import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { ApiError, isRecord, malformed } from './http.js'
@@ -109,6 +110,11 @@ async function evidence(deps, clients, row, decision, deadline) {
       fail(409, 'The selected referral source is no longer available in Albi. Reload this record and choose again.')
     }
   }
+  let createDefaults = null
+  if (['create_albi', 'force_create_albi'].includes(decision.action)) {
+    createDefaults = await bounded(deps, () => loadCreateDefaults({ hubspotRead: clients.hubspotRead, albiRead: clients.albiRead,
+      objectType: row.object_type, sourceId: row.source_id }), deadline)
+  }
   let associatedCompanyIds = []
   if (row.object_type === 'contacts') {
     const records = await bounded(deps, () => clients.hubspotRead.getAssociations({ objectType: 'contacts', objectIds: [row.source_id], toObjectTypes: ['companies'] }), deadline)
@@ -159,7 +165,7 @@ async function evidence(deps, clients, row, decision, deadline) {
     else if (match.action !== 'create') stale()
   }
   return { source, albi: candidates.find(item => item.id === targetId), candidates, mappings,
-    associatedCompanyIds, organizations: organizationEvidence }
+    associatedCompanyIds, organizations: organizationEvidence, ...(createDefaults?.ok ? { createDefaults } : {}), createDefaultsReady: createDefaults?.ok === true }
 }
 
 function planEvidence(row, decision, current, hubspot, albi) {
@@ -168,7 +174,7 @@ function planEvidence(row, decision, current, hubspot, albi) {
   hubspot, ...(albi ? { albi } : {}), decision,
   mappings: row.object_type === 'contacts' ? current.mappings.contacts : current.mappings.organizations,
   optionMappings: current.mappings.options, associatedCompanyIds: current.associatedCompanyIds,
-  organizations: current.organizations, portalId: row.portal_id }
+  organizations: current.organizations, portalId: row.portal_id, ...(current.createDefaults ? { createDefaults: current.createDefaults } : {}) }
 }
 
 function capturedPlan(row, decision, current) {
@@ -243,7 +249,7 @@ function exactCreateTarget(row, plan, current, receiptId = null, requireReceipt 
   const target = matches[0]
   for (const [field, value] of Object.entries(verify.payload)) {
     // Albi list records do not echo the referral source, so it cannot be reconciled by reading.
-    if (field === 'referralSourceId') continue
+    if (['referralSourceId', 'relationshipStatusId', 'salespersonId'].includes(field)) continue
     const actual = target[field === 'zipCode' ? 'zipcode' : field]
     if (field === 'phoneNumber') {
       if (!Object.hasOwn(target, field) || normalizePhone(actual).conflictReason || normalizePhone(actual).writable !== value) return null
@@ -356,6 +362,10 @@ async function runClaim(deps, input, saved, context) {
         buildReviewResolutionPlan(planEvidence(row, saved.decision, current, current.source, current.albi))
       }
     } else {
+      // A reconciling retry keeps its persisted proof; only a fresh plan needs current defaults.
+      if (['create_albi', 'force_create_albi'].includes(saved.action) && !current.createDefaultsReady) {
+        fail(409, 'Required Albi create defaults are unavailable. Reload this record to see what is missing.')
+      }
       // Validate raw live evidence before using captured projections. Missing and
       // overlength fields cannot become empty/truncated writes.
       const livePlan = safeResolutionExecutionContext(buildReviewResolutionPlan(planEvidence(row, saved.decision, current, current.source, current.albi)))

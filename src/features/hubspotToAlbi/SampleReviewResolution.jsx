@@ -5,6 +5,12 @@ import { buildResolutionConfirmation } from './sampleReviewResolution.js'
 const primary = 'rounded-lg bg-brand-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-brand-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50'
 const secondary = 'rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-semibold text-gray-700 transition hover:border-brand-300 hover:bg-brand-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 disabled:cursor-not-allowed disabled:opacity-50'
 const idPattern = /^[1-9]\d{0,99}$/
+const BLOCKED_COPY = {
+  referrer_type_missing: 'Albi has no “Referrer” relationship type. Add it in Albi, then recheck this record.',
+  active_status_missing: 'Albi has no “Active” relationship status. Add it in Albi, then recheck this record.',
+  owner_not_found: 'The HubSpot owner for this record could not be read. Check the owner in HubSpot, then recheck.',
+  salesperson_not_found: 'The HubSpot owner’s name does not exactly match one Albi salesperson. Correct the name in Albi or HubSpot, then recheck.',
+}
 const display = value => value === null || value === '' ? 'Blank' : value
 
 function TaskLink({ url, children }) {
@@ -42,6 +48,7 @@ export default function SampleReviewResolution({ item, busy = false, onResolve }
   const sourceList = review.candidates.length === 0 ? item?.createReadiness?.referralSources : item?.forceCreateReadiness?.referralSources
   const referralSources = Array.isArray(sourceList) ? sourceList.filter(source => idPattern.test(source?.id) && typeof source?.label === 'string' && source.label.trim() !== '').slice(0, 100) : []
   const selectedReferral = referralSources.find(source => source.id === referralSourceId)
+  const blockedCopy = BLOCKED_COPY[(review.candidates.length === 0 ? item?.createReadiness : item?.forceCreateReadiness)?.blockedReason]
   const canCreate = item?.createReadiness?.ready === true && review.candidates.length === 0 && referralSources.length > 0
   const canForceCreate = item?.forceCreateReadiness?.ready === true && eligibleCandidates.length > 0 &&
     eligibleCandidates.length === review.candidates.length && referralSources.length > 0
@@ -195,12 +202,12 @@ export default function SampleReviewResolution({ item, busy = false, onResolve }
       <p className="mt-1 text-xs leading-5 text-gray-600">The server rechecks identity and type readiness before creating anything.</p>
       {canCreate ? <>{referralSelect()}
         <button type="button" className={`${primary} mt-3`} disabled={effectiveBusy} onClick={() => open('create_albi')}>Create in Albi</button></>
-        : <p className="mt-2 text-xs text-amber-800">Creation is unavailable until the candidate and type checks are ready. Recheck this record after correcting them.</p>}</div>}
+        : <p className="mt-2 text-xs text-amber-800">{blockedCopy ?? 'Creation is unavailable until the candidate and type checks are ready. Recheck this record after correcting them.'}</p>}</div>}
     {canAct && review.actions.includes('force_create_albi') && item?.forceCreateReadiness?.eligible === true && review.candidates.length > 0 && <div className="mt-5 rounded-lg border border-red-200 bg-red-50 p-4"><h5 className="text-sm font-semibold text-red-950">These records are different</h5>
       <p className="mt-1 text-xs leading-5 text-red-900">Create a new Albi record and deliberately ignore the listed match candidates. This can create a duplicate, so the server rechecks every record before applying it.</p>
       {canForceCreate ? <>{referralSelect()}
         <button type="button" className={`${primary} mt-3`} disabled={effectiveBusy} onClick={() => open('force_create_albi')}>Create a separate Albi record</button></>
-        : <p className="mt-2 text-xs text-red-900">This option is unavailable until the source, candidate, mapping, and type checks are current. Recheck this record first.</p>}</div>}
+        : <p className="mt-2 text-xs text-red-900">{blockedCopy ?? 'This option is unavailable until the source, candidate, mapping, and type checks are current. Recheck this record first.'}</p>}</div>}
     {canAct && review.actions.includes('choose_organization') && <div className="mt-5 rounded-lg border border-gray-200 p-4"><h5 className="text-sm font-semibold text-gray-900">Organization context</h5>
       <p className="mt-1 text-xs leading-5 text-gray-700">Existing HubSpot associations will not be removed. The selected organization becomes the saved context; an Albi relationship may need a manual update.</p>
       {canChooseOrganization ? <><label className="mt-3 block text-xs font-medium text-gray-700">Organization<select value={organizationSourceId} onChange={event => changed(choices, candidateId, event.target.value, approveManyToOne)} className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:ring-2 focus:ring-brand-500"><option value="">Choose organization</option>{organizationOptions.map(option => <option key={option.sourceId} value={option.sourceId}>HubSpot {option.sourceId} → Albi {option.targetId}{option.associated ? ' · currently associated' : ' · add association'}</option>)}</select></label>

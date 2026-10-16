@@ -131,7 +131,7 @@ test('link planner treats equal numeric IDs in different portals as different so
 
 const createInput = objectType => ({ review: { objectType, sourceId: '42', reason: 'no_match', candidateSnapshots: [] },
   hubspot: { id: '42', properties: objectType === 'contacts' ? { firstname: 'A', lastname: 'B', email: 'a@example.com', phone: '5551112222' }
-    : { name: 'Company', phone: '5551112222' } }, decision: { action: 'create_albi', referralSourceId: '5' },
+    : { name: 'Company', phone: '5551112222' } }, decision: { action: 'create_albi', referralSourceId: '5' }, createDefaults: { ok: true, typeId: '12', statusId: '2', salespersonId: '70' },
   optionMappings: [{ mapping_kind: objectType === 'contacts' ? 'default_contact_type' : 'default_organization_type',
     source_key: 'default', albi_id: '12', confirmed: true }] })
 
@@ -157,14 +157,14 @@ test('durable internal execution context preserves exact allowlisted proof and s
 test('create plans rebuild supported payloads from current HubSpot and confirmed type mappings', () => {
   const contact = plan(createInput('contacts'))
   assert.deepEqual(contact.providerOperation, { provider: 'albi', operation: 'createContact', payload: {
-    firstName: 'A', lastName: 'B', email: 'a@example.com', phoneNumber: '555-111-2222', contactTypeIds: ['12'], referralSourceId: '5',
+    firstName: 'A', lastName: 'B', email: 'a@example.com', phoneNumber: '555-111-2222', contactTypeIds: ['12'], referralSourceId: '5', relationshipStatusId: '2', salespersonId: '70',
   } })
   assert.deepEqual(contact.mapping, { objectType: 'contacts', sourceId: '42', targetId: null, approveManyToOne: false })
   assert.deepEqual(contact.verification.create, { objectType: 'contacts', sourceId: '42', portalId: null,
     typeId: '12', organizationId: null, payload: { firstName: 'A', lastName: 'B', email: 'a@example.com',
-      phoneNumber: '555-111-2222', contactTypeIds: ['12'], referralSourceId: '5' } })
+      phoneNumber: '555-111-2222', contactTypeIds: ['12'], referralSourceId: '5', relationshipStatusId: '2', salespersonId: '70' } })
   assert.deepEqual(plan(createInput('companies')).providerOperation, { provider: 'albi', operation: 'createOrganization',
-    payload: { name: 'Company', phoneNumber: '555-111-2222', organizationTypeIds: ['12'], referralSourceId: '5' } })
+    payload: { name: 'Company', phoneNumber: '555-111-2222', organizationTypeIds: ['12'], referralSourceId: '5', relationshipStatusId: '2', salespersonId: '70' } })
   const input = createInput('contacts'); input.hubspot.properties.mobilephone = '111'; input.hubspot.properties.zip = '90001'
   const result = plan(input)
   assert.equal(result.providerOperation.payload.mobileNumber, undefined)
@@ -180,7 +180,7 @@ test('create plans canonicalize surrounding HubSpot whitespace before comparing 
 
   assert.deepEqual(plan(input).providerOperation.payload, {
     firstName: 'John', lastName: 'Robinson', email: 'john@example.com', phoneNumber: '949-662-6181',
-    contactTypeIds: ['12'], referralSourceId: '5',
+    contactTypeIds: ['12'], referralSourceId: '5', relationshipStatusId: '2', salespersonId: '70',
   })
 })
 
@@ -192,7 +192,7 @@ test('create plans use the production-proven minimal Albi contact contract', () 
   })
 
   assert.deepEqual(plan(input).providerOperation.payload, {
-    firstName: 'A', lastName: 'B', email: 'a@example.com', phoneNumber: '555-111-2222', contactTypeIds: ['12'], referralSourceId: '5',
+    firstName: 'A', lastName: 'B', email: 'a@example.com', phoneNumber: '555-111-2222', contactTypeIds: ['12'], referralSourceId: '5', relationshipStatusId: '2', salespersonId: '70',
   })
 })
 
@@ -306,10 +306,10 @@ test('create with one resolved organization uses inherited confirmed types and r
   input.optionMappings = [{ mapping_kind: 'organization_to_contact_type', source_key: '7', albi_id: '14', confirmed: true }]
   const result = plan(input)
   assert.equal(result.providerOperation.payload.organizationId, '635650')
-  assert.deepEqual(result.providerOperation.payload.contactTypeIds, ['14'])
-  assert.deepEqual(result.verification.create, { objectType: 'contacts', sourceId: '42', portalId: '123', typeId: '14',
+  assert.deepEqual(result.providerOperation.payload.contactTypeIds, ['12'])
+  assert.deepEqual(result.verification.create, { objectType: 'contacts', sourceId: '42', portalId: '123', typeId: '12',
     organizationId: '635650', payload: { firstName: 'A', lastName: 'B', email: 'a@example.com', phoneNumber: '555-111-2222',
-      contactTypeIds: ['14'], referralSourceId: '5', organizationId: '635650' } })
+      contactTypeIds: ['12'], referralSourceId: '5', relationshipStatusId: '2', salespersonId: '70', organizationId: '635650' } })
   result.providerOperation.payload.firstName = 'changed'
   assert.equal(result.verification.create.payload.firstName, 'A')
 })
@@ -474,4 +474,17 @@ test('referral source is a required, validated ID on every create decision', () 
   input.decision = { action: 'create_albi' }
   assert.throws(() => plan(input), TypeError)
   assert.notEqual(hashResolutionDecision({ action: 'create_albi', referralSourceId: '5' }), hashResolutionDecision({ action: 'create_albi', referralSourceId: '6' }))
+})
+
+test('created records are typed, set Active, and carry the HubSpot owner as salesperson when there is one', () => {
+  const withOwner = plan(createInput('contacts')).providerOperation.payload
+  assert.deepEqual([withOwner.contactTypeIds, withOwner.relationshipStatusId, withOwner.salespersonId], [['12'], '2', '70'])
+  const noOwner = createInput('contacts'); noOwner.createDefaults = { ok: true, typeId: '12', statusId: '2', salespersonId: null }
+  assert.equal(Object.hasOwn(plan(noOwner).providerOperation.payload, 'salespersonId'), false)
+  const organization = plan(createInput('companies')).providerOperation.payload
+  assert.deepEqual([organization.organizationTypeIds, organization.relationshipStatusId, organization.salespersonId], [['12'], '2', '70'])
+  for (const bad of [undefined, null, { ok: true, typeId: '12', salespersonId: '70' }, { ok: true, typeId: 'x', statusId: '2', salespersonId: null }]) {
+    const input = createInput('contacts'); if (bad === undefined) delete input.createDefaults; else input.createDefaults = bad
+    assert.throws(() => plan(input), TypeError)
+  }
 })

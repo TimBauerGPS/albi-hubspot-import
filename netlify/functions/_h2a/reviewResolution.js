@@ -188,7 +188,10 @@ function createPayload(input, hubspot, type, associations) {
   const resolved = resolveContactType({ mappings: selectedOptions, inheritFromOrganization: type === 'contacts',
     organizationTypeId: organization?.organizationTypeId })
   if (resolved.action !== 'resolved') invalidPlan()
-  const typeId = positiveId(resolved.contactTypeId)
+  if (!Number.isSafeInteger(Number(positiveId(resolved.contactTypeId)))) invalidPlan()
+  // Created records are always typed Referrer and set Active; the salesperson follows the HubSpot owner.
+  const defaults = object(input.createDefaults) ? input.createDefaults : invalidPlan()
+  const typeId = positiveId(defaults.typeId)
   if (!Number.isSafeInteger(Number(typeId))) invalidPlan()
   const payload = {}
   // Only properties accepted by the existing Albi create contracts are copied.
@@ -212,6 +215,8 @@ function createPayload(input, hubspot, type, associations) {
   // Albi requires a referral source on create. Its ID is a user choice validated against live options by the service.
   const referralSourceId = positiveId(object(input.decision) ? input.decision.referralSourceId : undefined)
   payload.referralSourceId = referralSourceId
+  payload.relationshipStatusId = positiveId(defaults.statusId)
+  if (defaults.salespersonId !== null && defaults.salespersonId !== undefined) payload.salespersonId = positiveId(defaults.salespersonId)
   if (organization) payload.organizationId = organization.targetId
   return { payload, typeId, organizationId: organization?.targetId ?? null }
 }
@@ -219,7 +224,7 @@ function createPayload(input, hubspot, type, associations) {
 // Pure: receives only server-reloaded evidence, returns data, and never accesses capabilities.
 export function buildReviewResolutionPlan(input) {
   if (!object(input) || Object.keys(input).some(key => !['review', 'hubspot', 'albi', 'decision', 'mappings',
-    'optionMappings', 'associatedCompanyIds', 'organizations', 'portalId'].includes(key))) invalidPlan()
+    'optionMappings', 'associatedCompanyIds', 'organizations', 'portalId', 'createDefaults'].includes(key))) invalidPlan()
   const decision = normalizeResolutionDecision(input.decision)
   const review = record(input.review), type = review.objectType
   if (!['contacts', 'companies'].includes(type) || !getH2AReviewReason(review.reason).actions.includes(decision.action)) invalidPlan()
@@ -358,10 +363,10 @@ export function safeResolutionExecutionContext(value) {
   const payload = (item, type) => {
     const fields = type === 'contacts' ? ['firstName', 'lastName', 'email', 'phoneNumber', 'jobTitle', 'organizationId'] : ['name', 'phoneNumber']
     const ids = type === 'contacts' ? 'contactTypeIds' : 'organizationTypeIds'
-    const allowed = [...fields, 'address1', 'address2', 'city', 'state', 'zipCode', 'country', 'referralSourceId', ids]
+    const allowed = [...fields, 'address1', 'address2', 'city', 'state', 'zipCode', 'country', 'referralSourceId', 'relationshipStatusId', 'salespersonId', ids]
     return object(item) && Object.keys(item).every(key => allowed.includes(key)) &&
       Object.entries(item).every(([key, value]) => key === ids ? Array.isArray(value) && value.length === 1 && providerId(value[0])
-        : key === 'organizationId' || key === 'referralSourceId' ? providerId(value) : text(value)) && Object.hasOwn(item, ids)
+        : ['organizationId', 'referralSourceId', 'relationshipStatusId', 'salespersonId'].includes(key) ? providerId(value) : text(value)) && Object.hasOwn(item, ids)
   }
   try {
     const legacyKeys = ['decisionHash', 'action', 'providerOperation', 'manualTasks', 'mapping', 'organizationChoice', 'verification']

@@ -230,3 +230,13 @@ test('unassociated organization requires explicit addition and confirms the HubS
   assert.deepEqual(JSON.parse(JSON.stringify(calls[0][0])), { action: 'choose_organization',
     organizationSourceId: '777', addHubSpotAssociation: true })
 })
+
+test('blocked create names the exact missing Albi default', async () => {
+  const forced = await render({ ...base, reason: 'name_only_candidate', proposedChanges: {},
+    forceCreateReadiness: { eligible: true, ready: false, blockedReason: 'salesperson_not_found' } })
+  assert.match(forced, /does not exactly match one Albi salesperson/)
+  assert.doesNotMatch(forced, /Choose referral source/)
+  const create = await render({ ...base, reason: 'no_match', candidateSnapshots: [], proposedChanges: {},
+    createReadiness: { ready: false, blockedReason: 'referrer_type_missing' } })
+  assert.match(create, /Albi has no “Referrer” relationship type/)
+})

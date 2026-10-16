@@ -474,3 +474,23 @@ test('Albi validationErrors are reduced to field names and redacted messages', a
   assert.equal(await run({ message: 'Invalid request.', validationErrors: ['Contact type is required'] }), 'Contact type is required')
   assert.equal(await run({ message: 'Invalid request.', validationErrors: [] }), 'Invalid request.')
 })
+
+test('Albi create options load types, statuses and salespeople by name', async () => {
+  const f = transport([accessibleCompany,
+    [{ id: 12, name: 'Referrer' }], [{ id: 2, name: 'Active' }],
+    [{ id: 70, name: 'Ali Brown' }, { id: 71, firstName: 'Sam', lastName: 'Green' }]])
+  const options = await new AlbiClient({ apiKey: 'k', fetch: f.fetch }).listCreateOptions()
+  assert.deepEqual(options.salespeople, [{ id: '70', label: 'Ali Brown' }, { id: '71', label: 'Sam Green' }])
+  assert.deepEqual(options.relationshipTypes, [{ id: '12', label: 'Referrer' }])
+  assert.deepEqual(options.relationshipStatuses, [{ id: '2', label: 'Active' }])
+  assert.deepEqual(f.calls.slice(1).map(call => call.url.pathname.split('/').at(-1)), ['relationship-types', 'relationship-statuses', 'salespeople'])
+})
+
+test('HubSpot owner lookup reads only the owner property and tolerates unowned records', async () => {
+  const f = transport([{ id: '42', properties: { hubspot_owner_id: '5' } }, { id: '43', properties: { hubspot_owner_id: null } }])
+  const c = new HubSpotClient({ token: 'token', fetch: f.fetch })
+  assert.equal(await c.getOwnerId('contacts', '42'), '5')
+  assert.equal(await c.getOwnerId('companies', '43'), null)
+  assert.equal(f.calls[0].url.searchParams.get('properties'), 'hubspot_owner_id')
+  await assert.rejects(c.getOwnerId('deals', '1'))
+})

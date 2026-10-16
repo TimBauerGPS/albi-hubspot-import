@@ -85,6 +85,14 @@ export class HubSpotClient {
     const data = await this.#request(`/account-info/${HUBSPOT_API_VERSION}/details`, { operation: 'getAccountInfo' })
     return { portalId: responseId(data?.portalId, 'getAccountInfo') }
   }
+  async getOwnerId(objectType, targetId) {
+    if (!['contacts', 'companies'].includes(objectType)) invalid('getOwnerId')
+    const query = new URLSearchParams({ archived: 'false', properties: 'hubspot_owner_id' })
+    const data = await this.#request(`${ROOT}/${objectType}/${id(targetId, 'getOwnerId')}?${query}`, { operation: 'getOwnerId' })
+    const value = isRecord(data) && isRecord(data.properties) ? data.properties.hubspot_owner_id : null
+    if (value === null || value === undefined || value === '') return null
+    return responseId(value, 'getOwnerId')
+  }
   async listOwners() {
     const owners = [], seen = new Set()
     let after = null

@@ -17,6 +17,7 @@ const SCOPES = Object.freeze({
   listReferralSources: 'options.referral-sources:list',
   listRelationshipStatuses: 'options.relationship-statuses:list',
   listActivityTypes: 'options.activity-types:list',
+  listSalespeople: 'options.salespeople:list',
 })
 const text = value => typeof value === 'string' && Boolean(value.trim())
 const ADDRESS_FIELDS = ['address1', 'address2', 'city', 'state', 'zipCode', 'country', 'latitude', 'longitude', 'email', 'phoneNumber', 'referralSourceId', 'relationshipStatusId', 'salespersonId', 'sandbox', 'parentOrganizationId']
@@ -157,6 +158,22 @@ export class AlbiClient {
       { operation: 'listActivityTypes' }, SCOPES.listActivityTypes))
     // The documented relationship-type IDs are shared by contactTypeIds and organizationTypeIds.
     return { contactTypes: relationshipTypes.map(value => ({ ...value })), organizationTypes: relationshipTypes.map(value => ({ ...value })), relationshipTypes, referralSources, relationshipStatuses, activityTypes }
+  }
+  // Salesperson options are matched by name only; accept either a name or first/last name pair.
+  async listCreateOptions() {
+    const relationshipTypes = optionList(await this.#scopedRequest(await this.#path('options/relationship-types'),
+      { operation: 'listRelationshipTypes' }, SCOPES.listRelationshipTypes))
+    const relationshipStatuses = optionList(await this.#scopedRequest(await this.#path('options/relationship-statuses'),
+      { operation: 'listRelationshipStatuses' }, SCOPES.listRelationshipStatuses))
+    const raw = await this.#scopedRequest(await this.#path('options/salespeople'),
+      { operation: 'listSalespeople' }, SCOPES.listSalespeople)
+    if (!Array.isArray(raw)) malformed('listSalespeople')
+    const salespeople = raw.map(value => {
+      const name = text(value?.name) ? value.name : text(value?.firstName) && text(value?.lastName) ? `${value.firstName} ${value.lastName}` : null
+      if (!name) malformed('listSalespeople')
+      return { id: responseId(value?.id, 'listSalespeople'), label: name.trim() }
+    })
+    return { relationshipTypes, relationshipStatuses, salespeople }
   }
   async listReferralSources() {
     return optionList(await this.#scopedRequest(await this.#path('options/referral-sources'),

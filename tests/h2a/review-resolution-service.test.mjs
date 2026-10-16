@@ -75,10 +75,11 @@ function fixture() {
   const hubspotRead = {
     getContacts: async () => { calls.push('read-source'); return [structuredClone(source)] },
     getCompanies: async ids => [{ id: ids[0], properties: { name: 'Acme', phone: '5552223333' } }],
+    getOwnerId: async () => null,
     getAssociations: async () => [{ fromId: '42', toObjectType: 'companies', toIds: [...f.associations] }],
   }
   const albiRead = {
-    listReferralSources: async () => [{ id: '5', label: 'Network' }],
+    listReferralSources: async () => [{ id: '5', label: 'Network' }], listCreateOptions: async () => ({ relationshipTypes: [{ id: '12', label: 'Referrer' }], relationshipStatuses: [{ id: '2', label: 'Active' }], salespeople: [] }),
     listContacts: async () => { calls.push('read-target'); return { records: structuredClone(f.contacts), cursor: null } },
     listOrganizations: async () => ({ records: structuredClone(f.organizations), cursor: null }),
   }
@@ -264,7 +265,7 @@ test('forced contact creation preserves a mapped organization without enumeratin
   assert.equal(f.mappings.contacts[0].albi_contact_id, '30')
   assert.deepEqual(mutations(f)[0], ['CREATE', {
     firstName: 'A', lastName: 'B', email: 'hs@example.com', phoneNumber: '555-111-2222',
-    contactTypeIds: ['12'], organizationId: '88', referralSourceId: '5',
+    contactTypeIds: ['12'], organizationId: '88', referralSourceId: '5', relationshipStatusId: '2',
   }])
 })
 
@@ -279,7 +280,7 @@ test('forced contact creation defers one unmapped organization only with explici
 
   assert.equal(result.resolution.status, 'ready_to_recheck')
   assert.deepEqual(mutations(f)[0], ['CREATE', {
-    firstName: 'A', lastName: 'B', email: 'hs@example.com', phoneNumber: '555-111-2222', contactTypeIds: ['12'], referralSourceId: '5',
+    firstName: 'A', lastName: 'B', email: 'hs@example.com', phoneNumber: '555-111-2222', contactTypeIds: ['12'], referralSourceId: '5', relationshipStatusId: '2',
   }])
   assert.equal(f.intent.decision.deferOrganizationAssociation, true)
 })
@@ -674,4 +675,26 @@ test('create stops before any Albi write when the chosen referral source is not 
   f.deps.albiRead.listReferralSources = async () => [{ id: '6', label: 'Other' }]
   await assert.rejects(executeReviewResolution(f.deps, createInput), error => error.statusCode === 409)
   assert.equal(mutations(f).length, 0)
+})
+
+test('a fresh create stops before any Albi write when required defaults cannot be resolved', async () => {
+  for (const options of [{ relationshipTypes: [], relationshipStatuses: [{ id: '2', label: 'Active' }], salespeople: [] },
+    { relationshipTypes: [{ id: '12', label: 'Referrer' }], relationshipStatuses: [], salespeople: [] }]) {
+    const f = fixture(), createInput = asForcedCreate(f)
+    f.deps.albiRead.listCreateOptions = async () => options
+    await assert.rejects(executeReviewResolution(f.deps, createInput), error => error.statusCode === 409)
+    assert.equal(mutations(f).length, 0)
+  }
+})
+
+test('create sends Referrer type, Active status and the owner-matched salesperson', async () => {
+  const f = fixture(), createInput = asForcedCreate(f)
+  f.deps.hubspotRead.getOwnerId = async () => '5'
+  f.deps.hubspotRead.listOwners = async () => [{ id: '5', firstName: 'Ali', lastName: 'Brown' }]
+  f.deps.albiRead.listCreateOptions = async () => ({ relationshipTypes: [{ id: '12', label: 'Referrer' }],
+    relationshipStatuses: [{ id: '2', label: 'Active' }], salespeople: [{ id: '70', label: 'Ali Brown' }] })
+  const result = await executeReviewResolution(f.deps, createInput)
+  assert.equal(result.resolution.status, 'ready_to_recheck')
+  const payload = mutations(f)[0][1]
+  assert.deepEqual([payload.contactTypeIds, payload.relationshipStatusId, payload.salespersonId], [['12'], '2', '70'])
 })
