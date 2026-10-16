@@ -463,3 +463,14 @@ test('Albi create failures add a value-free request and response shape', async (
   assert.equal(JSON.stringify(error).includes('secret'), false)
   assert.equal(JSON.stringify(error).includes('Jo'), false)
 })
+
+test('Albi validationErrors are reduced to field names and redacted messages', async () => {
+  const mk = body => createHttpClient({ baseUrl: 'https://albi.example.com', maxRetries: 0, captureValidationReason: true,
+    fetch: async () => new Response(JSON.stringify(body), { status: 400 }) })
+  const run = async body => (await mk(body)('/x', { operation: 'o' }).catch(e => e)).providerReason
+  assert.equal(await run({ message: 'Invalid request.', validationErrors: [{ field: 'phoneNumber', message: "Phone '555-1234' is not valid" }] }),
+    'phoneNumber: Phone [value] is not valid')
+  assert.equal(await run({ message: 'Invalid request.', validationErrors: { email: ['Email jo@x.com exists'] } }), 'email: Email [email] exists')
+  assert.equal(await run({ message: 'Invalid request.', validationErrors: ['Contact type is required'] }), 'Contact type is required')
+  assert.equal(await run({ message: 'Invalid request.', validationErrors: [] }), 'Invalid request.')
+})

@@ -13,7 +13,8 @@ const REASON_LIMIT = 200
 export function providerBodyShape(body) {
   if (!isRecord(body)) return null
   const names = value => Object.keys(value).filter(key => /^\w{1,30}$/.test(key)).slice(0, 10).join(',')
-  const first = Array.isArray(body.detail) ? body.detail[0] : null
+  const list = body.validationErrors ?? body.detail
+  const first = Array.isArray(list) ? list[0] : isRecord(list) ? list : null
   const shape = `resp=${names(body)}${isRecord(first) ? `;item=${names(first)}` : ''}`
   return shape.length > 1 ? shape.slice(0, 120) : null
 }
@@ -21,16 +22,32 @@ const redact = text => text
   .replace(/[^\s@'"]+@[^\s@'"]+/g, '[email]')
   .replace(/'[^']*'|"[^"]*"/g, '[value]')
   .replace(/\d{3,}/g, '[number]')
-// Keeps field locations and validator messages; never echoes request input.
+// Keeps field names and validator messages; never echoes request input.
+const FIELD_KEYS = ['field', 'fieldName', 'propertyName', 'property']
+const MESSAGE_KEYS = ['message', 'errorMessage', 'error', 'msg', 'description']
+function collectReasons(value, parts, depth = 0) {
+  if (parts.length >= 5 || depth > 3 || value == null) return
+  if (typeof value === 'string') parts.push(redact(value))
+  else if (Array.isArray(value)) value.slice(0, 5).forEach(item => collectReasons(item, parts, depth + 1))
+  else if (isRecord(value)) {
+    const message = MESSAGE_KEYS.map(key => value[key]).find(item => typeof item === 'string')
+    if (message !== undefined) {
+      const fieldKey = FIELD_KEYS.find(key => typeof value[key] === 'string' && /^[\w.\[\]]{1,40}$/.test(value[key]))
+      const loc = Array.isArray(value.loc) ? value.loc.filter(part => typeof part === 'string' && /^\w+$/.test(part)).join('.') : ''
+      const field = fieldKey ? value[fieldKey] : loc
+      parts.push(`${field ? `${field}: ` : ''}${redact(message)}`)
+    } else for (const [key, item] of Object.entries(value).slice(0, 5)) {
+      const inner = []
+      collectReasons(item, inner, depth + 1)
+      if (/^[\w.\[\]]{1,40}$/.test(key)) inner.forEach(text => parts.push(`${key}: ${text}`))
+    }
+  }
+}
 export function sanitizeProviderReason(body) {
   const parts = []
-  const detail = isRecord(body) ? (body.detail ?? body.message ?? body.error) : null
-  for (const item of Array.isArray(detail) ? detail.slice(0, 5) : [detail]) {
-    if (typeof item === 'string') parts.push(redact(item))
-    else if (isRecord(item) && typeof item.msg === 'string') {
-      const loc = Array.isArray(item.loc) ? item.loc.filter(part => typeof part === 'string' && /^\w+$/.test(part)).join('.') : ''
-      parts.push(`${loc ? `${loc}: ` : ''}${redact(item.msg)}`)
-    }
+  if (isRecord(body)) {
+    collectReasons(body.validationErrors ?? body.errors, parts)
+    if (parts.length === 0) collectReasons(body.detail ?? body.message ?? body.error, parts)
   }
   const reason = parts.join('; ').slice(0, REASON_LIMIT)
   return reason || null
