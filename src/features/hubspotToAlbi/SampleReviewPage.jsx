@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate, useOutletContext } from 'react-router-dom'
-import { getH2ADryRunReview, getH2ADryRunReviews, recheckH2ADryRunReview, resolveH2ADryRunReview } from '../../lib/hubspotToAlbi'
+import { getH2ADryRunReview, getH2ADryRunReviews, prepareH2AOrganizationReview, recheckH2ADryRunReview, resolveH2ADryRunReview } from '../../lib/hubspotToAlbi'
 import { presentSampleReviewItem, presentSampleReviewProgress, SAMPLE_REVIEW_REASON_OPTIONS } from './sampleReview.js'
 import { presentSampleReviewQueryFilters } from './preflightPresentation.js'
 import SampleReviewDetail from './SampleReviewDetail'
@@ -44,6 +44,7 @@ export default function SampleReviewPage() {
   const [progress, setProgress] = useState(null)
   const [nextCursor, setNextCursor] = useState(null)
   const [selectedId, setSelectedId] = useState(null)
+  const [returnToId, setReturnToId] = useState(null)
   const selectedIdRef = useRef(selectedId)
   selectedIdRef.current = selectedId
   const [detail, setDetail] = useState(null)
@@ -235,6 +236,33 @@ export default function SampleReviewPage() {
     }
   }
 
+  // Opens the contact's organization review (capturing it first when needed) so it is created and audited on its own.
+  async function handleOpenOrganization(organization) {
+    if (!detail?.updatedAt || detail.id !== selectedId || recheckLock.current) return
+    const contactId = detail.id
+    let reviewId = typeof organization?.reviewId === 'string' && organization.reviewId ? organization.reviewId : null
+    if (!reviewId) {
+      const controller = new AbortController()
+      controllers.current.add(controller)
+      recheckLock.current = controller
+      setBusyId(contactId); setActionError(''); setNotice('')
+      try {
+        const result = await prepareH2AOrganizationReview(session, companyId,
+          { reviewId: contactId, expectedUpdatedAt: detail.updatedAt }, { signal: controller.signal })
+        reviewId = result?.organization?.reviewId ?? null
+        if (!reviewId) setActionError('The organization could not be opened. Recheck this record and try again.')
+      } catch (cause) {
+        if (cause?.name !== 'AbortError') setActionError(cause?.message || 'The organization review could not be prepared.')
+      } finally {
+        controllers.current.delete(controller)
+        if (recheckLock.current === controller) recheckLock.current = null
+        setBusyId(null)
+      }
+      if (!reviewId) return
+    }
+    setReturnToId(contactId); setSelectedId(reviewId)
+  }
+
   async function handleResolve(decision, clientRequestId, expectedUpdatedAt) {
     if (!detail?.updatedAt || detail.id !== selectedId || recheckLock.current) return null
     if (detail.updatedAt !== expectedUpdatedAt) throw Object.assign(new Error('This sample review changed. Review and confirm again.'), { status: 409 })
@@ -344,10 +372,15 @@ export default function SampleReviewPage() {
                 })}</ol>
                 {nextCursor && <div className="border-t border-gray-100 px-4 py-3"><button type="button" onClick={loadMore} disabled={loadingMore || Boolean(busyId)} className={`${secondaryButton} w-full`}>{loadingMore ? 'Loading…' : 'Load more'}</button></div>}
               </aside>
+              <div className="min-w-0 space-y-3">
+              {returnToId && returnToId !== selectedId && <div className="rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm text-gray-800">
+                <button type="button" onClick={() => { setSelectedId(returnToId); setReturnToId(null); setActionError(''); setNotice('') }} className={secondaryButton}>Back to contact review</button>
+                <span className="ml-3 text-xs text-gray-600">Create the organization here, then return to create the contact.</span></div>}
               {detailLoading ? <section className="rounded-xl border border-gray-200 bg-white px-5 py-10 text-sm text-gray-600" role="status">Loading selected record…</section>
                 : detailError ? <section className="rounded-xl border border-red-200 bg-red-50 px-5 py-6" role="alert"><h3 className="font-semibold text-red-900">Record could not be loaded</h3><p className="mt-1 text-sm text-red-800">{detailError}</p><button type="button" className={`${secondaryButton} mt-3`} onClick={() => setDetailRetry(value => value + 1)}>Retry loading record</button></section>
-                  : detail?.id === selectedId ? <SampleReviewDetail item={detail} busy={busyId === selectedId} recheckPending={Boolean(busyId)} onRecheck={handleRecheck} onResolve={handleResolve} />
+                  : detail?.id === selectedId ? <SampleReviewDetail item={detail} busy={busyId === selectedId} recheckPending={Boolean(busyId)} onRecheck={handleRecheck} onResolve={handleResolve} onOpenOrganization={handleOpenOrganization} />
                     : <section className="rounded-xl border border-gray-200 bg-white px-5 py-10 text-sm text-gray-600">Select a record to review its evidence.</section>}
+              </div>
             </div>}
       {visible && sample?.reviewCaptureVersion === 1 && !loading && <p className="text-xs leading-5 text-gray-600">Review progress reflects individual rechecks. Original sample run totals remain unchanged.</p>}
     </div>

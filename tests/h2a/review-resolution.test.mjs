@@ -210,19 +210,16 @@ test('forced create records the exact ignored candidates and still builds a crea
   assert.throws(() => plan(input), TypeError)
 })
 
-test('forced contact create requires an explicit decision before deferring one unmapped organization', () => {
+test('a contact create needs its associated organization mapped; deferral is no longer a decision', () => {
   const input = createInput('contacts')
   input.review.reason = 'name_only_candidate'
   input.review.candidateSnapshots = [{ id: '20', firstName: 'A', lastName: 'B' }]
   input.associatedCompanyIds = ['99']
-  input.decision = { action: 'force_create_albi', ignoredCandidateIds: ['20'], deferOrganizationAssociation: true, referralSourceId: '5' }
-
-  const result = plan(input)
-
-  assert.equal(result.providerOperation.payload.organizationId, undefined)
-  assert.equal(result.verification.create.organizationId, null)
-  delete input.decision.deferOrganizationAssociation
+  input.decision = { action: 'force_create_albi', ignoredCandidateIds: ['20'], referralSourceId: '5' }
   assert.throws(() => plan(input), TypeError)
+  input.organizations = [{ source: { id: '99' }, targetId: '635650', organizationTypeId: null }]
+  assert.equal(plan(input).providerOperation.payload.organizationId, '635650')
+  assert.throws(() => normalizeResolutionDecision({ ...input.decision, deferOrganizationAssociation: true }), TypeError)
 })
 
 test('create prerequisites reject missing names, options, unresolved context and unsafe phone formats', () => {

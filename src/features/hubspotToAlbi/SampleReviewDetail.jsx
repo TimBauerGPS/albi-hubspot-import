@@ -36,7 +36,7 @@ function Comparisons({ comparisons }) {
   )
 }
 
-export default function SampleReviewDetail({ item, busy, recheckPending, onRecheck, onResolve }) {
+export default function SampleReviewDetail({ item, busy, recheckPending, onRecheck, onResolve, onOpenOrganization }) {
   const review = presentSampleReviewItem(item)
   const events = Array.isArray(item?.events) ? item.events : []
   const comparisons = review.candidates.length ? review.candidates : [{ id: null, comparisons: Object.entries(review.source).map(([key, hubspot]) => ({
@@ -88,7 +88,7 @@ export default function SampleReviewDetail({ item, busy, recheckPending, onReche
           </section>
         )}
 
-        <SampleReviewResolution item={item} busy={busy} onResolve={onResolve} />
+        <SampleReviewResolution item={item} busy={busy} onResolve={onResolve} onOpenOrganization={onOpenOrganization} />
 
         <section className="border-t border-gray-200 pt-4" aria-labelledby="sample-review-recheck-title">
           <h4 id="sample-review-recheck-title" className="text-sm font-semibold text-gray-900">Check your corrections</h4>

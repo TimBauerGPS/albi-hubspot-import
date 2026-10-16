@@ -387,3 +387,57 @@ test('zero counts for a pruned sample cannot report readiness after a replacemen
   const response = await f.handler(get({}))
   assert.equal(JSON.parse(response.body).progress.fullDryRunReady, false)
 })
+
+function prepareFixture({ companies = ['30'], mapped = false, existing = null } = {}) {
+  const f = fixture(), recorded = []
+  f.repository.getMappings = async () => ({ contacts: [], options: [],
+    organizations: mapped ? [{ portal_id: '123', hubspot_id: '30', albi_organization_id: '40' }] : [] })
+  f.repository.findDryRunReviewBySource = async (...args) => { f.calls.push(['find', ...args]); return existing }
+  f.repository.recordDryRunReview = async (...args) => { recorded.push(args); return { id: '00000000-0000-4000-8000-0000000000bb' } }
+  f.options.makeClients = async () => ({ hubspot: {
+    getContacts: async () => [], getAssociations: async () => [{ fromId: '10', toObjectType: 'companies', toIds: companies }],
+    getCompanies: async ids => [{ id: ids[0], properties: { name: 'Acme', domain: 'acme.example', apiKey: 'secret' } }] }, albi: {} })
+  f.handler = createDryRunReviewHandler(f.options)
+  return { ...f, recorded }
+}
+const prepare = (f, extra = {}) => f.handler({ httpMethod: 'POST', body: JSON.stringify({ companyId: 'selected', reviewId, expectedUpdatedAt: stamp, prepareOrganization: true, ...extra }) })
+
+test('preparing an organization captures its own review in the current run exactly once', async () => {
+  const f = prepareFixture()
+  const response = await prepare(f)
+  assert.equal(response.statusCode, 200)
+  assert.deepEqual(JSON.parse(response.body).organization, { sourceId: '30', reviewId: '00000000-0000-4000-8000-0000000000bb', mapped: false })
+  assert.equal(f.recorded.length, 1)
+  const [company, input] = f.recorded[0]
+  assert.equal(company, 'authorized-company')
+  assert.deepEqual([input.run_id, input.portal_id, input.object_type, input.source_id, input.reason, input.conflict_type],
+    ['server-run', '123', 'companies', '30', 'no_match', 'organization_match'])
+  assert.deepEqual(input.candidate_snapshots, [])
+  assert.equal(JSON.stringify(input).includes('secret'), false)
+})
+
+test('preparing an organization reuses an existing review and never records a duplicate', async () => {
+  const f = prepareFixture({ existing: { id: '00000000-0000-4000-8000-0000000000cc' } })
+  const body = JSON.parse((await prepare(f)).body)
+  assert.deepEqual(body.organization, { sourceId: '30', reviewId: '00000000-0000-4000-8000-0000000000cc', mapped: false })
+  assert.equal(f.recorded.length, 0)
+})
+
+test('an already mapped organization needs no preparation', async () => {
+  const f = prepareFixture({ mapped: true })
+  assert.deepEqual(JSON.parse((await prepare(f)).body).organization, { sourceId: '30', reviewId: null, mapped: true })
+  assert.equal(f.recorded.length, 0)
+})
+
+test('preparing refuses stale reviews, non-contacts and anything but exactly one associated organization', async () => {
+  for (const [f, extra, status] of [[prepareFixture({ companies: [] }), {}, 409], [prepareFixture({ companies: ['30', '31'] }), {}, 409],
+    [prepareFixture(), { expectedUpdatedAt: '2026-10-12T10:00:01.000000Z' }, 409], [prepareFixture(), { reviewId: '00000000-0000-4000-8000-0000000000ee' }, 404],
+    [prepareFixture(), { prepareOrganization: 'yes' }, 400]]) {
+    const response = await prepare(f, extra)
+    assert.equal(response.statusCode, status)
+    assert.equal(f.recorded.length, 0)
+  }
+  const f = prepareFixture(); f.row.object_type = 'companies'
+  assert.equal((await prepare(f)).statusCode, 409)
+  assert.equal(f.recorded.length, 0)
+})

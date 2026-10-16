@@ -149,7 +149,7 @@ test('forced contact creation uses a mapped association without enumerating Albi
   assert.deepEqual(result.forceCreateReadiness, { eligible: true, ready: true, referralSources: [{ id: '5', label: 'Network' }] })
 })
 
-test('forced contact creation can explicitly defer one current unmapped organization', async () => {
+test('contact creation is blocked until its one associated organization is mapped, and names where to do that', async () => {
   const forceRow = { ...row, reason: 'name_only_candidate', candidate_snapshots: [{ id: '456', firstName: 'Alex', lastName: 'Stone' }],
     source_snapshot: { id: '123', firstName: 'Alex', lastName: 'Stone' } }
   const currentMappings = { contacts: [], organizations: [], options: [{ mapping_kind: 'default_contact_type',
@@ -159,13 +159,19 @@ test('forced contact creation can explicitly defer one current unmapped organiza
     getCompanies: async () => [{ id: '777', properties: { name: 'Unmapped Company' } }],
     getOwnerId: async () => null,
     getAssociations: async () => [{ fromId: '123', toObjectType: 'companies', toIds: ['777'] }] },
-  albiRead: { listReferralSources: async () => [{ id: '5', label: 'Network' }], listCreateOptions: async () => ({ relationshipTypes: [{ id: '12', label: 'Referrer' }], relationshipStatuses: [{ id: '2', label: 'Active' }], salespeople: [] }), listContacts: async () => { throw Error('must not enumerate Albi contacts') },
+  albiRead: { ...reads.albiRead, listContacts: async () => { throw Error('must not enumerate Albi contacts') },
     listOrganizations: async () => { throw Error('must not enumerate Albi organizations') } } }
+  const lookups = []
+  const load = findDryRunReviewBySource => loadReviewResolutionOptions({ row: forceRow,
+    repository: { getMappings: async () => currentMappings, findDryRunReviewBySource }, reads: currentReads })
 
-  const result = await loadReviewResolutionOptions({ row: forceRow,
-    repository: { getMappings: async () => currentMappings }, reads: currentReads })
-
-  assert.deepEqual(result.forceCreateReadiness, { eligible: true, ready: true, referralSources: [{ id: '5', label: 'Network' }], deferredOrganizationSourceId: '777' })
+  const none = await load(async (...args) => { lookups.push(args); return null })
+  assert.deepEqual(none.forceCreateReadiness, { eligible: true, ready: false, blockedReason: 'organization_not_synced',
+    organization: { sourceId: '777', reviewId: null } })
+  assert.deepEqual(lookups[0].slice(2), ['companies', '777'])
+  const known = await load(async () => ({ id: '00000000-0000-4000-8000-0000000000aa' }))
+  assert.deepEqual(known.forceCreateReadiness.organization, { sourceId: '777', reviewId: '00000000-0000-4000-8000-0000000000aa' })
+  assert.equal(known.forceCreateReadiness.deferredOrganizationSourceId, undefined)
 })
 
 test('fresh zero-association evidence can offer a mapped organization as an explicit addition', async () => {

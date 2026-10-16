@@ -9,7 +9,7 @@ const LABELS = Object.freeze({ firstName: 'First name', lastName: 'Last name', e
   mobileNumber: 'Mobile', jobTitle: 'Job title', address1: 'Address', address2: 'Address line 2', city: 'City',
   state: 'State / region', zipcode: 'Postal code', country: 'Country', name: 'Name', domain: 'Domain', organizationId: 'Organization ID' })
 const ACTION_FIELDS = Object.freeze({ resolve_fields: ['fieldChoices'], link_existing: ['candidateId', 'approveManyToOne'],
-  create_albi: ['referralSourceId'], force_create_albi: ['ignoredCandidateIds', 'deferOrganizationAssociation', 'referralSourceId'], choose_organization: ['organizationSourceId', 'addHubSpotAssociation'] })
+  create_albi: ['referralSourceId'], force_create_albi: ['ignoredCandidateIds', 'referralSourceId'], choose_organization: ['organizationSourceId', 'addHubSpotAssociation'] })
 const STATUS_LABELS = Object.freeze({ pending: 'Pending', applying: 'Applying', waiting_on_albi: 'Waiting on Albi',
   ready_to_recheck: 'Ready to recheck', completed: 'Completed', failed: 'Failed', superseded: 'Superseded' })
 const EVENT_LABELS = Object.freeze({ planned: 'Resolution planned', claimed: 'Resolution started', provider_applied: 'Provider change applied',
@@ -44,10 +44,6 @@ function decision(input) {
     if (!Array.isArray(input.ignoredCandidateIds) || !input.ignoredCandidateIds.length || input.ignoredCandidateIds.length > 10 ||
       input.ignoredCandidateIds.some(value => !id(value)) || new Set(input.ignoredCandidateIds).size !== input.ignoredCandidateIds.length) fail()
     result.ignoredCandidateIds = [...input.ignoredCandidateIds].sort((a, b) => BigInt(a) < BigInt(b) ? -1 : BigInt(a) > BigInt(b) ? 1 : 0)
-    if (Object.hasOwn(input, 'deferOrganizationAssociation')) {
-      if (input.deferOrganizationAssociation !== true) fail()
-      result.deferOrganizationAssociation = true
-    }
   }
   if (ACTION_FIELDS[input.action].includes('referralSourceId') && Object.hasOwn(input, 'referralSourceId')) {
     if (!id(input.referralSourceId)) fail()
@@ -156,8 +152,7 @@ export function buildResolutionConfirmation({ review, decision: input } = {}) {
       .sort((a, b) => BigInt(a) < BigInt(b) ? -1 : BigInt(a) > BigInt(b) ? 1 : 0)
     if (!candidates.length || JSON.stringify(candidates) !== JSON.stringify(selected.ignoredCandidateIds)) fail()
     result.mapping = { objectType: review.objectType, sourceId: review.sourceId, targetId: null, createAlbi: true,
-      forced: true, ignoredCandidateIds: [...selected.ignoredCandidateIds],
-      deferOrganizationAssociation: selected.deferOrganizationAssociation === true }
+      forced: true, ignoredCandidateIds: [...selected.ignoredCandidateIds] }
   } else {
     if (review.objectType !== 'contacts' || !id(review.sourceId)) fail()
     result.association = { contactId: review.sourceId, organizationSourceId: selected.organizationSourceId,

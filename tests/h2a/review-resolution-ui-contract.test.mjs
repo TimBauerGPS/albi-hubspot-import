@@ -30,8 +30,8 @@ async function render(item = base, extra = {}) {
   return renderToStaticMarkup(createElement(Component, { item, onResolve() {}, ...extra }))
 }
 
-const mount = (item = base, onResolve = async () => ({ resolution: { status: 'ready_to_recheck' } })) =>
-  mountSampleReviewResolution(item, onResolve)
+const mount = (item = base, onResolve = async () => ({ resolution: { status: 'ready_to_recheck' } }), onOpenOrganization) =>
+  mountSampleReviewResolution(item, onResolve, onOpenOrganization)
 
 test('read-only capability never renders resolution mutation controls', async () => {
   for (const capability of [{ enabled: false, mode: 'disabled', canResolve: false },
@@ -91,20 +91,6 @@ test('forced create confirmation names the duplicate risk and submits the audite
   await ui.find('button', 'Confirm resolution').props.onClick(); await ui.flush()
   assert.deepEqual(JSON.parse(JSON.stringify(calls[0][0])),
     { action: 'force_create_albi', referralSourceId: '9', ignoredCandidateIds: ['456'] })
-})
-
-test('forced create explicitly confirms when its Albi organization association is deferred', async () => {
-  const calls = []
-  const ui = await mount({ ...base, reason: 'name_only_candidate', proposedChanges: {},
-    forceCreateReadiness: { eligible: true, ready: true, referralSources: [{ id: '5', label: 'Network' }, { id: '9', label: 'Real Estate' }], deferredOrganizationSourceId: '777' } }, async (...args) => {
-    calls.push(args); return { resolution: { status: 'ready_to_recheck' } }
-  })
-  ui.find('select', 'Choose referral source').props.onChange({ target: { value: '5' } }); await ui.flush()
-  ui.find('button', 'Create a separate Albi record').props.onClick(); await ui.flush()
-  assert.match(ui.text(), /organization link will be deferred/i)
-  await ui.find('button', 'Confirm resolution').props.onClick(); await ui.flush()
-  assert.deepEqual(JSON.parse(JSON.stringify(calls[0][0])),
-    { action: 'force_create_albi', referralSourceId: '5', ignoredCandidateIds: ['456'], deferOrganizationAssociation: true })
 })
 
 test('waiting audit keeps provider success and validated manual task links visible', async () => {
@@ -239,4 +225,20 @@ test('blocked create names the exact missing Albi default', async () => {
   const create = await render({ ...base, reason: 'no_match', candidateSnapshots: [], proposedChanges: {},
     createReadiness: { ready: false, blockedReason: 'referrer_type_missing' } })
   assert.match(create, /Albi has no “Referrer” relationship type/)
+})
+
+test('an unsynced organization blocks contact creation and offers to open or prepare its own review', async () => {
+  const blocked = organization => ({ ...base, reason: 'name_only_candidate', proposedChanges: {},
+    forceCreateReadiness: { eligible: true, ready: false, blockedReason: 'organization_not_synced', organization } })
+  const calls = []
+  const prepare = await mount(blocked({ sourceId: '777', reviewId: null }), undefined, organization => calls.push(organization))
+  assert.match(prepare.text(), /Create the organization first/)
+  assert.equal(prepare.find('button', 'Create a separate Albi record'), undefined)
+  prepare.find('button', 'Prepare organization review').props.onClick(); await prepare.flush()
+  const review = '00000000-0000-4000-8000-0000000000aa'
+  const open = await mount(blocked({ sourceId: '777', reviewId: review }), undefined, organization => calls.push(organization))
+  open.find('button', 'Open organization review').props.onClick(); await open.flush()
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [{ sourceId: '777', reviewId: null }, { sourceId: '777', reviewId: review }])
+  const html = await render(blocked({ sourceId: '777', reviewId: null }))
+  assert.doesNotMatch(html, /deferred/i)
 })

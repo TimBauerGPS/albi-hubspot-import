@@ -125,7 +125,7 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
       const props = sourceRows[0].properties
       const nameReady = row.object_type === 'contacts' ? Boolean(String(props.firstname ?? '').trim() && String(props.lastname ?? '').trim())
         : Boolean(String(props.name ?? '').trim())
-      let organizationTypeId = null, organizationReady = true, deferredOrganizationSourceId = null
+      let organizationTypeId = null, organizationReady = true, organizationBlock = null
       if (associated.length === 1) {
         const sourceId = associated[0]
         const associationMappings = mappings.organizations.filter(item => item?.portal_id === row.portal_id && mappedSource(item) === sourceId)
@@ -136,8 +136,13 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
         const target = organizations?.find(item => item.id === targetId)
         const companyReady = Array.isArray(companies) && companies.length === 1 && companies[0]?.id === sourceId &&
           companies[0]?.archived !== true && record(companies[0]?.properties)
-        organizationReady = Boolean(companyReady && (forced ? targetId || associationMappings.length === 0 : targetId && target))
-        if (forced && companyReady && associationMappings.length === 0) deferredOrganizationSourceId = sourceId
+        organizationReady = Boolean(companyReady && targetId && (forced || target))
+        if (companyReady && associationMappings.length === 0) {
+          // The organization must be synced first; point at its own audited review when one exists.
+          const found = typeof repository.findDryRunReviewBySource === 'function'
+            ? await repository.findDryRunReviewBySource(row.company_id, row.run_id, 'companies', sourceId) : null
+          organizationBlock = { sourceId, reviewId: typeof found?.id === 'string' ? found.id : null }
+        }
         if (organizationReady && Array.isArray(target?.organizationTypeIds) && target.organizationTypeIds.length === 1 &&
           providerId(target.organizationTypeIds[0])) organizationTypeId = target.organizationTypeIds[0]
       }
@@ -148,17 +153,17 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
         organizationTypeId })
       const typeReady = type.action === 'resolved' && providerId(type.contactTypeId) &&
         Number.isSafeInteger(Number(type.contactTypeId))
-      const baseReady = nameReady && organizationReady && typeReady
+      const baseReady = nameReady && organizationReady && typeReady && !organizationBlock
       const sources = baseReady ? await reads.albiRead.listReferralSources() : []
       const referralSources = Array.isArray(sources) ? sources.filter(option => providerId(option?.id) && typeof option.label === 'string')
         .map(option => ({ id: option.id, label: option.label })).slice(0, 100) : []
       const defaults = baseReady && referralSources.length > 0 ? await loadCreateDefaults({ hubspotRead: hubspot, albiRead: reads.albiRead,
         objectType: row.object_type, sourceId: row.source_id }) : null
       const ready = baseReady && referralSources.length > 0 && defaults?.ok === true
-      const blockedReason = defaults && defaults.ok !== true ? defaults.reason : undefined
-      const details = { ready, ...(ready ? { referralSources } : {}), ...(blockedReason ? { blockedReason } : {}) }
-      return { ...unavailable, ...(forced ? { forceCreateReadiness: { eligible: true, ...details,
-        ...(deferredOrganizationSourceId ? { deferredOrganizationSourceId } : {}) } } : { createReadiness: details }) }
+      const blockedReason = organizationBlock ? 'organization_not_synced' : defaults && defaults.ok !== true ? defaults.reason : undefined
+      const details = { ready, ...(ready ? { referralSources } : {}), ...(blockedReason ? { blockedReason } : {}),
+        ...(organizationBlock ? { organization: organizationBlock } : {}) }
+      return { ...unavailable, ...(forced ? { forceCreateReadiness: { eligible: true, ...details } } : { createReadiness: details }) }
     }
   } catch { /* A failed read cannot become an actionable projection. */ }
   return unavailable

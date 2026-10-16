@@ -327,6 +327,12 @@ export function createH2ARepository(supabase) {
       if (!await this.getDryRunReview(companyId, runId, reviewId)) return null
       return checked(await supabase.from('h2a_dry_run_review_events').insert(payload).select(REVIEW_EVENT_COLUMNS).single())
     },
+    async findDryRunReviewBySource(companyId, runId, objectType, sourceId) {
+      for (const value of [companyId, runId, sourceId]) requireReviewIdentity(value)
+      requireReviewValue(objectType, REVIEW_OBJECT_TYPES, 'object type')
+      const query = reviewQuery(supabase, companyId, runId).eq('object_type', objectType).eq('source_id', sourceId)
+      return checked(await query.order('created_at', { ascending: false }).limit(1).maybeSingle())
+    },
     async recordDryRunReview(companyId, input) {
       for (const value of [companyId, input.run_id, input.portal_id, input.source_id]) requireReviewIdentity(value)
       requireReviewValue(input.object_type, REVIEW_OBJECT_TYPES, 'object type')

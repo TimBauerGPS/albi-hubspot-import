@@ -269,20 +269,12 @@ test('forced contact creation preserves a mapped organization without enumeratin
   }])
 })
 
-test('forced contact creation defers one unmapped organization only with explicit audited approval', async () => {
+test('forced contact creation is refused before any Albi write while its organization is unmapped', async () => {
   const f = fixture(), createInput = asForcedCreate(f)
   f.associations = ['77']
-  createInput.decision.deferOrganizationAssociation = true
-  f.deps.albiRead.listContacts = async () => { throw Error('must not enumerate Albi contacts') }
-  f.deps.albiRead.listOrganizations = async () => { throw Error('must not enumerate Albi organizations') }
-
   const result = await executeReviewResolution(f.deps, createInput)
-
-  assert.equal(result.resolution.status, 'ready_to_recheck')
-  assert.deepEqual(mutations(f)[0], ['CREATE', {
-    firstName: 'A', lastName: 'B', email: 'hs@example.com', phoneNumber: '555-111-2222', contactTypeIds: ['12'], referralSourceId: '5', relationshipStatusId: '2',
-  }])
-  assert.equal(f.intent.decision.deferOrganizationAssociation, true)
+  assert.equal(result.resolution.status, 'failed')
+  assert.equal(mutations(f).length, 0)
 })
 
 test('forced create retry reconciles its exact receipt and existing mapping without creating again', async () => {

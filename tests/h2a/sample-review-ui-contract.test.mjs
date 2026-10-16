@@ -28,7 +28,7 @@ async function mount(overrides = {}) {
     tenantRevision: 0, completeTenantTransition: revision => completed.push(revision) }
   const completed = [], calls = [], navigations = []
   const navigate = (path, options) => navigations.push({ path, options })
-  const clients = Object.fromEntries(['getH2ADryRunReviews', 'getH2ADryRunReview', 'recheckH2ADryRunReview', 'resolveH2ADryRunReview'].map(name => [name, (...args) => {
+  const clients = Object.fromEntries(['getH2ADryRunReviews', 'getH2ADryRunReview', 'recheckH2ADryRunReview', 'resolveH2ADryRunReview', 'prepareH2AOrganizationReview'].map(name => [name, (...args) => {
     calls.push({ name, args })
     if (overrides[name]) return overrides[name](...args)
     return Promise.resolve(name === 'getH2ADryRunReviews' ? page() : { item: full(args[2]) })
@@ -445,4 +445,33 @@ test('detail renders job-title-only differences and labels source job title with
   assert.match(html, /Engineer/); assert.match(html, /Manager/)
   const withoutCandidate = renderToStaticMarkup(createElement(Detail, { item: { ...item, candidateSnapshots: [], proposedChanges: {} }, onRecheck() {} }))
   assert.match(withoutCandidate, /HubSpot · Job title/); assert.match(withoutCandidate, /Engineer/)
+})
+
+test('opening an unsynced organization prepares its own review once, selects it, and can return to the contact', async () => {
+  const ui = await mount({ prepareH2AOrganizationReview: () => Promise.resolve({ organization: { sourceId: '777', reviewId: 'org-review', mapped: false } }) })
+  await ui.detail().props.onOpenOrganization({ sourceId: '777', reviewId: null }); await ui.flush()
+  const prepare = ui.calls.filter(call => call.name === 'prepareH2AOrganizationReview')
+  assert.equal(prepare.length, 1)
+  assert.deepEqual(prepare[0].args.slice(0, 3).map(value => typeof value === 'object' ? { ...value } : value),
+    [{ access_token: 'token' }, 'company-1', { reviewId: 'review-1', expectedUpdatedAt: '2026-10-12T12:00:00.000Z' }])
+  assert.equal(ui.calls.filter(call => call.name === 'getH2ADryRunReview').at(-1).args[2], 'org-review')
+  ui.find('button', 'Back to contact review').props.onClick(); await ui.flush()
+  assert.equal(ui.calls.filter(call => call.name === 'getH2ADryRunReview').at(-1).args[2], 'review-1')
+  ui.unmount()
+})
+
+test('an organization that already has a review opens it without preparing another', async () => {
+  const ui = await mount()
+  await ui.detail().props.onOpenOrganization({ sourceId: '777', reviewId: 'known-review' }); await ui.flush()
+  assert.equal(ui.calls.filter(call => call.name === 'prepareH2AOrganizationReview').length, 0)
+  assert.equal(ui.calls.filter(call => call.name === 'getH2ADryRunReview').at(-1).args[2], 'known-review')
+  ui.unmount()
+})
+
+test('a failed organization preparation reports the error and keeps the contact selected', async () => {
+  const ui = await mount({ prepareH2AOrganizationReview: () => Promise.reject(Object.assign(new Error('This contact needs exactly one associated organization.'), { status: 409 })) })
+  await ui.detail().props.onOpenOrganization({ sourceId: '777', reviewId: null }); await ui.flush()
+  assert.match(ui.text(), /exactly one associated organization/)
+  assert.equal(ui.calls.filter(call => call.name === 'getH2ADryRunReview').at(-1).args[2], 'review-1')
+  ui.unmount()
 })

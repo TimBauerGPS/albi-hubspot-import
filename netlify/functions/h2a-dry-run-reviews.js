@@ -3,7 +3,7 @@ import { createH2ARepository } from './_h2a/repository.js'
 import { createH2AProviderClients, readOnlyH2ACapabilities } from './_h2a/providerClients.js'
 import { H2AReviewError, createReviewRepositoryCapabilities, recheckDryRunReview, resolveReviewSample, reviewProgress } from './_h2a/reviewService.js'
 import { createReviewReconciliationCapabilities } from './_h2a/reviewResolutionService.js'
-import { REVIEW_REASONS, projectReviewRow, projectReviewEvent } from './_h2a/review.js'
+import { REVIEW_REASONS, projectReviewRow, projectReviewEvent, safeReviewSnapshot } from './_h2a/review.js'
 import { ApiError } from './_h2a/http.js'
 import { currentResolutionProjection } from './h2a-dry-run-review-resolutions.js'
 import { projectResolutionCapability } from './_h2a/resolutionCapability.js'
@@ -51,7 +51,8 @@ function request(event) {
   let body = {}
   if (event.httpMethod === 'POST') {
     try { body = typeof event.body === 'string' ? JSON.parse(event.body) : event.body } catch { fail(400, 'Invalid request body.') }
-    if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !['companyId', 'reviewId', 'expectedUpdatedAt'].includes(key))) fail(400, 'Unsupported request fields.')
+    if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !['companyId', 'reviewId', 'expectedUpdatedAt', 'prepareOrganization'].includes(key))) fail(400, 'Unsupported request fields.')
+    if (Object.hasOwn(body, 'prepareOrganization') && body.prepareOrganization !== true) fail(400, 'Invalid sample review request.')
     if (Object.keys(query).some(key => key !== 'companyId')) fail(400, 'Unsupported query parameters.')
     if (!UUID.test(body.reviewId ?? '') || !validTime(body.expectedUpdatedAt)) fail(400, 'Invalid sample review request.')
   } else if (Object.keys(query).some(key => !['companyId', 'limit', 'cursor', 'status', 'objectType', 'reason', 'reviewId'].includes(key))) fail(400, 'Unsupported query parameters.')
@@ -101,6 +102,41 @@ async function detail(repository, companyId, runId, row, auth, options, config) 
     resolutionCapability, ...resolutionOptions }
 }
 
+const providerId = value => typeof value === 'string' && /^[1-9]\d{0,99}$/.test(value)
+
+// Captures (or finds) the review for a contact's one unmapped organization so it can be created and
+// audited on its own. Reads HubSpot only; the Albi create is a separate resolution on that review.
+async function prepareOrganizationReview({ repository, options, auth, companyId, input }) {
+  const { config, sample } = await resolveReviewSample(repository, companyId)
+  if (!sample) fail(409, 'Run a new sample to create detailed review data.')
+  const row = await repository.getDryRunReview(companyId, sample.id, input.reviewId)
+  if (!row) fail(404, 'Sample review item not found.')
+  if (row.object_type !== 'contacts' || row.updated_at !== input.expectedUpdatedAt ||
+    !(row.status === 'needs_review' || row.status === 'cleared' && row.recheck_outcome === 'safe_to_create')) {
+    fail(409, 'This sample review changed. Refresh it before preparing the organization.')
+  }
+  const clients = options.makeClients ? await options.makeClients(companyId) : await createH2AProviderClients({
+    companyId, repository, keyring: options.keyring, env: options.env, fetch: options.fetch })
+  if (!options.makeClients && (await clients.hubspot.getAccountInfo()).portalId !== config.portal_id) throw new ApiError('permission')
+  const hubspotRead = { getAssociations: args => clients.hubspot.getAssociations(args), getCompanies: ids => clients.hubspot.getCompanies(ids) }
+  const associations = await hubspotRead.getAssociations({ objectType: 'contacts', objectIds: [row.source_id], toObjectTypes: ['companies'] })
+  const toIds = Array.isArray(associations) && associations.length === 1 && associations[0]?.fromId === row.source_id &&
+    associations[0]?.toObjectType === 'companies' && Array.isArray(associations[0].toIds) ? [...new Set(associations[0].toIds)] : null
+  if (!toIds || toIds.length !== 1 || !providerId(toIds[0])) fail(409, 'This contact needs exactly one associated organization.')
+  const [sourceId] = toIds
+  const mappings = await repository.getMappings(companyId)
+  const mapped = (mappings?.organizations ?? []).some(item => item?.portal_id === row.portal_id && item?.hubspot_id === sourceId)
+  const existing = await repository.findDryRunReviewBySource(companyId, sample.id, 'companies', sourceId)
+  if (mapped || existing) return { sourceId, reviewId: existing?.id ?? null, mapped }
+  const companies = await hubspotRead.getCompanies([sourceId])
+  if (!Array.isArray(companies) || companies.length !== 1 || companies[0]?.id !== sourceId || companies[0]?.archived === true ||
+    !companies[0]?.properties || typeof companies[0].properties !== 'object') fail(409, 'The associated organization is no longer available in HubSpot.')
+  const created = await repository.recordDryRunReview(companyId, { run_id: sample.id, portal_id: row.portal_id, object_type: 'companies',
+    source_id: sourceId, reason: 'no_match', conflict_type: 'organization_match',
+    source_snapshot: safeReviewSnapshot(companies[0], 'companies'), candidate_snapshots: [], match_evidence: { evidence: [] }, proposed_changes: {} })
+  return { sourceId, reviewId: created.id, mapped: false }
+}
+
 export function createDryRunReviewHandler(options = {}) {
   return async event => {
     if (event.httpMethod === 'OPTIONS') return reply(200, {})
@@ -112,6 +148,9 @@ export function createDryRunReviewHandler(options = {}) {
         getSupabase: options.getSupabase, requireAdmin: true, requestedCompanyId: input.companyId })
       const repository = options.repository ?? createH2ARepository(auth.supabase)
       const companyId = auth.companyId
+      if (isRecheck && input.prepareOrganization === true) {
+        return reply(200, { organization: await prepareOrganizationReview({ repository, options, auth, companyId, input }) })
+      }
       if (isRecheck) {
         const resolutionRepository = ['getCurrentReviewResolution', 'claimReviewResolution', 'finishReviewResolution', 'getContactOrganizationChoice']
           .every(method => typeof repository[method] === 'function') ? createReviewReconciliationCapabilities(repository) : undefined
