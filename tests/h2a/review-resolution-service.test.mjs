@@ -78,6 +78,7 @@ function fixture() {
     getAssociations: async () => [{ fromId: '42', toObjectType: 'companies', toIds: [...f.associations] }],
   }
   const albiRead = {
+    listReferralSources: async () => [{ id: '5', label: 'Network' }],
     listContacts: async () => { calls.push('read-target'); return { records: structuredClone(f.contacts), cursor: null } },
     listOrganizations: async () => ({ records: structuredClone(f.organizations), cursor: null }),
   }
@@ -217,14 +218,14 @@ function asCreate(f) {
   f.contacts = []; f.row.reason = 'no_match'; f.row.conflict_type = 'contact_match'; f.row.candidate_snapshots = []
   f.mappings.options = [{ mapping_kind: 'default_contact_type', source_key: 'default', albi_id: '12', confirmed: true }]
   f.createdTarget = { id: '30', firstName: 'A', lastName: 'B', email: 'hs@example.com', phoneNumber: '555-111-2222', contactTypeIds: ['12'] }
-  return { ...input, decision: { action: 'create_albi' } }
+  return { ...input, decision: { action: 'create_albi', referralSourceId: '5' } }
 }
 
 function asForcedCreate(f) {
   f.row.reason = 'name_only_candidate'; f.row.conflict_type = 'contact_match'
   f.mappings.options = [{ mapping_kind: 'default_contact_type', source_key: 'default', albi_id: '12', confirmed: true }]
   f.createdTarget = { id: '30', firstName: 'A', lastName: 'B', email: 'hs@example.com', phoneNumber: '555-111-2222', contactTypeIds: ['12'] }
-  return { ...input, decision: { action: 'force_create_albi', ignoredCandidateIds: ['20'] } }
+  return { ...input, decision: { action: 'force_create_albi', ignoredCandidateIds: ['20'], referralSourceId: '5' } }
 }
 
 test('forced create ignores the confirmed candidate, maps the receipt, and records a distinct audit outcome', async () => {
@@ -263,7 +264,7 @@ test('forced contact creation preserves a mapped organization without enumeratin
   assert.equal(f.mappings.contacts[0].albi_contact_id, '30')
   assert.deepEqual(mutations(f)[0], ['CREATE', {
     firstName: 'A', lastName: 'B', email: 'hs@example.com', phoneNumber: '555-111-2222',
-    contactTypeIds: ['12'], organizationId: '88',
+    contactTypeIds: ['12'], organizationId: '88', referralSourceId: '5',
   }])
 })
 
@@ -278,7 +279,7 @@ test('forced contact creation defers one unmapped organization only with explici
 
   assert.equal(result.resolution.status, 'ready_to_recheck')
   assert.deepEqual(mutations(f)[0], ['CREATE', {
-    firstName: 'A', lastName: 'B', email: 'hs@example.com', phoneNumber: '555-111-2222', contactTypeIds: ['12'],
+    firstName: 'A', lastName: 'B', email: 'hs@example.com', phoneNumber: '555-111-2222', contactTypeIds: ['12'], referralSourceId: '5',
   }])
   assert.equal(f.intent.decision.deferOrganizationAssociation, true)
 })
@@ -338,7 +339,7 @@ test('forced create stops before Albi when a source mapping exists or the decisi
   assert.deepEqual(mutations(mapped), [])
   const changed = fixture(); asForcedCreate(changed)
   const changedResult = await executeReviewResolution(changed.deps, { ...input,
-    decision: { action: 'force_create_albi', ignoredCandidateIds: ['21'] } })
+    decision: { action: 'force_create_albi', ignoredCandidateIds: ['21'], referralSourceId: '5' } })
   assert.equal(changedResult.resolution.status, 'failed')
   assert.deepEqual(mutations(changed), [])
 })
@@ -380,7 +381,7 @@ test('successful organization create with name-only evidence maps the receipt ta
   f.deps.albiRead.listOrganizations = async () => ({ records: structuredClone(f.organizations), cursor: null })
   f.deps.albiWrite.createOrganization = async payload => { f.calls.push(['CREATE', structuredClone(payload)])
     f.organizations.push({ id: '60', name: 'Acme', organizationTypeIds: ['12'] }); return { id: '60' } }
-  const result = await executeReviewResolution(f.deps, { ...input, decision: { action: 'create_albi' } })
+  const result = await executeReviewResolution(f.deps, { ...input, decision: { action: 'create_albi', referralSourceId: '5' } })
   assert.equal(result.resolution.status, 'ready_to_recheck')
   assert.equal(f.mappings.organizations[0].albi_organization_id, '60')
   assert.equal(mutations(f).length, 1)
@@ -666,4 +667,11 @@ test('ambiguous create cannot adopt a target owned by equal source ID in another
   f.mappings.contacts.push({ portal_id: '456', hubspot_id: '42', albi_contact_id: '30' })
   const result = await executeReviewResolution(f.deps, createInput)
   assert.equal(result.resolution.status, 'failed'); assert.equal(f.mappings.contacts.filter(row => row.portal_id === '123').length, 0)
+})
+
+test('create stops before any Albi write when the chosen referral source is not in the live Albi options', async () => {
+  const f = fixture(), createInput = asForcedCreate(f)
+  f.deps.albiRead.listReferralSources = async () => [{ id: '6', label: 'Other' }]
+  await assert.rejects(executeReviewResolution(f.deps, createInput), error => error.statusCode === 409)
+  assert.equal(mutations(f).length, 0)
 })

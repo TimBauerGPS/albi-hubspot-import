@@ -103,6 +103,12 @@ async function evidence(deps, clients, row, decision, deadline) {
   if (!source) fail(409, 'The HubSpot source is no longer available. Recheck this review.')
   const mappings = await deps.repository.getMappings(row.company_id)
   if (!mappings || !['contacts', 'organizations', 'options'].every(key => Array.isArray(mappings[key]))) malformed('resolution')
+  if (decision.referralSourceId !== undefined) {
+    const sources = await bounded(deps, () => clients.albiRead.listReferralSources(), deadline)
+    if (!Array.isArray(sources) || !sources.some(option => option?.id === decision.referralSourceId)) {
+      fail(409, 'The selected referral source is no longer available in Albi. Reload this record and choose again.')
+    }
+  }
   let associatedCompanyIds = []
   if (row.object_type === 'contacts') {
     const records = await bounded(deps, () => clients.hubspotRead.getAssociations({ objectType: 'contacts', objectIds: [row.source_id], toObjectTypes: ['companies'] }), deadline)
@@ -236,6 +242,8 @@ function exactCreateTarget(row, plan, current, receiptId = null, requireReceipt 
   if (matches.length !== 1) return null
   const target = matches[0]
   for (const [field, value] of Object.entries(verify.payload)) {
+    // Albi list records do not echo the referral source, so it cannot be reconciled by reading.
+    if (field === 'referralSourceId') continue
     const actual = target[field === 'zipCode' ? 'zipcode' : field]
     if (field === 'phoneNumber') {
       if (!Object.hasOwn(target, field) || normalizePhone(actual).conflictReason || normalizePhone(actual).writable !== value) return null

@@ -28,7 +28,7 @@ function fixture() {
     applyDryRunRecheck: async () => ({ review: { ...row, status: 'no_longer_in_scope', recheck_outcome: 'source_missing' } }),
   }
   const options = { repository, requireRequest: async (_event, auth) => { calls.push(['auth', auth]); return { companyId: 'authorized-company', userId: '00000000-0000-4000-8000-000000000002' } },
-    makeClients: async company => { calls.push(['clients', company]); return { hubspot: { getContacts: async () => [], getCompanies: async () => [], getAssociations: async () => [] }, albi: { listContacts: async () => {}, listOrganizations: async () => {} } } } }
+    makeClients: async company => { calls.push(['clients', company]); return { hubspot: { getContacts: async () => [], getCompanies: async () => [], getAssociations: async () => [] }, albi: { listReferralSources: async () => [{ id: '5', label: 'Network' }], listContacts: async () => {}, listOrganizations: async () => {} } } } }
   return { calls, row, repository, options, handler: createDryRunReviewHandler(options) }
 }
 const get = query => ({ httpMethod: 'GET', queryStringParameters: query })
@@ -99,6 +99,7 @@ test('detail returns safe JSON when advisory provider evidence exceeds its deadl
     getCompanies: async () => [],
     getAssociations: async () => [{ fromId: '10', toObjectType: 'companies', toIds: [] }],
   }, albi: {
+    listReferralSources: async () => [{ id: '5', label: 'Network' }],
     listContacts: async () => new Promise(() => {}),
     listOrganizations: async () => new Promise(() => {}),
   } })
@@ -126,6 +127,7 @@ test('detail projects organization choices only after live server association re
     getContacts: async () => [{ id: '10', properties: {} }], getCompanies: async () => [{ id: '30', properties: {} }],
     getAssociations: async () => [{ fromId: '10', toObjectType: 'companies', toIds: ['30'] }],
   }, albi: {
+    listReferralSources: async () => [{ id: '5', label: 'Network' }],
     listContacts: async () => ({ records: [{ id: '20', organizationId: '50' }], cursor: null }),
     listOrganizations: async () => ({ records: [{ id: '40' }], cursor: null }),
   } })
@@ -149,6 +151,7 @@ test('reviewable no-match detail reaches a create decision only through fresh se
     getCompanies: async () => [],
     getAssociations: async () => [{ fromId: '10', toObjectType: 'companies', toIds: [] }],
   }, albi: {
+    listReferralSources: async () => [{ id: '5', label: 'Network' }],
     listContacts: async () => ({ records: [], cursor: null }),
     listOrganizations: async () => ({ records: [], cursor: null }),
   } })
@@ -156,7 +159,7 @@ test('reviewable no-match detail reaches a create decision only through fresh se
   assert.equal(response.statusCode, 200)
   const item = JSON.parse(response.body).item
   assert.equal(item.status, 'needs_review')
-  assert.deepEqual(item.createReadiness, { ready: true })
+  assert.deepEqual(item.createReadiness, { ready: true, referralSources: [{ id: '5', label: 'Network' }] })
   assert.equal(presentSampleReviewItem(item).actions.includes('create_albi'), true)
   const ui = await mountSampleReviewResolution(item, async () => ({ resolution: { status: 'ready_to_recheck' } }))
   assert.equal(ui.find('button', 'Create in Albi') != null, true)
@@ -174,6 +177,7 @@ test('name-only detail offers audited separate creation without enumerating Albi
     getCompanies: async () => [],
     getAssociations: async () => [{ fromId: '10', toObjectType: 'companies', toIds: [] }],
   }, albi: {
+    listReferralSources: async () => [{ id: '5', label: 'Network' }],
     listContacts: async () => { throw Error('must not enumerate Albi contacts') },
     listOrganizations: async () => { throw Error('must not enumerate Albi organizations') },
   } })
@@ -182,7 +186,7 @@ test('name-only detail offers audited separate creation without enumerating Albi
 
   assert.equal(response.statusCode, 200)
   const item = JSON.parse(response.body).item
-  assert.deepEqual(item.forceCreateReadiness, { eligible: true, ready: true })
+  assert.deepEqual(item.forceCreateReadiness, { eligible: true, ready: true, referralSources: [{ id: '5', label: 'Network' }] })
   const ui = await mountSampleReviewResolution(item, async () => ({ resolution: { status: 'ready_to_recheck' } }))
   assert.equal(ui.find('button', 'Create a separate Albi record') != null, true)
 })
@@ -198,7 +202,7 @@ test('source correction and safe-to-create recheck expose authorized create whil
   f.options.makeClients = async () => ({ hubspot: {
     getContacts: async () => [{ id: '10', properties: { firstname: 'A', lastname: 'Person' } }], getCompanies: async () => [],
     getAssociations: async () => [{ fromId: '10', toObjectType: 'companies', toIds: [] }],
-  }, albi: { listContacts: async () => ({ records: [], cursor: null }), listOrganizations: async () => ({ records: [], cursor: null }) } })
+  }, albi: { listReferralSources: async () => [{ id: '5', label: 'Network' }], listContacts: async () => ({ records: [], cursor: null }), listOrganizations: async () => ({ records: [], cursor: null }) } })
   const item = JSON.parse((await f.handler(get({ reviewId }))).body).item
   assert.equal(item.createReadiness.ready, true)
   assert.deepEqual(presentSampleReviewItem(item).actions, ['create_albi'])
@@ -299,6 +303,7 @@ test('production recheck composition exposes the scoped choice and reconciliatio
       getAssociations: async () => [{ fromId: '10', toObjectType: 'companies', toIds: ['11', '12'] }],
     }
     const albi = {
+      listReferralSources: async () => [{ id: '5', label: 'Network' }],
       listContacts: async () => ({ records: [{ id: '20', firstName: 'A', lastName: 'Person', email: 'a@example.com', organizationId: '30' }], cursor: null }),
       listOrganizations: async () => ({ records: [{ id: '30', name: 'Allied', domain: 'allied.example' }], cursor: null }),
     }

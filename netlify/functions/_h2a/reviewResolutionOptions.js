@@ -147,9 +147,13 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
         organizationTypeId })
       const typeReady = type.action === 'resolved' && providerId(type.contactTypeId) &&
         Number.isSafeInteger(Number(type.contactTypeId))
-      const ready = nameReady && organizationReady && typeReady
-      return { ...unavailable, ...(forced ? { forceCreateReadiness: { eligible: true, ready,
-        ...(deferredOrganizationSourceId ? { deferredOrganizationSourceId } : {}) } } : { createReadiness: { ready } }) }
+      const baseReady = nameReady && organizationReady && typeReady
+      const sources = baseReady ? await reads.albiRead.listReferralSources() : []
+      const referralSources = Array.isArray(sources) ? sources.filter(option => providerId(option?.id) && typeof option.label === 'string')
+        .map(option => ({ id: option.id, label: option.label })).slice(0, 100) : []
+      const ready = baseReady && referralSources.length > 0
+      return { ...unavailable, ...(forced ? { forceCreateReadiness: { eligible: true, ready, ...(ready ? { referralSources } : {}),
+        ...(deferredOrganizationSourceId ? { deferredOrganizationSourceId } : {}) } } : { createReadiness: { ready, ...(ready ? { referralSources } : {}) } }) }
     }
   } catch { /* A failed read cannot become an actionable projection. */ }
   return unavailable

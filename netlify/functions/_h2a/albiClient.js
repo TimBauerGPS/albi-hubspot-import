@@ -158,6 +158,10 @@ export class AlbiClient {
     // The documented relationship-type IDs are shared by contactTypeIds and organizationTypeIds.
     return { contactTypes: relationshipTypes.map(value => ({ ...value })), organizationTypes: relationshipTypes.map(value => ({ ...value })), relationshipTypes, referralSources, relationshipStatuses, activityTypes }
   }
+  async listReferralSources() {
+    return optionList(await this.#scopedRequest(await this.#path('options/referral-sources'),
+      { operation: 'listReferralSources' }, SCOPES.listReferralSources))
+  }
   async #list(resource, fields, operation, { cursor = '1', pageSize = 25, ...filters } = {}) {
     if (!/^\d+$/.test(String(cursor)) || !Number.isSafeInteger(Number(cursor)) || Number(cursor) < 1 ||
       !Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) invalid('list')

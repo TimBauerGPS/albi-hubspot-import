@@ -9,7 +9,7 @@ const LABELS = Object.freeze({ firstName: 'First name', lastName: 'Last name', e
   mobileNumber: 'Mobile', jobTitle: 'Job title', address1: 'Address', address2: 'Address line 2', city: 'City',
   state: 'State / region', zipcode: 'Postal code', country: 'Country', name: 'Name', domain: 'Domain', organizationId: 'Organization ID' })
 const ACTION_FIELDS = Object.freeze({ resolve_fields: ['fieldChoices'], link_existing: ['candidateId', 'approveManyToOne'],
-  create_albi: [], force_create_albi: ['ignoredCandidateIds', 'deferOrganizationAssociation'], choose_organization: ['organizationSourceId', 'addHubSpotAssociation'] })
+  create_albi: ['referralSourceId'], force_create_albi: ['ignoredCandidateIds', 'deferOrganizationAssociation', 'referralSourceId'], choose_organization: ['organizationSourceId', 'addHubSpotAssociation'] })
 const STATUS_LABELS = Object.freeze({ pending: 'Pending', applying: 'Applying', waiting_on_albi: 'Waiting on Albi',
   ready_to_recheck: 'Ready to recheck', completed: 'Completed', failed: 'Failed', superseded: 'Superseded' })
 const EVENT_LABELS = Object.freeze({ planned: 'Resolution planned', claimed: 'Resolution started', provider_applied: 'Provider change applied',
@@ -48,6 +48,10 @@ function decision(input) {
       if (input.deferOrganizationAssociation !== true) fail()
       result.deferOrganizationAssociation = true
     }
+  }
+  if (ACTION_FIELDS[input.action].includes('referralSourceId') && Object.hasOwn(input, 'referralSourceId')) {
+    if (!id(input.referralSourceId)) fail()
+    result.referralSourceId = input.referralSourceId
   }
   for (const field of ['candidateId', 'organizationSourceId']) if (ACTION_FIELDS[input.action].includes(field)) {
     if (!id(input[field])) fail()

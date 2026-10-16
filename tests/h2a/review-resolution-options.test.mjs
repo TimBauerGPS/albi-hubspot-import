@@ -11,6 +11,7 @@ const reads = { hubspotRead: {
   getCompanies: async () => [{ id: '777', properties: {} }],
   getAssociations: async () => [{ fromId: '123', toObjectType: 'companies', toIds: ['777'] }],
 }, albiRead: {
+  listReferralSources: async () => [{ id: '5', label: 'Network' }], 
   listContacts: async () => ({ records: [{ id: '456', organizationId: '999' }], cursor: null }),
   listOrganizations: async () => ({ records: [{ id: '888' }], cursor: null }),
 } }
@@ -41,7 +42,7 @@ test('create readiness requires current identity, confirmed type, and resolvable
     getContacts: async () => [{ id: '123', properties: { firstname: 'Alex', lastname: 'Stone' } }] },
   albiRead: { ...reads.albiRead, listContacts: async () => ({ records: [], cursor: null }) } }
   const ready = await loadReviewResolutionOptions({ row: createRow, repository: { getMappings: async () => currentMappings }, reads: currentReads })
-  assert.deepEqual(ready.createReadiness, { ready: true })
+  assert.deepEqual(ready.createReadiness, { ready: true, referralSources: [{ id: '5', label: 'Network' }] })
   const missingType = await loadReviewResolutionOptions({ row: createRow, repository: { getMappings: async () => ({ ...currentMappings, options: [] }) }, reads: currentReads })
   assert.deepEqual(missingType.createReadiness, { ready: false })
   const candidate = await loadReviewResolutionOptions({ row: createRow, repository: { getMappings: async () => currentMappings },
@@ -70,7 +71,7 @@ test('forced create readiness permits the captured candidate set but never an ex
     getAssociations: async () => [{ fromId: '123', toObjectType: 'companies', toIds: [] }] },
   albiRead: { ...reads.albiRead, listContacts: async () => ({ records: [{ id: '456', firstName: 'Alex', lastName: 'Stone' }], cursor: null }) } }
   const ready = await loadReviewResolutionOptions({ row: forceRow, repository: { getMappings: async () => currentMappings }, reads: currentReads })
-  assert.deepEqual(ready.forceCreateReadiness, { eligible: true, ready: true })
+  assert.deepEqual(ready.forceCreateReadiness, { eligible: true, ready: true, referralSources: [{ id: '5', label: 'Network' }] })
   const mapped = await loadReviewResolutionOptions({ row: forceRow, repository: { getMappings: async () => ({ ...currentMappings,
     contacts: [{ portal_id: '321', hubspot_id: '123', albi_contact_id: '456' }] }) }, reads: currentReads })
   assert.deepEqual(mapped.forceCreateReadiness, { eligible: false, ready: false })
@@ -80,7 +81,7 @@ test('forced create readiness permits the captured candidate set but never an ex
   const capped = await loadReviewResolutionOptions({ row: cappedRow, repository: { getMappings: async () => currentMappings },
     reads: { ...currentReads, albiRead: { ...currentReads.albiRead,
       listContacts: async () => ({ records: eleven, cursor: null }) } } })
-  assert.deepEqual(capped.forceCreateReadiness, { eligible: true, ready: true })
+  assert.deepEqual(capped.forceCreateReadiness, { eligible: true, ready: true, referralSources: [{ id: '5', label: 'Network' }] })
 })
 
 test('forced create readiness uses the captured candidate set without enumerating Albi contacts', async () => {
@@ -96,7 +97,7 @@ test('forced create readiness uses the captured candidate set without enumeratin
   const result = await loadReviewResolutionOptions({ row: forceRow,
     repository: { getMappings: async () => currentMappings }, reads: currentReads })
 
-  assert.deepEqual(result.forceCreateReadiness, { eligible: true, ready: true })
+  assert.deepEqual(result.forceCreateReadiness, { eligible: true, ready: true, referralSources: [{ id: '5', label: 'Network' }] })
 })
 
 test('forced create readiness starts independent repository and HubSpot reads together', async () => {
@@ -118,11 +119,11 @@ test('forced create readiness starts independent repository and HubSpot reads to
       getContacts: async () => { await begin('source'); return [{ id: '123', properties: { firstname: 'Alex', lastname: 'Stone' } }] },
       getCompanies: async () => [],
       getAssociations: async () => { await begin('associations'); return [{ fromId: '123', toObjectType: 'companies', toIds: [] }] },
-    }, albiRead: { listContacts: async () => { throw Error('must not enumerate Albi contacts') }, listOrganizations: async () => ({ records: [], cursor: null }) } } }),
+    }, albiRead: { listReferralSources: async () => [{ id: '5', label: 'Network' }], listContacts: async () => { throw Error('must not enumerate Albi contacts') }, listOrganizations: async () => ({ records: [], cursor: null }) } } }),
     new Promise((_, reject) => setTimeout(() => reject(new Error('independent readiness reads were serialized')), 100)),
   ])
 
-  assert.deepEqual(result.forceCreateReadiness, { eligible: true, ready: true })
+  assert.deepEqual(result.forceCreateReadiness, { eligible: true, ready: true, referralSources: [{ id: '5', label: 'Network' }] })
 })
 
 test('forced contact creation uses a mapped association without enumerating Albi organizations', async () => {
@@ -134,13 +135,13 @@ test('forced contact creation uses a mapped association without enumerating Albi
     getContacts: async () => [{ id: '123', properties: { firstname: 'Alex', lastname: 'Stone' } }],
     getCompanies: async () => [{ id: '777', properties: { name: 'Acme' } }],
     getAssociations: async () => [{ fromId: '123', toObjectType: 'companies', toIds: ['777'] }] },
-  albiRead: { listContacts: async () => { throw Error('must not enumerate Albi contacts') },
+  albiRead: { listReferralSources: async () => [{ id: '5', label: 'Network' }], listContacts: async () => { throw Error('must not enumerate Albi contacts') },
     listOrganizations: async () => { throw Error('must not enumerate Albi organizations') } } }
 
   const result = await loadReviewResolutionOptions({ row: forceRow,
     repository: { getMappings: async () => currentMappings }, reads: currentReads })
 
-  assert.deepEqual(result.forceCreateReadiness, { eligible: true, ready: true })
+  assert.deepEqual(result.forceCreateReadiness, { eligible: true, ready: true, referralSources: [{ id: '5', label: 'Network' }] })
 })
 
 test('forced contact creation can explicitly defer one current unmapped organization', async () => {
@@ -152,13 +153,13 @@ test('forced contact creation can explicitly defer one current unmapped organiza
     getContacts: async () => [{ id: '123', properties: { firstname: 'Alex', lastname: 'Stone' } }],
     getCompanies: async () => [{ id: '777', properties: { name: 'Unmapped Company' } }],
     getAssociations: async () => [{ fromId: '123', toObjectType: 'companies', toIds: ['777'] }] },
-  albiRead: { listContacts: async () => { throw Error('must not enumerate Albi contacts') },
+  albiRead: { listReferralSources: async () => [{ id: '5', label: 'Network' }], listContacts: async () => { throw Error('must not enumerate Albi contacts') },
     listOrganizations: async () => { throw Error('must not enumerate Albi organizations') } } }
 
   const result = await loadReviewResolutionOptions({ row: forceRow,
     repository: { getMappings: async () => currentMappings }, reads: currentReads })
 
-  assert.deepEqual(result.forceCreateReadiness, { eligible: true, ready: true, deferredOrganizationSourceId: '777' })
+  assert.deepEqual(result.forceCreateReadiness, { eligible: true, ready: true, referralSources: [{ id: '5', label: 'Network' }], deferredOrganizationSourceId: '777' })
 })
 
 test('fresh zero-association evidence can offer a mapped organization as an explicit addition', async () => {
@@ -183,6 +184,7 @@ test('first sample derives advisory organization choices from unique live matche
     getCompanies: async ids => [{ id: ids[0], properties: { name: ids[0] === '777' ? 'One' : 'Two', domain: `${ids[0]}.example` } }],
     getAssociations: async () => [{ fromId: '123', toObjectType: 'companies', toIds: ['777', '778'] }],
   }, albiRead: {
+    listReferralSources: async () => [{ id: '5', label: 'Network' }],
     listContacts: async () => ({ records: [{ id: '456', firstName: 'A', lastName: 'B', email: 'a@example.com' }], cursor: null }),
     listOrganizations: async () => ({ records: [{ id: '888', name: 'One', domain: '777.example' },
       { id: '889', name: 'Two', domain: '778.example' }], cursor: null }),

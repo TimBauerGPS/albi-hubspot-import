@@ -24,7 +24,8 @@ export function readOnlyH2ACapabilities({ hubspot, albi }) {
     hubspotRead: Object.freeze({ ...direct,
       getContacts: hubspot.getContacts.bind(hubspot), getCompanies: hubspot.getCompanies.bind(hubspot),
       getAssociations: hubspot.getAssociations.bind(hubspot) }),
-    albiRead: Object.freeze({ listContacts: albi.listContacts.bind(albi), listOrganizations: albi.listOrganizations.bind(albi) }),
+    albiRead: Object.freeze({ listContacts: albi.listContacts.bind(albi), listOrganizations: albi.listOrganizations.bind(albi),
+      ...(typeof albi.listReferralSources === 'function' ? { listReferralSources: albi.listReferralSources.bind(albi) } : {}) }),
   }
 }
 

@@ -8,8 +8,8 @@ import { normalizePhone } from './normalize.js'
 const ACTION_FIELDS = Object.freeze({
   resolve_fields: new Set(['fieldChoices']),
   link_existing: new Set(['candidateId', 'approveManyToOne']),
-  create_albi: new Set([]),
-  force_create_albi: new Set(['ignoredCandidateIds', 'deferOrganizationAssociation']),
+  create_albi: new Set(['referralSourceId']),
+  force_create_albi: new Set(['ignoredCandidateIds', 'deferOrganizationAssociation', 'referralSourceId']),
   choose_organization: new Set(['organizationSourceId', 'addHubSpotAssociation']),
 })
 const CONTACT_FIELDS = ['firstName', 'lastName', 'email', 'phoneNumber', 'mobileNumber', 'jobTitle',
@@ -58,6 +58,10 @@ export function normalizeResolutionDecision(input) {
       if (input.deferOrganizationAssociation !== true) throw new TypeError('Invalid deferred organization approval')
       decision.deferOrganizationAssociation = true
     }
+  }
+  if (ACTION_FIELDS[input.action].has('referralSourceId') && Object.hasOwn(input, 'referralSourceId')) {
+    if (!isResolutionProviderId(input.referralSourceId)) throw new TypeError('Invalid referral source')
+    decision.referralSourceId = input.referralSourceId
   }
   for (const field of ['candidateId', 'organizationSourceId']) {
     if (ACTION_FIELDS[input.action].has(field)) {
@@ -205,6 +209,9 @@ function createPayload(input, hubspot, type, associations) {
     payload[field === 'zipcode' ? 'zipCode' : field] = value
   }
   payload[type === 'contacts' ? 'contactTypeIds' : 'organizationTypeIds'] = [typeId]
+  // Albi requires a referral source on create. Its ID is a user choice validated against live options by the service.
+  const referralSourceId = positiveId(object(input.decision) ? input.decision.referralSourceId : undefined)
+  payload.referralSourceId = referralSourceId
   if (organization) payload.organizationId = organization.targetId
   return { payload, typeId, organizationId: organization?.targetId ?? null }
 }
@@ -351,10 +358,10 @@ export function safeResolutionExecutionContext(value) {
   const payload = (item, type) => {
     const fields = type === 'contacts' ? ['firstName', 'lastName', 'email', 'phoneNumber', 'jobTitle', 'organizationId'] : ['name', 'phoneNumber']
     const ids = type === 'contacts' ? 'contactTypeIds' : 'organizationTypeIds'
-    const allowed = [...fields, 'address1', 'address2', 'city', 'state', 'zipCode', 'country', ids]
+    const allowed = [...fields, 'address1', 'address2', 'city', 'state', 'zipCode', 'country', 'referralSourceId', ids]
     return object(item) && Object.keys(item).every(key => allowed.includes(key)) &&
       Object.entries(item).every(([key, value]) => key === ids ? Array.isArray(value) && value.length === 1 && providerId(value[0])
-        : key === 'organizationId' ? providerId(value) : text(value)) && Object.hasOwn(item, ids)
+        : key === 'organizationId' || key === 'referralSourceId' ? providerId(value) : text(value)) && Object.hasOwn(item, ids)
   }
   try {
     const legacyKeys = ['decisionHash', 'action', 'providerOperation', 'manualTasks', 'mapping', 'organizationChoice', 'verification']

@@ -55,12 +55,13 @@ test('identity and organization controls require eligible evidence', async () =>
   const identity = await render({ ...base, reason: 'name_only_candidate', proposedChanges: {} })
   assert.match(identity, /Link.*Albi/i)
   assert.doesNotMatch(identity, /Create in Albi/)
-  const forced = await render({ ...base, reason: 'name_only_candidate', proposedChanges: {}, forceCreateReadiness: { eligible: true, ready: true } })
+  const forced = await render({ ...base, reason: 'name_only_candidate', proposedChanges: {}, forceCreateReadiness: { eligible: true, ready: true, referralSources: [{ id: '5', label: 'Network' }, { id: '9', label: 'Real Estate' }] } })
   assert.match(forced, /These records are different/i)
   assert.match(forced, /create a new Albi record/i)
   const noCandidate = await render({ ...base, reason: 'no_match', candidateSnapshots: [], proposedChanges: {},
-    createReadiness: { ready: true } })
+    createReadiness: { ready: true, referralSources: [{ id: '5', label: 'Network' }, { id: '9', label: 'Real Estate' }] } })
   assert.match(noCandidate, /Create in Albi/)
+  assert.match(noCandidate, /Referral source/); assert.match(noCandidate, /Real Estate/)
   const noOrganizationEvidence = await render({ ...base, reason: 'organization_unresolved', proposedChanges: {} })
   assert.doesNotMatch(noOrganizationEvidence, /Choose organization/)
   const organization = await render({ ...base, reason: 'organization_unresolved', proposedChanges: {},
@@ -74,30 +75,36 @@ test('identity and organization controls require eligible evidence', async () =>
 test('forced create confirmation names the duplicate risk and submits the audited candidate IDs', async () => {
   const calls = []
   const ui = await mount({ ...base, reason: 'name_only_candidate', proposedChanges: {},
-    forceCreateReadiness: { eligible: true, ready: true } }, async (...args) => {
+    forceCreateReadiness: { eligible: true, ready: true, referralSources: [{ id: '5', label: 'Network' }, { id: '9', label: 'Real Estate' }] } }, async (...args) => {
     calls.push(args); return { resolution: { status: 'ready_to_recheck' } }
   })
   ui.find('button', 'Create a separate Albi record').props.onClick(); await ui.flush()
+  assert.match(ui.text(), /Choose a referral source/)
+  assert.equal(ui.find('button', 'Confirm resolution'), undefined)
+  ui.find('select', 'Choose referral source').props.onChange({ target: { value: '9' } }); await ui.flush()
+  ui.find('button', 'Create a separate Albi record').props.onClick(); await ui.flush()
+  assert.match(ui.text(), /Referral source: ","Real Estate/)
   assert.match(ui.text(), /You’ll update this in Albi/)
   assert.match(ui.text(), /New Record created/)
   assert.match(ui.text(), /ignores 1 listed candidate/i)
   assert.match(ui.text(), /duplicate may be created/i)
   await ui.find('button', 'Confirm resolution').props.onClick(); await ui.flush()
   assert.deepEqual(JSON.parse(JSON.stringify(calls[0][0])),
-    { action: 'force_create_albi', ignoredCandidateIds: ['456'] })
+    { action: 'force_create_albi', referralSourceId: '9', ignoredCandidateIds: ['456'] })
 })
 
 test('forced create explicitly confirms when its Albi organization association is deferred', async () => {
   const calls = []
   const ui = await mount({ ...base, reason: 'name_only_candidate', proposedChanges: {},
-    forceCreateReadiness: { eligible: true, ready: true, deferredOrganizationSourceId: '777' } }, async (...args) => {
+    forceCreateReadiness: { eligible: true, ready: true, referralSources: [{ id: '5', label: 'Network' }, { id: '9', label: 'Real Estate' }], deferredOrganizationSourceId: '777' } }, async (...args) => {
     calls.push(args); return { resolution: { status: 'ready_to_recheck' } }
   })
+  ui.find('select', 'Choose referral source').props.onChange({ target: { value: '5' } }); await ui.flush()
   ui.find('button', 'Create a separate Albi record').props.onClick(); await ui.flush()
   assert.match(ui.text(), /organization link will be deferred/i)
   await ui.find('button', 'Confirm resolution').props.onClick(); await ui.flush()
   assert.deepEqual(JSON.parse(JSON.stringify(calls[0][0])),
-    { action: 'force_create_albi', ignoredCandidateIds: ['456'], deferOrganizationAssociation: true })
+    { action: 'force_create_albi', referralSourceId: '5', ignoredCandidateIds: ['456'], deferOrganizationAssociation: true })
 })
 
 test('waiting audit keeps provider success and validated manual task links visible', async () => {

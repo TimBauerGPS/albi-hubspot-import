@@ -20,6 +20,7 @@ export default function SampleReviewResolution({ item, busy = false, onResolve }
   const [organizationSourceId, setOrganizationSourceId] = useState('')
   const [approveAssociation, setApproveAssociation] = useState(false)
   const [approveManyToOne, setApproveManyToOne] = useState(false)
+  const [referralSourceId, setReferralSourceId] = useState('')
   const [confirmation, setConfirmation] = useState(null)
   const [message, setMessage] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -38,15 +39,18 @@ export default function SampleReviewResolution({ item, busy = false, onResolve }
     idPattern.test(option?.contactTargetId) && idPattern.test(option?.currentOrganizationTargetId ?? option.targetId)) : []
   const canChooseOrganization = organizationOptions.length > 0
   const selectedOrganization = organizationOptions.find(option => option.sourceId === organizationSourceId)
-  const canCreate = item?.createReadiness?.ready === true && review.candidates.length === 0
+  const sourceList = review.candidates.length === 0 ? item?.createReadiness?.referralSources : item?.forceCreateReadiness?.referralSources
+  const referralSources = Array.isArray(sourceList) ? sourceList.filter(source => idPattern.test(source?.id) && typeof source?.label === 'string' && source.label.trim() !== '').slice(0, 100) : []
+  const selectedReferral = referralSources.find(source => source.id === referralSourceId)
+  const canCreate = item?.createReadiness?.ready === true && review.candidates.length === 0 && referralSources.length > 0
   const canForceCreate = item?.forceCreateReadiness?.ready === true && eligibleCandidates.length > 0 &&
-    eligibleCandidates.length === review.candidates.length
+    eligibleCandidates.length === review.candidates.length && referralSources.length > 0
   const effectiveBusy = busy || submitting
   const canAct = capability.canResolve && review.actions.length > 0 && (review.status === 'needs_review' ||
     review.status === 'cleared' && item?.recheckOutcome === 'safe_to_create')
 
   useEffect(() => {
-    setChoices({}); setCandidateId(''); setOrganizationSourceId(''); setApproveAssociation(false); setApproveManyToOne(false)
+    setChoices({}); setCandidateId(''); setOrganizationSourceId(''); setApproveAssociation(false); setApproveManyToOne(false); setReferralSourceId('')
     setConfirmation(null); setMessage(''); requestRef.current = null; submitLock.current = false
   }, [review.id, review.updatedAt])
 
@@ -72,6 +76,15 @@ export default function SampleReviewResolution({ item, busy = false, onResolve }
     requestRef.current = null; setMessage(''); setConfirmation(null)
   }
 
+  const referralSelect = () => <label className="mt-3 block text-xs font-medium text-gray-700">Referral source
+    <select value={referralSourceId} disabled={effectiveBusy} onChange={event => chooseReferral(event.target.value)} className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:ring-2 focus:ring-brand-500">
+      <option value="">Choose referral source</option>{referralSources.map(source => <option key={source.id} value={source.id}>{source.label}</option>)}</select>
+    <span className="mt-1 block text-xs font-normal text-gray-600">Albi requires a referral source for every new record.</span></label>
+
+  function chooseReferral(value) {
+    setReferralSourceId(value); requestRef.current = null; setMessage(''); setConfirmation(null)
+  }
+
   function open(action) {
     if (!canAct || effectiveBusy) return
     let decision
@@ -85,10 +98,12 @@ export default function SampleReviewResolution({ item, busy = false, onResolve }
       decision = { action, candidateId, approveManyToOne }
     } else if (action === 'create_albi') {
       if (!canCreate) return
-      decision = { action }
+      if (!selectedReferral) { setMessage('Choose a referral source before continuing.'); return }
+      decision = { action, referralSourceId }
     } else if (action === 'force_create_albi') {
       if (!canForceCreate) return
-      decision = { action, ignoredCandidateIds: eligibleCandidates.map(candidate => candidate.id),
+      if (!selectedReferral) { setMessage('Choose a referral source before continuing.'); return }
+      decision = { action, referralSourceId, ignoredCandidateIds: eligibleCandidates.map(candidate => candidate.id),
         ...(idPattern.test(item?.forceCreateReadiness?.deferredOrganizationSourceId)
           ? { deferOrganizationAssociation: true } : {}) }
     } else {
@@ -178,11 +193,13 @@ export default function SampleReviewResolution({ item, busy = false, onResolve }
     </div>}
     {canAct && review.actions.includes('create_albi') && review.candidates.length === 0 && <div className="mt-5 rounded-lg border border-gray-200 p-4"><h5 className="text-sm font-semibold text-gray-900">Create a new Albi record</h5>
       <p className="mt-1 text-xs leading-5 text-gray-600">The server rechecks identity and type readiness before creating anything.</p>
-      {canCreate ? <button type="button" className={`${primary} mt-3`} disabled={effectiveBusy} onClick={() => open('create_albi')}>Create in Albi</button>
+      {canCreate ? <>{referralSelect()}
+        <button type="button" className={`${primary} mt-3`} disabled={effectiveBusy} onClick={() => open('create_albi')}>Create in Albi</button></>
         : <p className="mt-2 text-xs text-amber-800">Creation is unavailable until the candidate and type checks are ready. Recheck this record after correcting them.</p>}</div>}
     {canAct && review.actions.includes('force_create_albi') && item?.forceCreateReadiness?.eligible === true && review.candidates.length > 0 && <div className="mt-5 rounded-lg border border-red-200 bg-red-50 p-4"><h5 className="text-sm font-semibold text-red-950">These records are different</h5>
       <p className="mt-1 text-xs leading-5 text-red-900">Create a new Albi record and deliberately ignore the listed match candidates. This can create a duplicate, so the server rechecks every record before applying it.</p>
-      {canForceCreate ? <button type="button" className={`${primary} mt-3`} disabled={effectiveBusy} onClick={() => open('force_create_albi')}>Create a separate Albi record</button>
+      {canForceCreate ? <>{referralSelect()}
+        <button type="button" className={`${primary} mt-3`} disabled={effectiveBusy} onClick={() => open('force_create_albi')}>Create a separate Albi record</button></>
         : <p className="mt-2 text-xs text-red-900">This option is unavailable until the source, candidate, mapping, and type checks are current. Recheck this record first.</p>}</div>}
     {canAct && review.actions.includes('choose_organization') && <div className="mt-5 rounded-lg border border-gray-200 p-4"><h5 className="text-sm font-semibold text-gray-900">Organization context</h5>
       <p className="mt-1 text-xs leading-5 text-gray-700">Existing HubSpot associations will not be removed. The selected organization becomes the saved context; an Albi relationship may need a manual update.</p>
@@ -211,6 +228,7 @@ export default function SampleReviewResolution({ item, busy = false, onResolve }
         {confirmation.preview.mapping && <p className={`mt-3 rounded-lg p-3 text-sm ${confirmation.preview.mapping.forced ? 'border border-red-200 bg-red-50 text-red-950' : 'bg-gray-50 text-gray-800'}`}>{confirmation.preview.mapping.forced
           ? `Creates a separate Albi record, ignores ${confirmation.preview.mapping.ignoredCandidateIds.length} listed candidate${confirmation.preview.mapping.ignoredCandidateIds.length === 1 ? '' : 's'}, and saves the new mapping. A duplicate may be created.${confirmation.preview.mapping.deferOrganizationAssociation ? ' The Albi organization link will be deferred for later review.' : ''}`
           : confirmation.preview.mapping.createAlbi ? 'Creates an Albi record and saves its mapping.' : `Saves a mapping to Albi record ${confirmation.preview.mapping.targetId}.`}</p>}
+        {confirmation.decision.referralSourceId && <p className="mt-3 rounded-lg bg-gray-50 p-3 text-sm text-gray-800">Referral source: {referralSources.find(source => source.id === confirmation.decision.referralSourceId)?.label ?? confirmation.decision.referralSourceId}</p>}
         {confirmation.preview.association && <p className="mt-3 rounded-lg bg-gray-50 p-3 text-sm text-gray-800">Saves HubSpot organization {confirmation.preview.association.organizationSourceId} as context. {confirmation.preview.association.addHubSpotAssociation ? 'Adds HubSpot association. ' : ''}Existing HubSpot associations will not be removed.</p>}
         <div className="mt-5 flex flex-row-reverse flex-wrap gap-2" aria-busy={effectiveBusy}><button ref={confirmRef} type="button" className={primary} disabled={effectiveBusy} onClick={submit}>{effectiveBusy ? 'Applying…' : message.startsWith('Resolution failed') ? 'Retry resolution' : 'Confirm resolution'}</button>
           <button ref={cancelRef} type="button" className={secondary} disabled={effectiveBusy} onClick={() => setConfirmation(null)}>Cancel</button></div>
