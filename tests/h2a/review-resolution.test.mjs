@@ -485,3 +485,15 @@ test('created records are typed, set Active, and carry the HubSpot owner as sale
     assert.throws(() => plan(input), TypeError)
   }
 })
+
+test('HubSpot-wins choices on fields Albi does not return become manual tasks instead of invalid evidence', () => {
+  const input = fieldsInput()
+  input.review.proposedChanges = { conflicts: { city: { current: null, proposed: 'Newport Beach' }, jobTitle: { current: null, proposed: 'Director' } }, updates: {}, unchanged: [] }
+  input.hubspot.properties = { city: 'Newport Beach', jobtitle: 'Director' }
+  input.decision.fieldChoices = { city: 'hubspot', jobTitle: 'hubspot' }
+  const result = plan(input)
+  assert.equal(result.providerOperation, null)
+  assert.deepEqual(result.manualTasks[0].fields, [{ field: 'city', value: 'Newport Beach' }, { field: 'jobTitle', value: 'Director' }])
+  input.decision.fieldChoices = { city: 'albi' }
+  assert.throws(() => plan(input), TypeError)
+})

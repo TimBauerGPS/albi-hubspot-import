@@ -233,3 +233,12 @@ test('progress has stable ordering and rejects malformed counts', () => {
     { key: 'noLongerInScope', label: 'No longer in scope', value: 0 },
   ])
 })
+
+test('the live HubSpot association fills the source organization when the snapshot has none', () => {
+  const base = { objectType: 'contacts', reason: 'nonblank_field_difference', status: 'needs_review', sourceSnapshot: { id: '1', firstName: 'A', lastName: 'B' } }
+  assert.equal(presentSampleReviewItem({ ...base, hubspotOrganizations: [{ sourceId: '9', name: 'Lido House' }, { sourceId: '8', name: 'Other' }] }).source.organizationName, 'Lido House, Other')
+  assert.equal(presentSampleReviewItem({ ...base, sourceSnapshot: { ...base.sourceSnapshot, organizationName: 'Snapshot Co' }, hubspotOrganizations: [{ sourceId: '9', name: 'Lido House' }] }).source.organizationName, 'Snapshot Co')
+  for (const bad of [undefined, null, [], [{ sourceId: 'x', name: 5 }], 'Lido House']) {
+    assert.equal(presentSampleReviewItem({ ...base, hubspotOrganizations: bad }).source.organizationName, undefined)
+  }
+})

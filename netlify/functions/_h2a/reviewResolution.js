@@ -240,7 +240,9 @@ export function buildReviewResolutionPlan(input) {
       if (!Object.hasOwn(FIELD_METADATA[type], field) ||
         !Object.hasOwn(record(changes.conflicts), field) && !Object.hasOwn(record(changes.updates), field)) invalidPlan()
       const meta = FIELD_METADATA[type][field]
-      const hs = fieldValue(hubspot, [meta.hubspot, field]), target = fieldValue(albi, meta.albi)
+      const hs = fieldValue(hubspot, [meta.hubspot, field])
+      // When HubSpot wins, an Albi field that is simply not returned is blank for comparison; the write is a manual Albi task.
+      const target = winner === 'hubspot' ? fieldValue(albi, meta.albi, false) ?? '' : fieldValue(albi, meta.albi)
       if (hs === target) continue
       if (winner === 'albi') properties[meta.hubspot] = target
       else fields.push({ field, value: hs })

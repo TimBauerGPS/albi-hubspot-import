@@ -61,6 +61,10 @@ export function presentSampleReviewItem(item) {
   const copy = getH2AReviewReason(input.reason)
   const reason = copy.code
   const source = safeSnapshot(input.sourceSnapshot)
+  // The snapshot only holds HubSpot's free-text company property; the live association is authoritative when present.
+  const liveOrganizations = Array.isArray(input.hubspotOrganizations)
+    ? input.hubspotOrganizations.map(organization => typeof organization?.name === 'string' ? safeScalar(organization.name) : null).filter(Boolean).slice(0, 5) : []
+  if (liveOrganizations.length && !source.organizationName) source.organizationName = liveOrganizations.join(', ')
   const rawCandidates = Array.isArray(input.candidateSnapshots) ? input.candidateSnapshots : []
   const candidates = rawCandidates.slice(0, 10).map(candidate => {
     const snapshot = safeSnapshot(candidate)

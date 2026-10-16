@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { supabase } from './lib/supabase'
+import { createStableSessionHolder } from './lib/stableSession'
 import Login from './pages/Login'
 import Signup from './pages/Signup'
 import Configuration from './pages/Configuration'
@@ -131,17 +132,30 @@ export default function App() {
   const [hubspotPortalId, setHubspotPortalId] = useState(null)
   const [showResetModal, setShowResetModal] = useState(false)
 
+  // Returning to the tab makes supabase-js re-emit SIGNED_IN. Keep one session object per user and load the
+  // membership once per user so a refocus does not re-run every page's requests.
+  const sessionHolder = useRef(createStableSessionHolder())
+  const membershipFor = useRef(null)
+
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session)
-      if (session) loadMembership(session.user.id)
+      setSession(sessionHolder.current.update(session))
+      if (session && membershipFor.current !== session.user.id) {
+        membershipFor.current = session.user.id
+        loadMembership(session.user.id)
+      }
     })
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
-      setSession(session)
+      setSession(sessionHolder.current.update(session))
       if (event === 'PASSWORD_RECOVERY') setShowResetModal(true)
-      if (session) loadMembership(session.user.id)
-      else {
+      if (session) {
+        if (membershipFor.current !== session.user.id) {
+          membershipFor.current = session.user.id
+          loadMembership(session.user.id)
+        }
+      } else {
+        membershipFor.current = null
         setConfigStatus(null)
         setIsAdmin(null)
         setIsSuperAdmin(false)
