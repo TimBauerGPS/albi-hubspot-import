@@ -1,14 +1,22 @@
 // Errors intentionally contain no URL, headers, token, or original cause. The only response-derived
 // field is providerReason: a sanitized, capped validation message for 400/422 rejections.
 export class ApiError extends Error {
-  constructor(category, { operation = 'request', status = null, code = category, retryAfterMs = null, requiredScope = null, protocolIssue = null, providerReason = null } = {}) {
+  constructor(category, { operation = 'request', status = null, code = category, retryAfterMs = null, requiredScope = null, protocolIssue = null, providerReason = null, providerShape = null } = {}) {
     super(`Provider request failed (${category}).`)
     this.name = 'ApiError'
-    Object.assign(this, { category, operation, status, code, retryAfterMs, requiredScope, protocolIssue, providerReason })
+    Object.assign(this, { category, operation, status, code, retryAfterMs, requiredScope, protocolIssue, providerReason, providerShape })
   }
 }
 
 const REASON_LIMIT = 200
+// Names only, never values: the top-level keys (and first detail item's keys) of a JSON error body.
+export function providerBodyShape(body) {
+  if (!isRecord(body)) return null
+  const names = value => Object.keys(value).filter(key => /^\w{1,30}$/.test(key)).slice(0, 10).join(',')
+  const first = Array.isArray(body.detail) ? body.detail[0] : null
+  const shape = `resp=${names(body)}${isRecord(first) ? `;item=${names(first)}` : ''}`
+  return shape.length > 1 ? shape.slice(0, 120) : null
+}
 const redact = text => text
   .replace(/[^\s@'"]+@[^\s@'"]+/g, '[email]')
   .replace(/'[^']*'|"[^"]*"/g, '[value]')
@@ -70,11 +78,11 @@ export function createHttpClient({ baseUrl, headers = {}, fetch = globalThis.fet
                 if (Number.isFinite(delay)) retryAfterMs = Math.max(0, delay)
               }
               // Only validation rejections yield a sanitized reason; other bodies are never read.
-              let providerReason = null
+              let providerReason = null, providerShape = null
               if (captureValidationReason && [400, 422].includes(response.status)) {
-                try { providerReason = sanitizeProviderReason(JSON.parse((await response.text()).slice(0, 4000))) } catch { providerReason = null }
+                try { const parsed = JSON.parse((await response.text()).slice(0, 4000)); providerReason = sanitizeProviderReason(parsed); providerShape = providerBodyShape(parsed) } catch { providerReason = null }
               } else await response.body?.cancel().catch(() => {})
-              throw new ApiError(classify(response.status), { operation, status: response.status, retryAfterMs, providerReason })
+              throw new ApiError(classify(response.status), { operation, status: response.status, retryAfterMs, providerReason, providerShape })
             }
             if (statusOnly) {
               void response.body?.cancel().catch(() => {})

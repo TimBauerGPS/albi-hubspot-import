@@ -456,6 +456,8 @@ test('projection fails closed for unsafe identities and codes and caps manual ta
   assert.deepEqual(projectReviewResolutionEvent({ event_type: 'claimed', sanitized_details: { execution_phase: 'waiting_on_albi' } }).details, {})
   assert.equal(safeResolutionEventDetails({ providerReason: 'a: b' }).providerReason, 'a: b')
   assert.equal(safeResolutionEventDetails({ providerReason: 'x'.repeat(300) }).providerReason, undefined)
+  assert.equal(safeResolutionEventDetails({ providerShape: 'sent=a' }).providerShape, 'sent=a')
+  assert.equal(safeResolutionEventDetails({ providerShape: 'x'.repeat(300) }).providerShape, undefined)
   assert.equal(safeResolutionEventDetails({ providerReason: { a: 1 } }).providerReason, undefined)
   assert.deepEqual(safeResolutionEventDetails({ providerStatus: '422' }), {})
   assert.deepEqual(safeResolutionEventDetails({ providerStatus: 700 }), {})

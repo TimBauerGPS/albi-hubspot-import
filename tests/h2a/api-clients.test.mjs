@@ -453,3 +453,13 @@ test('validation reason capture is opt-in so other providers never retain bodies
     fetch: async () => new Response(JSON.stringify({ detail: 'private' }), { status: 400 }) })
   assert.equal((await client('/x', { operation: 'o' }).catch(e => e)).providerReason, null)
 })
+
+test('Albi create failures add a value-free request and response shape', async () => {
+  const f = transport([accessibleCompany, { statusCode: 400, body: { detail: 'Invalid request.', trace: 'secret-trace' } }])
+  const albi = new AlbiClient({ apiKey: 'k', fetch: f.fetch })
+  const error = await albi.createContact({ firstName: 'Jo', lastName: 'Ro', contactTypeIds: [12], phoneNumber: '555-111-2222' }).catch(e => e)
+  assert.equal(error.providerReason, 'Invalid request.')
+  assert.equal(error.providerShape, 'sent=firstName,lastName,contactTypeIds,phoneNumber;phone=999-999-9999;types=1x99;resp=detail,trace')
+  assert.equal(JSON.stringify(error).includes('secret'), false)
+  assert.equal(JSON.stringify(error).includes('Jo'), false)
+})

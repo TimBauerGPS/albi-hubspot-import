@@ -53,7 +53,10 @@ function fixedFailure(error) {
     ? error.status : undefined
   const providerReason = typeof error?.providerReason === 'string' && error.providerReason.length <= 200
     ? error.providerReason : undefined
-  return { category, code, ...(providerStatus ? { providerStatus } : {}), ...(providerReason ? { providerReason } : {}) }
+  const providerShape = typeof error?.providerShape === 'string' && error.providerShape.length <= 240
+    ? error.providerShape : undefined
+  return { category, code, ...(providerStatus ? { providerStatus } : {}), ...(providerReason ? { providerReason } : {}),
+    ...(providerShape ? { providerShape } : {}) }
 }
 
 async function bounded(deps, call, deadline) {

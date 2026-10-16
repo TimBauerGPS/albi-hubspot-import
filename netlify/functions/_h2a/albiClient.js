@@ -49,6 +49,13 @@ function validatePayload(payload, required, operation) {
   }
   return payload
 }
+// Field names plus masked phone/ID formats; never the values themselves.
+function requestShape(payload) {
+  const mask = value => String(value).replace(/\d/g, '9').replace(/[A-Za-z]/g, 'a').slice(0, 20)
+  const extras = [payload.phoneNumber != null ? `phone=${mask(payload.phoneNumber)}` : '',
+    Array.isArray(payload.contactTypeIds) ? `types=${payload.contactTypeIds.length}x${mask(payload.contactTypeIds[0])}` : '']
+  return `sent=${Object.keys(payload).join(',')};${extras.filter(Boolean).join(';')}`
+}
 const CONTACT_FIELDS = ['firstName', 'lastName', 'email', 'phoneNumber', 'mobileNumber', 'jobTitle', 'organizationId', 'organizationName', 'parentOrganizationId', 'contactTypeIds', 'address1', 'address2', 'city', 'state', 'zipcode', 'country', 'referralSourceID', 'relationshipStatusID']
 const ORGANIZATION_FIELDS = ['name', 'email', 'phoneNumber', 'organizationTypeIds', 'parentOrganizationId', 'address1', 'address2', 'city', 'state', 'zipcode', 'country', 'referralSourceID', 'relationshipStatusID']
 const ACTIVITY_FIELDS = ['contactId', 'organizationId', 'relationshipName', 'date', 'type', 'notes', 'source', 'sourceId']
@@ -132,7 +139,7 @@ export class AlbiClient {
     try { return await this.#request(path, options) } catch (error) {
       if (!(error instanceof ApiError)) throw error
       throw new ApiError(error.category, { operation: error.operation, status: error.status, code: error.code,
-        retryAfterMs: error.retryAfterMs, requiredScope, protocolIssue: error.protocolIssue, providerReason: error.providerReason })
+        retryAfterMs: error.retryAfterMs, requiredScope, protocolIssue: error.protocolIssue, providerReason: error.providerReason, providerShape: error.providerShape })
     }
   }
   async verifyCredentials() {
@@ -180,8 +187,14 @@ export class AlbiClient {
   }
   async #create(resource, payload, operation) {
     // Non-idempotent writes are single-attempt. Worker delivery reconciliation owns ambiguous outcomes.
-    const data = await this.#scopedRequest(await this.#path(resource),
-      { method: 'POST', body: payload, operation, retrySafe: false }, SCOPES[operation])
+    let data
+    try {
+      data = await this.#scopedRequest(await this.#path(resource),
+        { method: 'POST', body: payload, operation, retrySafe: false }, SCOPES[operation])
+    } catch (error) {
+      if (error instanceof ApiError && error.providerShape) error.providerShape = `${requestShape(payload)};${error.providerShape}`.slice(0, 240)
+      throw error
+    }
     if (!isRecord(data)) malformed(operation)
     if (data.status !== 1) throw new ApiError('validation', { operation, code: 'application_error' })
     return { id: responseId(data.data, operation) }
