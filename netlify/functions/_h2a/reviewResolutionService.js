@@ -96,11 +96,6 @@ async function evidence(deps, clients, row, decision, deadline) {
   if (!source) fail(409, 'The HubSpot source is no longer available. Recheck this review.')
   const mappings = await deps.repository.getMappings(row.company_id)
   if (!mappings || !['contacts', 'organizations', 'options'].every(key => Array.isArray(mappings[key]))) malformed('resolution')
-  const contacts = row.object_type === 'contacts' ? await listAll(deps, args => clients.albiRead.listContacts(args), deadline) : []
-  const organizations = row.object_type === 'companies' || decision.action === 'choose_organization' ||
-    ['create_albi', 'force_create_albi'].includes(decision.action)
-    ? await listAll(deps, args => clients.albiRead.listOrganizations(args), deadline) : []
-  const candidates = row.object_type === 'contacts' ? contacts : organizations
   let associatedCompanyIds = []
   if (row.object_type === 'contacts') {
     const records = await bounded(deps, () => clients.hubspotRead.getAssociations({ objectType: 'contacts', objectIds: [row.source_id], toObjectTypes: ['companies'] }), deadline)
@@ -109,6 +104,16 @@ async function evidence(deps, clients, row, decision, deadline) {
       records[0].toIds.some(id => typeof id !== 'string' || !/^[1-9]\d*$/.test(id))) malformed('resolution')
     associatedCompanyIds = [...new Set(records[0].toIds)]
   }
+  const capturedForceCreate = decision.action === 'force_create_albi'
+  const contacts = row.object_type === 'contacts'
+    ? capturedForceCreate ? structuredClone(row.candidate_snapshots) : await listAll(deps, args => clients.albiRead.listContacts(args), deadline)
+    : []
+  const needsOrganizations = !capturedForceCreate &&
+    (row.object_type === 'companies' || decision.action === 'choose_organization' || decision.action === 'create_albi')
+  const organizations = needsOrganizations
+    ? await listAll(deps, args => clients.albiRead.listOrganizations(args), deadline)
+    : capturedForceCreate && row.object_type === 'companies' ? structuredClone(row.candidate_snapshots) : []
+  const candidates = row.object_type === 'contacts' ? contacts : organizations
   const organizationEvidence = []
   const organizationSources = [...new Set([...associatedCompanyIds,
     ...(decision.action === 'choose_organization' ? [decision.organizationSourceId] : [])])]
@@ -116,6 +121,13 @@ async function evidence(deps, clients, row, decision, deadline) {
     const company = await sourceRead(deps, clients, 'companies', id, deadline)
     if (!company) continue
     const rows = mappings.organizations
+    if (capturedForceCreate) {
+      const mapped = rows.filter(mapping => mapping.hubspot_id === id && mapping.portal_id === row.portal_id)
+      if (mapped.length === 1 && isResolutionProviderId(mapped[0].albi_organization_id)) {
+        organizationEvidence.push({ source: company, targetId: mapped[0].albi_organization_id, organizationTypeId: null })
+      }
+      continue
+    }
     const matched = decideOrganizationMatch({ source: company, candidates: organizations, mappings: rows, portalId: row.portal_id,
       existingMapping: rows.find(mapping => mapping.hubspot_id === id && mapping.portal_id === row.portal_id) })
     if (matched.action !== 'link') continue
@@ -225,6 +237,17 @@ function exactCreateTarget(row, plan, current, receiptId = null, requireReceipt 
   return target.id
 }
 
+function forcedReceiptTarget(row, current, receiptId) {
+  if (!isResolutionProviderId(receiptId)) return null
+  const rows = row.object_type === 'contacts' ? current.mappings.contacts : current.mappings.organizations
+  const targetKey = row.object_type === 'contacts' ? 'albi_contact_id' : 'albi_organization_id'
+  if (rows.some(item => item?.[targetKey] === receiptId &&
+    (item.portal_id !== row.portal_id || item.hubspot_id !== row.source_id))) return null
+  const sourceRows = rows.filter(item => item?.portal_id === row.portal_id && item?.hubspot_id === row.source_id)
+  if (sourceRows.length > 1 || sourceRows.length === 1 && sourceRows[0]?.[targetKey] !== receiptId) return null
+  return receiptId
+}
+
 async function saveLocal(caps, row, plan, actorId, resolutionId, targetId = plan.mapping?.targetId) {
   if (plan.mapping) {
     if (!targetId) malformed('resolution')
@@ -310,7 +333,7 @@ async function runClaim(deps, input, saved, context) {
       if (!isDeepStrictEqual(livePlan, plan)) stale()
     }
     const verifiedReceiptTarget = plan.action === 'force_create_albi' && createReceiptId
-      ? exactCreateTarget(row, plan, current, createReceiptId, true) : null
+      ? forcedReceiptTarget(row, current, createReceiptId) : null
     if (plan.action === 'force_create_albi' && createReceiptId && !verifiedReceiptTarget) {
       throw new ApiError('permanent', { code: 'operation_failed' })
     }
@@ -340,7 +363,9 @@ async function runClaim(deps, input, saved, context) {
     }
     let createTarget = null
     if (operation?.provider === 'albi') {
-      createTarget = exactCreateTarget(row, plan, current, createReceiptId, plan.action === 'force_create_albi')
+      createTarget = plan.action === 'force_create_albi'
+        ? forcedReceiptTarget(row, current, createReceiptId)
+        : exactCreateTarget(row, plan, current, createReceiptId, false)
       if (createTarget) reconciled = true
       else if (contextPlan) throw new ApiError('permanent', { code: 'operation_failed' })
       else if (plan.action !== 'force_create_albi') {
@@ -371,7 +396,9 @@ async function runClaim(deps, input, saved, context) {
         // All ambiguous responses are verified by reads. Permission/validation
         // failures still retain the intent and return a fixed, sanitized outcome.
         const after = await evidence(deps, clients, row, saved.decision, deadline)
-        createTarget = plan.verification.create ? exactCreateTarget(row, plan, after, createReceiptId, plan.action === 'force_create_albi') : null
+        createTarget = plan.verification.create ? plan.action === 'force_create_albi'
+          ? forcedReceiptTarget(row, after, createReceiptId)
+          : exactCreateTarget(row, plan, after, createReceiptId, false) : null
         const verified = plan.verification.properties ? propertiesMatch(after.source, plan.verification.properties)
           : plan.verification.association ? after.associatedCompanyIds.includes(plan.verification.association.companyId) : !!createTarget
         if (!verified) throw error
@@ -379,7 +406,9 @@ async function runClaim(deps, input, saved, context) {
       }
       if (!reconciled) {
         const after = await evidence(deps, clients, row, saved.decision, deadline)
-        createTarget = plan.verification.create ? exactCreateTarget(row, plan, after, createReceiptId, plan.action === 'force_create_albi') : null
+        createTarget = plan.verification.create ? plan.action === 'force_create_albi'
+          ? forcedReceiptTarget(row, after, createReceiptId)
+          : exactCreateTarget(row, plan, after, createReceiptId, false) : null
         const verified = plan.verification.properties ? propertiesMatch(after.source, plan.verification.properties)
           : plan.verification.association ? after.associatedCompanyIds.includes(plan.verification.association.companyId) : !!createTarget
         if (!verified) malformed('resolution')

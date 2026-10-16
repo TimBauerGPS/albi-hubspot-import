@@ -95,7 +95,7 @@ test('detail returns safe JSON when advisory provider evidence exceeds its deadl
   f.options.requireRequest = async () => ({ companyId: 'authorized-company', role: 'admin', isSuperAdmin: false })
   f.row.source_snapshot = { id: '10', firstName: 'A', lastName: 'Person', email: 'a@example.com' }
   f.options.makeClients = async () => ({ hubspot: {
-    getContacts: async () => [{ id: '10', properties: { firstname: 'A', lastname: 'Person', email: 'a@example.com' } }],
+    getContacts: async () => new Promise(() => {}),
     getCompanies: async () => [],
     getAssociations: async () => [{ fromId: '10', toObjectType: 'companies', toIds: [] }],
   }, albi: {
@@ -160,6 +160,31 @@ test('reviewable no-match detail reaches a create decision only through fresh se
   assert.equal(presentSampleReviewItem(item).actions.includes('create_albi'), true)
   const ui = await mountSampleReviewResolution(item, async () => ({ resolution: { status: 'ready_to_recheck' } }))
   assert.equal(ui.find('button', 'Create in Albi') != null, true)
+})
+
+test('name-only detail offers audited separate creation without enumerating Albi contacts', async () => {
+  const f = fixture()
+  f.options.env = { H2A_REVIEW_RESOLUTION_MODE: 'admins' }
+  f.options.requireRequest = async () => ({ companyId: 'authorized-company', role: 'admin', isSuperAdmin: false })
+  f.row.source_snapshot = { id: '10', firstName: 'A', lastName: 'Person', email: 'a@example.com' }
+  f.repository.getMappings = async () => ({ contacts: [], organizations: [], options: [{ mapping_kind: 'default_contact_type',
+    source_key: 'default', albi_id: '12', confirmed: true }] })
+  f.options.makeClients = async () => ({ hubspot: {
+    getContacts: async () => [{ id: '10', properties: { firstname: 'A', lastname: 'Person', email: 'a@example.com' } }],
+    getCompanies: async () => [],
+    getAssociations: async () => [{ fromId: '10', toObjectType: 'companies', toIds: [] }],
+  }, albi: {
+    listContacts: async () => { throw Error('must not enumerate Albi contacts') },
+    listOrganizations: async () => { throw Error('must not enumerate Albi organizations') },
+  } })
+
+  const response = await createDryRunReviewHandler(f.options)(get({ reviewId }))
+
+  assert.equal(response.statusCode, 200)
+  const item = JSON.parse(response.body).item
+  assert.deepEqual(item.forceCreateReadiness, { eligible: true, ready: true })
+  const ui = await mountSampleReviewResolution(item, async () => ({ resolution: { status: 'ready_to_recheck' } }))
+  assert.equal(ui.find('button', 'Create a separate Albi record') != null, true)
 })
 
 test('source correction and safe-to-create recheck expose authorized create while other cleared states remain closed', async () => {

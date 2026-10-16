@@ -2,7 +2,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { getH2AReviewReason } from '../../../shared/h2aReviewReasons.js'
 import { buildAlbiRecordUrl } from '../../../shared/h2aProviderLinks.js'
 import { resolveContactType } from './options.js'
-import { decideContactMatch, decideOrganizationMatch, selectAllReviewCandidates } from './match.js'
+import { decideContactMatch, decideOrganizationMatch } from './match.js'
 import { safeReviewSnapshot } from './review.js'
 
 const providerId = value => typeof value === 'string' && /^[1-9]\d{0,99}$/.test(value)
@@ -102,24 +102,21 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
       !mappings[row.object_type === 'contacts' ? 'contacts' : 'organizations'].some(item =>
         item?.portal_id === row.portal_id && mappedSource(item) === row.source_id)) {
       if (!isDeepStrictEqual(safeReviewSnapshot(sourceRows[0], row.object_type), row.source_snapshot)) return unavailable
-      const candidates = row.object_type === 'contacts' ? await all(args => reads.albiRead.listContacts(args))
-        : await all(args => reads.albiRead.listOrganizations(args))
-      if (!candidates) return unavailable
-      const match = (row.object_type === 'contacts' ? decideContactMatch : decideOrganizationMatch)({
-        source: sourceRows[0], candidates, portalId: row.portal_id,
-        mappings: mappings[row.object_type === 'contacts' ? 'contacts' : 'organizations'],
-      })
-      if (normal && match.action !== 'create') return unavailable
-      const matchInput = { source: sourceRows[0], sourceId: row.source_id, candidates, portalId: row.portal_id,
-        mappings: mappings[row.object_type === 'contacts' ? 'contacts' : 'organizations'] }
-      const currentCandidateIds = forced ? selectAllReviewCandidates(matchInput, match,
-        row.object_type === 'contacts' ? 'contact' : 'organization').map(item => item.id) : []
-      const storedCandidateIds = forced ? row.candidate_snapshots.map(item => item?.id) : []
-      if (forced && !isDeepStrictEqual(currentCandidateIds, storedCandidateIds)) return unavailable
-      if (forced && row.candidate_snapshots.some(snapshot => {
-        const current = candidates.filter(item => item.id === snapshot?.id)
-        return current.length !== 1 || !isDeepStrictEqual(safeReviewSnapshot(current[0], row.object_type), safeReviewSnapshot(snapshot, row.object_type))
-      })) return unavailable
+      if (normal) {
+        const candidates = row.object_type === 'contacts' ? await all(args => reads.albiRead.listContacts(args))
+          : await all(args => reads.albiRead.listOrganizations(args))
+        if (!candidates) return unavailable
+        const match = (row.object_type === 'contacts' ? decideContactMatch : decideOrganizationMatch)({
+          source: sourceRows[0], candidates, portalId: row.portal_id,
+          mappings: mappings[row.object_type === 'contacts' ? 'contacts' : 'organizations'],
+        })
+        if (match.action !== 'create') return unavailable
+      }
+      if (forced) {
+        const capturedIds = row.candidate_snapshots.map(item => item?.id)
+        if (!capturedIds.length || capturedIds.length > 10 || capturedIds.some(id => !providerId(id)) ||
+          new Set(capturedIds).size !== capturedIds.length) return unavailable
+      }
       const props = sourceRows[0].properties
       const nameReady = row.object_type === 'contacts' ? Boolean(String(props.firstname ?? '').trim() && String(props.lastname ?? '').trim())
         : Boolean(String(props.name ?? '').trim())
@@ -128,11 +125,11 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
         const sourceId = associated[0]
         const targetId = exactMapping(mappings.organizations, row.portal_id, sourceId, 'companies')
         const companies = await hubspot.getCompanies([sourceId])
-        const organizations = await all(args => reads.albiRead.listOrganizations(args))
+        const organizations = forced ? null : await all(args => reads.albiRead.listOrganizations(args))
         const target = organizations?.find(item => item.id === targetId)
-        organizationReady = Boolean(targetId && target && Array.isArray(companies) && companies.length === 1 &&
+        organizationReady = Boolean(targetId && (forced || target) && Array.isArray(companies) && companies.length === 1 &&
           companies[0]?.id === sourceId && companies[0]?.archived !== true && record(companies[0]?.properties))
-        if (organizationReady && Array.isArray(target.organizationTypeIds) && target.organizationTypeIds.length === 1 &&
+        if (organizationReady && Array.isArray(target?.organizationTypeIds) && target.organizationTypeIds.length === 1 &&
           providerId(target.organizationTypeIds[0])) organizationTypeId = target.organizationTypeIds[0]
       }
       const options = row.object_type === 'contacts' ? mappings.options : mappings.options.filter(item =>

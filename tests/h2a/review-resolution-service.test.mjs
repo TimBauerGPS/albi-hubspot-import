@@ -214,6 +214,35 @@ test('forced create ignores the confirmed candidate, maps the receipt, and recor
   assert.equal(f.events.at(-1).details.outcome, 'forced_created')
 })
 
+test('forced create validates captured candidates without enumerating the Albi tenant', async () => {
+  const f = fixture(), createInput = asForcedCreate(f)
+  f.deps.albiRead.listContacts = async () => { throw Error('must not enumerate Albi contacts') }
+
+  const result = await executeReviewResolution(f.deps, createInput)
+
+  assert.equal(result.resolution.status, 'ready_to_recheck')
+  assert.equal(result.resolution.provider_outcome_code, 'forced_created')
+  assert.equal(f.mappings.contacts[0].albi_contact_id, '30')
+  assert.equal(mutations(f).length, 1)
+})
+
+test('forced contact creation preserves a mapped organization without enumerating Albi records', async () => {
+  const f = fixture(), createInput = asForcedCreate(f)
+  f.associations = ['77']
+  f.mappings.organizations.push({ portal_id: '123', hubspot_id: '77', albi_organization_id: '88' })
+  f.deps.albiRead.listContacts = async () => { throw Error('must not enumerate Albi contacts') }
+  f.deps.albiRead.listOrganizations = async () => { throw Error('must not enumerate Albi organizations') }
+
+  const result = await executeReviewResolution(f.deps, createInput)
+
+  assert.equal(result.resolution.status, 'ready_to_recheck')
+  assert.equal(f.mappings.contacts[0].albi_contact_id, '30')
+  assert.deepEqual(mutations(f)[0], ['CREATE', {
+    firstName: 'A', lastName: 'B', email: 'hs@example.com', phoneNumber: '555-111-2222',
+    contactTypeIds: ['12'], organizationId: '88',
+  }])
+})
+
 test('forced create retry reconciles its exact receipt and existing mapping without creating again', async () => {
   const f = fixture(), createInput = asForcedCreate(f); f.crashFinish = true
   await assert.rejects(executeReviewResolution(f.deps, createInput))
@@ -226,27 +255,17 @@ test('forced create retry reconciles its exact receipt and existing mapping with
   assert.equal(f.events.at(-1).eventType, 'provider_reconciled')
 })
 
-test('forced create stops before Albi when a source mapping exists or ignored candidate changes', async () => {
+test('forced create stops before Albi when a source mapping exists or the decision changes the captured candidate set', async () => {
   const mapped = fixture(), mappedInput = asForcedCreate(mapped)
   mapped.mappings.contacts.push({ portal_id: '123', hubspot_id: '42', albi_contact_id: '20' })
   const mappedResult = await executeReviewResolution(mapped.deps, mappedInput)
   assert.equal(mappedResult.resolution.status, 'failed')
   assert.deepEqual(mutations(mapped), [])
-  const changed = fixture(), changedInput = asForcedCreate(changed)
-  changed.target.firstName = 'Changed'
-  await assert.rejects(executeReviewResolution(changed.deps, changedInput), error => error.statusCode === 409)
+  const changed = fixture(); asForcedCreate(changed)
+  const changedResult = await executeReviewResolution(changed.deps, { ...input,
+    decision: { action: 'force_create_albi', ignoredCandidateIds: ['21'] } })
+  assert.equal(changedResult.resolution.status, 'failed')
   assert.deepEqual(mutations(changed), [])
-  const appeared = fixture(), appearedInput = asForcedCreate(appeared)
-  appeared.contacts.push({ id: '21', firstName: 'A', lastName: 'B', email: 'hs@example.com' })
-  await assert.rejects(executeReviewResolution(appeared.deps, appearedInput), error => error.statusCode === 409)
-  assert.deepEqual(mutations(appeared), [])
-  const capped = fixture(); asForcedCreate(capped)
-  capped.contacts = Array.from({ length: 11 }, (_, index) => ({ id: String(100 + index), firstName: 'A', lastName: 'B' }))
-  capped.row.candidate_snapshots = structuredClone(capped.contacts.slice(0, 10))
-  const cappedInput = { ...input, decision: { action: 'force_create_albi',
-    ignoredCandidateIds: capped.row.candidate_snapshots.map(item => item.id) } }
-  await assert.rejects(executeReviewResolution(capped.deps, cappedInput), error => error.statusCode === 409)
-  assert.deepEqual(mutations(capped), [])
 })
 
 test('ambiguous create is adopted only by unique production matcher plus exact create context', async () => {

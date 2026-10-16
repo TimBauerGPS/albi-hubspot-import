@@ -60,7 +60,7 @@ test('create readiness requires current identity, confirmed type, and resolvable
   assert.deepEqual(ambiguousMapping.createReadiness, { ready: false })
 })
 
-test('forced create readiness permits reviewed candidates but never an existing source mapping', async () => {
+test('forced create readiness permits the captured candidate set but never an existing source mapping', async () => {
   const forceRow = { ...row, reason: 'name_only_candidate', candidate_snapshots: [{ id: '456', firstName: 'Alex', lastName: 'Stone' }],
     source_snapshot: { id: '123', firstName: 'Alex', lastName: 'Stone' } }
   const currentMappings = { contacts: [], organizations: [], options: [{ mapping_kind: 'default_contact_type',
@@ -80,7 +80,41 @@ test('forced create readiness permits reviewed candidates but never an existing 
   const capped = await loadReviewResolutionOptions({ row: cappedRow, repository: { getMappings: async () => currentMappings },
     reads: { ...currentReads, albiRead: { ...currentReads.albiRead,
       listContacts: async () => ({ records: eleven, cursor: null }) } } })
-  assert.deepEqual(capped.forceCreateReadiness, { eligible: false, ready: false })
+  assert.deepEqual(capped.forceCreateReadiness, { eligible: true, ready: true })
+})
+
+test('forced create readiness uses the captured candidate set without enumerating Albi contacts', async () => {
+  const forceRow = { ...row, reason: 'name_only_candidate', candidate_snapshots: [{ id: '456', firstName: 'Alex', lastName: 'Stone' }],
+    source_snapshot: { id: '123', firstName: 'Alex', lastName: 'Stone' } }
+  const currentMappings = { contacts: [], organizations: [], options: [{ mapping_kind: 'default_contact_type',
+    source_key: 'default', albi_id: '12', confirmed: true }] }
+  const currentReads = { ...reads, hubspotRead: { ...reads.hubspotRead,
+    getContacts: async () => [{ id: '123', properties: { firstname: 'Alex', lastname: 'Stone' } }],
+    getAssociations: async () => [{ fromId: '123', toObjectType: 'companies', toIds: [] }] },
+  albiRead: { ...reads.albiRead, listContacts: async () => { throw Error('must not enumerate Albi contacts') } } }
+
+  const result = await loadReviewResolutionOptions({ row: forceRow,
+    repository: { getMappings: async () => currentMappings }, reads: currentReads })
+
+  assert.deepEqual(result.forceCreateReadiness, { eligible: true, ready: true })
+})
+
+test('forced contact creation uses a mapped association without enumerating Albi organizations', async () => {
+  const forceRow = { ...row, reason: 'name_only_candidate', candidate_snapshots: [{ id: '456', firstName: 'Alex', lastName: 'Stone' }],
+    source_snapshot: { id: '123', firstName: 'Alex', lastName: 'Stone' } }
+  const currentMappings = { contacts: [], organizations: [{ portal_id: '321', hubspot_id: '777', albi_organization_id: '888' }],
+    options: [{ mapping_kind: 'default_contact_type', source_key: 'default', albi_id: '12', confirmed: true }] }
+  const currentReads = { ...reads, hubspotRead: { ...reads.hubspotRead,
+    getContacts: async () => [{ id: '123', properties: { firstname: 'Alex', lastname: 'Stone' } }],
+    getCompanies: async () => [{ id: '777', properties: { name: 'Acme' } }],
+    getAssociations: async () => [{ fromId: '123', toObjectType: 'companies', toIds: ['777'] }] },
+  albiRead: { listContacts: async () => { throw Error('must not enumerate Albi contacts') },
+    listOrganizations: async () => { throw Error('must not enumerate Albi organizations') } } }
+
+  const result = await loadReviewResolutionOptions({ row: forceRow,
+    repository: { getMappings: async () => currentMappings }, reads: currentReads })
+
+  assert.deepEqual(result.forceCreateReadiness, { eligible: true, ready: true })
 })
 
 test('fresh zero-association evidence can offer a mapped organization as an explicit addition', async () => {
