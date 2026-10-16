@@ -192,7 +192,8 @@ function createPayload(input, hubspot, type, associations) {
     'address1', 'address2', 'city', 'state', 'zipcode', 'country'] : ['name', 'phoneNumber', 'address1', 'address2', 'city', 'state', 'zipcode', 'country']) {
     const meta = FIELD_METADATA[type][field]
     let value = fieldValue(hubspot, [meta.hubspot, field], false)
-    if (['firstName', 'lastName', 'name'].includes(field) && !value?.trim()) invalidPlan()
+    if (value !== null) value = value.trim()
+    if (['firstName', 'lastName', 'name'].includes(field) && !value) invalidPlan()
     if (value === null || value === '') continue
     if (field === 'phoneNumber') {
       const normalized = normalizePhone(value)

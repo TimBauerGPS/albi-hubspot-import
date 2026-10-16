@@ -171,6 +171,19 @@ test('create plans rebuild supported payloads from current HubSpot and confirmed
   assert.equal(result.providerOperation.payload.zipCode, '90001')
 })
 
+test('create plans canonicalize surrounding HubSpot whitespace before comparing captured evidence', () => {
+  const input = createInput('contacts')
+  input.hubspot.properties = {
+    firstname: ' John ', lastname: ' Robinson ', email: ' john@example.com ', phone: ' 9496626181 ',
+    jobtitle: ' Director of engineering ', address: ' 1 Main St ', city: ' Newport Beach ',
+  }
+
+  assert.deepEqual(plan(input).providerOperation.payload, {
+    firstName: 'John', lastName: 'Robinson', email: 'john@example.com', phoneNumber: '949-662-6181',
+    jobTitle: 'Director of engineering', address1: '1 Main St', city: 'Newport Beach', contactTypeIds: ['12'],
+  })
+})
+
 test('forced create records the exact ignored candidates and still builds a create plan', () => {
   const input = createInput('contacts')
   input.review.reason = 'name_only_candidate'
