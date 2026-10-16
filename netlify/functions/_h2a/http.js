@@ -1,10 +1,31 @@
-// Errors intentionally contain no URL, response body, headers, token, or original cause.
+// Errors intentionally contain no URL, headers, token, or original cause. The only response-derived
+// field is providerReason: a sanitized, capped validation message for 400/422 rejections.
 export class ApiError extends Error {
-  constructor(category, { operation = 'request', status = null, code = category, retryAfterMs = null, requiredScope = null, protocolIssue = null } = {}) {
+  constructor(category, { operation = 'request', status = null, code = category, retryAfterMs = null, requiredScope = null, protocolIssue = null, providerReason = null } = {}) {
     super(`Provider request failed (${category}).`)
     this.name = 'ApiError'
-    Object.assign(this, { category, operation, status, code, retryAfterMs, requiredScope, protocolIssue })
+    Object.assign(this, { category, operation, status, code, retryAfterMs, requiredScope, protocolIssue, providerReason })
   }
+}
+
+const REASON_LIMIT = 200
+const redact = text => text
+  .replace(/[^\s@'"]+@[^\s@'"]+/g, '[email]')
+  .replace(/'[^']*'|"[^"]*"/g, '[value]')
+  .replace(/\d{3,}/g, '[number]')
+// Keeps field locations and validator messages; never echoes request input.
+export function sanitizeProviderReason(body) {
+  const parts = []
+  const detail = isRecord(body) ? (body.detail ?? body.message ?? body.error) : null
+  for (const item of Array.isArray(detail) ? detail.slice(0, 5) : [detail]) {
+    if (typeof item === 'string') parts.push(redact(item))
+    else if (isRecord(item) && typeof item.msg === 'string') {
+      const loc = Array.isArray(item.loc) ? item.loc.filter(part => typeof part === 'string' && /^\w+$/.test(part)).join('.') : ''
+      parts.push(`${loc ? `${loc}: ` : ''}${redact(item.msg)}`)
+    }
+  }
+  const reason = parts.join('; ').slice(0, REASON_LIMIT)
+  return reason || null
 }
 
 export function invalid(operation) { throw new ApiError('validation', { operation }) }
@@ -22,7 +43,7 @@ const classify = status => status === 429 ? 'rate_limit' : status === 401 ? 'aut
 
 export function createHttpClient({ baseUrl, headers = {}, fetch = globalThis.fetch,
   sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), random = Math.random,
-  maxRetries = 2, maxDelayMs = 5000, timeoutMs = 10000, now = Date.now } = {}) {
+  maxRetries = 2, maxDelayMs = 5000, timeoutMs = 10000, now = Date.now, captureValidationReason = false } = {}) {
   const origin = new URL(baseUrl).origin
   const retries = Math.max(0, Math.min(3, Number.isInteger(maxRetries) ? maxRetries : 2))
   const delayCap = Math.max(1, Math.min(10000, maxDelayMs))
@@ -48,9 +69,12 @@ export function createHttpClient({ baseUrl, headers = {}, fetch = globalThis.fet
                 const delay = /^\d+(\.\d+)?$/.test(raw) ? Number(raw) * 1000 : Date.parse(raw) - now()
                 if (Number.isFinite(delay)) retryAfterMs = Math.max(0, delay)
               }
-              // Do not read or retain arbitrary provider error bodies.
-              await response.body?.cancel().catch(() => {})
-              throw new ApiError(classify(response.status), { operation, status: response.status, retryAfterMs })
+              // Only validation rejections yield a sanitized reason; other bodies are never read.
+              let providerReason = null
+              if (captureValidationReason && [400, 422].includes(response.status)) {
+                try { providerReason = sanitizeProviderReason(JSON.parse((await response.text()).slice(0, 4000))) } catch { providerReason = null }
+              } else await response.body?.cancel().catch(() => {})
+              throw new ApiError(classify(response.status), { operation, status: response.status, retryAfterMs, providerReason })
             }
             if (statusOnly) {
               void response.body?.cancel().catch(() => {})

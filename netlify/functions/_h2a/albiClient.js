@@ -108,7 +108,7 @@ export class AlbiClient {
   #companyPromise
   constructor({ apiKey, ...http } = {}) {
     if (!text(apiKey)) invalid('credentials')
-    this.#request = createHttpClient({ ...http, baseUrl: 'https://albi.guardianrestoration.com', headers: { 'X-API-Key': apiKey } })
+    this.#request = createHttpClient({ ...http, baseUrl: 'https://albi.guardianrestoration.com', captureValidationReason: true, headers: { 'X-API-Key': apiKey } })
   }
   async #discoverCompany() {
     const result = await this.#request(COMPANY_ROOT, { operation: 'discoverCompany' })
@@ -132,7 +132,7 @@ export class AlbiClient {
     try { return await this.#request(path, options) } catch (error) {
       if (!(error instanceof ApiError)) throw error
       throw new ApiError(error.category, { operation: error.operation, status: error.status, code: error.code,
-        retryAfterMs: error.retryAfterMs, requiredScope, protocolIssue: error.protocolIssue })
+        retryAfterMs: error.retryAfterMs, requiredScope, protocolIssue: error.protocolIssue, providerReason: error.providerReason })
     }
   }
   async verifyCredentials() {

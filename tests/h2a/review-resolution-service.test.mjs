@@ -204,6 +204,15 @@ test('failed provider validation preserves only its safe HTTP status for diagnos
   assert.equal(JSON.stringify(f.events).includes('secret'), false)
 })
 
+test('failed provider validation records its sanitized reason', async () => {
+  const f = fixture()
+  f.writeError = Object.assign(new Error('x'), { category: 'validation', code: 'validation', status: 400,
+    providerReason: 'body.contactTypeIds: Invalid type' })
+  await executeReviewResolution(f.deps, input)
+  assert.deepEqual(f.events.at(-1).details, { category: 'validation', code: 'operation_failed', providerStatus: 400,
+    providerReason: 'body.contactTypeIds: Invalid type' })
+})
+
 function asCreate(f) {
   f.contacts = []; f.row.reason = 'no_match'; f.row.conflict_type = 'contact_match'; f.row.candidate_snapshots = []
   f.mappings.options = [{ mapping_kind: 'default_contact_type', source_key: 'default', albi_id: '12', confirmed: true }]

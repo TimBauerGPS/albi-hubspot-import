@@ -428,3 +428,28 @@ test('Albi payload and list validation rejects undocumented fields, unsafe IDs, 
   ]) await assert.rejects(work, { category: 'validation' })
   assert.equal(f.calls.length, 0)
 })
+
+test('validation rejections expose only a sanitized, capped provider reason', async () => {
+  const body = { detail: [{ loc: ['body', 'phoneNumber'], msg: "Invalid phone '555-111-2222' for john@example.com", type: 'value_error', input: 'secret-input' }] }
+  const client = createHttpClient({ baseUrl: 'https://albi.example.com', maxRetries: 0, captureValidationReason: true,
+    fetch: async () => new Response(JSON.stringify(body), { status: 400 }) })
+  const error = await client('/x', { method: 'POST', body: {}, operation: 'createContact' }).catch(e => e)
+  assert.equal(error.status, 400)
+  assert.equal(error.providerReason, 'body.phoneNumber: Invalid phone [value] for [email]')
+  assert.equal(JSON.stringify(error).includes('secret'), false)
+  const plain = createHttpClient({ baseUrl: 'https://albi.example.com', maxRetries: 0, captureValidationReason: true,
+    fetch: async () => new Response(JSON.stringify({ detail: 'x'.repeat(1000) + ' 123456789' }), { status: 422 }) })
+  assert.ok((await plain('/x', { operation: 'o' }).catch(e => e)).providerReason.length <= 200)
+  const server = createHttpClient({ baseUrl: 'https://albi.example.com', maxRetries: 0, captureValidationReason: true,
+    fetch: async () => new Response(JSON.stringify({ detail: 'boom' }), { status: 500 }) })
+  assert.equal((await server('/x', { operation: 'o' }).catch(e => e)).providerReason, null)
+  const junk = createHttpClient({ baseUrl: 'https://albi.example.com', maxRetries: 0, captureValidationReason: true,
+    fetch: async () => new Response('<html>nope', { status: 400 }) })
+  assert.equal((await junk('/x', { operation: 'o' }).catch(e => e)).providerReason, null)
+})
+
+test('validation reason capture is opt-in so other providers never retain bodies', async () => {
+  const client = createHttpClient({ baseUrl: 'https://api.example.com', maxRetries: 0,
+    fetch: async () => new Response(JSON.stringify({ detail: 'private' }), { status: 400 }) })
+  assert.equal((await client('/x', { operation: 'o' }).catch(e => e)).providerReason, null)
+})

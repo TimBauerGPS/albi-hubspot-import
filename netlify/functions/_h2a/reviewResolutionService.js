@@ -51,7 +51,9 @@ function fixedFailure(error) {
     : H2A_REVIEW_ERROR_CODES.includes(error?.code) ? error.code : 'operation_failed'
   const providerStatus = Number.isInteger(error?.status) && error.status >= 400 && error.status <= 599
     ? error.status : undefined
-  return { category, code, ...(providerStatus ? { providerStatus } : {}) }
+  const providerReason = typeof error?.providerReason === 'string' && error.providerReason.length <= 200
+    ? error.providerReason : undefined
+  return { category, code, ...(providerStatus ? { providerStatus } : {}), ...(providerReason ? { providerReason } : {}) }
 }
 
 async function bounded(deps, call, deadline) {

@@ -329,6 +329,9 @@ export function safeResolutionEventDetails(value) {
   if (Number.isInteger(input.providerStatus) && input.providerStatus >= 400 && input.providerStatus <= 599) {
     details.providerStatus = input.providerStatus
   }
+  if (typeof input.providerReason === 'string' && input.providerReason.length > 0 && input.providerReason.length <= 200) {
+    details.providerReason = input.providerReason
+  }
   if (RESOLUTION_OUTCOME_CODES.includes(input.outcome)) details.outcome = input.outcome
   if (Array.isArray(input.manualTasks)) details.manualTasks = safeManualTasks(input.manualTasks)
   return details
