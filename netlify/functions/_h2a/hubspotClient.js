@@ -155,7 +155,9 @@ export class HubSpotClient {
       const data = await this.#request(`${ROOT}/${objectType}/batch/read`, { method: 'POST', retrySafe: true, operation: 'getRecords',
         body: { inputs: inputs.slice(offset, offset + 100), properties: PROPERTIES[objectType] } })
       if (data?.status !== 'COMPLETE' || data.numErrors > 0 || data.errors?.length) malformed('getRecords')
-      records.push(...page(data, 'getRecords').results.map(value => record(value, objectType, 'getRecords')))
+      // Merged-away IDs come back as their surviving record under a different ID; those are not the requested records.
+      const requested = new Set(inputs.slice(offset, offset + 100).map(input => input.id))
+      records.push(...page(data, 'getRecords').results.map(value => record(value, objectType, 'getRecords')).filter(item => requested.has(item.id)))
     }
     return records
   }
@@ -166,7 +168,9 @@ export class HubSpotClient {
     const query = new URLSearchParams({ archived: 'false', properties: PROPERTIES[objectType].join(',') })
     try {
       const data = await this.#request(`${ROOT}/${objectType}/${target}?${query}`, { operation: 'getRecord' })
-      return record(data, objectType, 'getRecord')
+      const found = record(data, objectType, 'getRecord')
+      // HubSpot answers a merged-away ID with the surviving record; the requested record no longer exists.
+      return found.id === target ? found : null
     } catch (error) {
       if (error instanceof ApiError && error.status === 404) return null
       throw error

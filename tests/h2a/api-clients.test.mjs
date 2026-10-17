@@ -513,3 +513,13 @@ test('an intermittent Albi list failure is retried; persistent ones name the fai
   await new AlbiClient({ apiKey: 'k', fetch: other.fetch, sleep: async () => {} }).listContacts().catch(() => {})
   assert.equal(other.calls.length, 2)
 })
+
+test('a HubSpot record merged into another reads as missing instead of malformed', async () => {
+  const merged = { id: '570263829186', properties: { firstname: 'Jaime', hs_merged_object_ids: '535984814798;570263828217' } }
+  const direct = transport([merged])
+  const c = new HubSpotClient({ token: 'token', fetch: direct.fetch })
+  assert.equal(await c.getContact('535984814798'), null)
+  const batch = transport([{ status: 'COMPLETE', results: [merged, { id: '42', properties: { firstname: 'Kept' } }] }])
+  const records = await new HubSpotClient({ token: 'token', fetch: batch.fetch }).getContacts(['535984814798', '42'])
+  assert.deepEqual(records.map(record => record.id), ['42'])
+})
