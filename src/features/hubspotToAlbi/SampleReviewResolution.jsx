@@ -9,6 +9,8 @@ const BLOCKED_COPY = {
   referrer_type_missing: 'Albi has no “Referrer” relationship type. Add it in Albi, then recheck this record.',
   active_status_missing: 'Albi has no “Active” relationship status. Add it in Albi, then recheck this record.',
   owner_not_found: 'The HubSpot owner for this record could not be read. Check the owner in HubSpot, then recheck.',
+  source_already_mapped: 'This HubSpot record is already linked to an Albi record, so a new one can’t be created from here.',
+  multiple_organizations: 'This contact has more than one HubSpot organization. Keep one association in HubSpot, then recheck.',
   salesperson_not_found: 'The HubSpot owner’s name does not exactly match one Albi salesperson. Correct the name in Albi or HubSpot, then recheck.',
 }
 const display = value => value === null || value === '' ? 'Blank' : value
@@ -209,20 +211,20 @@ export default function SampleReviewResolution({ item, busy = false, onResolve, 
 
     {canAct && review.actions.includes('link_existing') && eligibleCandidates.length > 0 && <div className="mt-5 space-y-3 rounded-lg border border-gray-200 p-4">
       <h5 className="text-sm font-semibold text-gray-900">Link an existing Albi record</h5>
-      <label className="block text-xs font-medium text-gray-700">Albi candidate<select value={candidateId} onChange={event => changed(choices, event.target.value, organizationSourceId, approveManyToOne)} className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:ring-2 focus:ring-brand-500"><option value="">Choose candidate</option>{eligibleCandidates.map(candidate => <option key={candidate.id} value={candidate.id}>Albi ID {candidate.id}</option>)}</select></label>
-      <label className="flex gap-2 text-xs text-gray-700"><input type="checkbox" checked={approveManyToOne} onChange={event => changed(choices, candidateId, organizationSourceId, event.target.checked)} className="text-brand-600 focus:ring-brand-500" />Approve a many-to-one mapping if this Albi record is already linked elsewhere</label>
-      <button type="button" className={primary} disabled={effectiveBusy || !candidateId} onClick={() => open('link_existing')}>Link selected Albi record</button>
+      <label className="block text-xs font-medium text-gray-700">Albi candidate<select value={candidateId} onChange={event => changed(choices, event.target.value, organizationSourceId, event.target.value !== '' && event.target.value !== 'new')} className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:ring-2 focus:ring-brand-500"><option value="">Choose candidate</option>{eligibleCandidates.map(candidate => <option key={candidate.id} value={candidate.id}>Albi ID {candidate.id}</option>)}{review.actions.includes('force_create_albi') && <option value="new">{`Add new ${review.objectType === 'contacts' ? 'contact' : 'organization'} in Albi`}</option>}</select></label>
+      {candidateId === 'new' ? <div className="rounded-lg border border-red-200 bg-red-50 p-3"><h6 className="text-sm font-semibold text-red-950">These records are different</h6>
+        <p className="mt-1 text-xs leading-5 text-red-900">Create a new Albi record and deliberately ignore the listed match candidates. This can create a duplicate, so the server rechecks every record before applying it.</p>
+        {unsyncedOrganization ? organizationFirst() : canForceCreate ? <>{referralSelect()}
+          <button type="button" className={`${primary} mt-3`} disabled={effectiveBusy} onClick={() => open('force_create_albi')}>Create a separate Albi record</button></>
+          : <p className="mt-2 text-xs text-red-900">{blockedCopy ?? BLOCKED_COPY[item?.forceCreateReadiness?.blockedReason] ?? 'A new Albi record can’t be created for this record right now. Reload or recheck it to refresh the evidence.'}</p>}</div>
+        : <><label className="flex gap-2 text-xs text-gray-700"><input type="checkbox" checked={approveManyToOne} onChange={event => changed(choices, candidateId, organizationSourceId, event.target.checked)} className="text-brand-600 focus:ring-brand-500" />Approve a many-to-one mapping if this Albi record is already linked elsewhere</label>
+      <button type="button" className={primary} disabled={effectiveBusy || !candidateId} onClick={() => open('link_existing')}>Link selected Albi record</button></>}
     </div>}
     {canAct && review.actions.includes('create_albi') && review.candidates.length === 0 && <div className="mt-5 rounded-lg border border-gray-200 p-4"><h5 className="text-sm font-semibold text-gray-900">Create a new Albi record</h5>
       <p className="mt-1 text-xs leading-5 text-gray-600">The server rechecks identity and type readiness before creating anything.</p>
       {unsyncedOrganization ? organizationFirst() : canCreate ? <>{referralSelect()}
         <button type="button" className={`${primary} mt-3`} disabled={effectiveBusy} onClick={() => open('create_albi')}>Create in Albi</button></>
         : <p className="mt-2 text-xs text-amber-800">{blockedCopy ?? 'Creation is unavailable until the candidate and type checks are ready. Recheck this record after correcting them.'}</p>}</div>}
-    {canAct && review.actions.includes('force_create_albi') && item?.forceCreateReadiness?.eligible === true && review.candidates.length > 0 && <div className="mt-5 rounded-lg border border-red-200 bg-red-50 p-4"><h5 className="text-sm font-semibold text-red-950">These records are different</h5>
-      <p className="mt-1 text-xs leading-5 text-red-900">Create a new Albi record and deliberately ignore the listed match candidates. This can create a duplicate, so the server rechecks every record before applying it.</p>
-      {unsyncedOrganization ? organizationFirst() : canForceCreate ? <>{referralSelect()}
-        <button type="button" className={`${primary} mt-3`} disabled={effectiveBusy} onClick={() => open('force_create_albi')}>Create a separate Albi record</button></>
-        : <p className="mt-2 text-xs text-red-900">{blockedCopy ?? 'This option is unavailable until the source, candidate, mapping, and type checks are current. Recheck this record first.'}</p>}</div>}
     {canAct && review.objectType === 'contacts' && review.actions.includes('choose_organization') && <div className="mt-5 rounded-lg border border-gray-200 p-4"><h5 className="text-sm font-semibold text-gray-900">Organization context</h5>
       <p className="mt-1 text-xs leading-5 text-gray-700">Existing HubSpot associations will not be removed. The selected organization becomes the saved context; an Albi relationship may need a manual update.</p>
       {canChooseOrganization ? <><label className="mt-3 block text-xs font-medium text-gray-700">Organization<select value={organizationSourceId} onChange={event => changed(choices, candidateId, event.target.value, approveManyToOne)} className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:ring-2 focus:ring-brand-500"><option value="">Choose organization</option>{organizationOptions.map(option => <option key={option.sourceId} value={option.sourceId}>HubSpot {option.sourceId} → Albi {option.targetId}{option.associated ? ' · currently associated' : ' · add association'}</option>)}</select></label>

@@ -192,6 +192,7 @@ test('name-only detail offers audited separate creation without enumerating Albi
   const item = JSON.parse(response.body).item
   assert.deepEqual(item.forceCreateReadiness, { eligible: true, ready: true, referralSources: [{ id: '5', label: 'Network' }] })
   const ui = await mountSampleReviewResolution(item, async () => ({ resolution: { status: 'ready_to_recheck' } }))
+  ui.find('select', 'Choose candidate').props.onChange({ target: { value: 'new' } }); await ui.flush()
   assert.equal(ui.find('button', 'Create a separate Albi record') != null, true)
 })
 

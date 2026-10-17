@@ -56,8 +56,7 @@ test('identity and organization controls require eligible evidence', async () =>
   assert.match(identity, /Link.*Albi/i)
   assert.doesNotMatch(identity, /Create in Albi/)
   const forced = await render({ ...base, reason: 'name_only_candidate', proposedChanges: {}, forceCreateReadiness: { eligible: true, ready: true, referralSources: [{ id: '5', label: 'Network' }, { id: '9', label: 'Real Estate' }] } })
-  assert.match(forced, /These records are different/i)
-  assert.match(forced, /create a new Albi record/i)
+  assert.match(forced, /Add new contact in Albi/)
   const noCandidate = await render({ ...base, reason: 'no_match', candidateSnapshots: [], proposedChanges: {},
     createReadiness: { ready: true, referralSources: [{ id: '5', label: 'Network' }, { id: '9', label: 'Real Estate' }] } })
   assert.match(noCandidate, /Create in Albi/)
@@ -78,6 +77,7 @@ test('forced create confirmation names the duplicate risk and submits the audite
     forceCreateReadiness: { eligible: true, ready: true, referralSources: [{ id: '5', label: 'Network' }, { id: '9', label: 'Real Estate' }] } }, async (...args) => {
     calls.push(args); return { resolution: { status: 'ready_to_recheck' } }
   })
+  ui.find('select', 'Choose candidate').props.onChange({ target: { value: 'new' } }); await ui.flush()
   ui.find('button', 'Create a separate Albi record').props.onClick(); await ui.flush()
   assert.match(ui.text(), /Choose a referral source/)
   assert.equal(ui.find('button', 'Confirm resolution'), undefined)
@@ -218,10 +218,11 @@ test('unassociated organization requires explicit addition and confirms the HubS
 })
 
 test('blocked create names the exact missing Albi default', async () => {
-  const forced = await render({ ...base, reason: 'name_only_candidate', proposedChanges: {},
+  const ui = await mount({ ...base, reason: 'name_only_candidate', proposedChanges: {},
     forceCreateReadiness: { eligible: true, ready: false, blockedReason: 'salesperson_not_found' } })
-  assert.match(forced, /does not exactly match one Albi salesperson/)
-  assert.doesNotMatch(forced, /Choose referral source/)
+  ui.find('select', 'Choose candidate').props.onChange({ target: { value: 'new' } }); await ui.flush()
+  assert.match(ui.text(), /does not exactly match one Albi salesperson/)
+  assert.doesNotMatch(ui.text(), /Choose referral source/)
   const create = await render({ ...base, reason: 'no_match', candidateSnapshots: [], proposedChanges: {},
     createReadiness: { ready: false, blockedReason: 'referrer_type_missing' } })
   assert.match(create, /Albi has no “Referrer” relationship type/)
@@ -232,11 +233,13 @@ test('an unsynced organization blocks contact creation and offers to open or pre
     forceCreateReadiness: { eligible: true, ready: false, blockedReason: 'organization_not_synced', organization } })
   const calls = []
   const prepare = await mount(blocked({ sourceId: '777', reviewId: null }), undefined, organization => calls.push(organization))
+  prepare.find('select', 'Choose candidate').props.onChange({ target: { value: 'new' } }); await prepare.flush()
   assert.match(prepare.text(), /Create the organization first/)
   assert.equal(prepare.find('button', 'Create a separate Albi record'), undefined)
   prepare.find('button', 'Prepare organization review').props.onClick(); await prepare.flush()
   const review = '00000000-0000-4000-8000-0000000000aa'
   const open = await mount(blocked({ sourceId: '777', reviewId: review }), undefined, organization => calls.push(organization))
+  open.find('select', 'Choose candidate').props.onChange({ target: { value: 'new' } }); await open.flush()
   open.find('button', 'Open organization review').props.onClick(); await open.flush()
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [{ sourceId: '777', reviewId: null }, { sourceId: '777', reviewId: review }])
   const html = await render(blocked({ sourceId: '777', reviewId: null }))
@@ -261,4 +264,32 @@ test('organization context offers the organization-first review when the organiz
   ui.find('button', 'Open organization review').props.onClick(); await ui.flush()
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [{ sourceId: '777', reviewId: review }])
   assert.doesNotMatch(await render({ ...base, reason: 'albi_contact_update_contract_unverified', organizationOptions: [] }), /Create the organization first/)
+})
+
+test('choosing an Albi candidate approves a many-to-one mapping by default', async () => {
+  const calls = []
+  const ui = await mount({ ...base, reason: 'name_only_candidate', proposedChanges: {} }, async (...args) => { calls.push(args); return { resolution: { status: 'ready_to_recheck' } } })
+  ui.find('select', 'Choose candidate').props.onChange({ target: { value: '456' } }); await ui.flush()
+  assert.equal(ui.nodes().find(node => node.type === 'input' && node.props.type === 'checkbox').props.checked, true)
+  ui.find('button', 'Link selected Albi record').props.onClick(); await ui.flush()
+  await ui.find('button', 'Confirm resolution').props.onClick(); await ui.flush()
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[0][0])), { action: 'link_existing', candidateId: '456', approveManyToOne: true })
+})
+
+test('the link dropdown offers adding a new Albi record and explains when it is not available', async () => {
+  const sources = [{ id: '5', label: 'Network' }]
+  const calls = []
+  const ui = await mount({ ...base, reason: 'name_only_candidate', proposedChanges: {}, forceCreateReadiness: { eligible: true, ready: true, referralSources: sources } },
+    async (...args) => { calls.push(args); return { resolution: { status: 'ready_to_recheck' } } })
+  assert.equal(ui.find('button', 'Create a separate Albi record'), undefined)
+  ui.find('select', 'Choose candidate').props.onChange({ target: { value: 'new' } }); await ui.flush()
+  assert.match(ui.text(), /Add new contact in Albi/)
+  ui.find('select', 'Choose referral source').props.onChange({ target: { value: '5' } }); await ui.flush()
+  ui.find('button', 'Create a separate Albi record').props.onClick(); await ui.flush()
+  await ui.find('button', 'Confirm resolution').props.onClick(); await ui.flush()
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[0][0])), { action: 'force_create_albi', referralSourceId: '5', ignoredCandidateIds: ['456'] })
+  const unavailable = await mount({ ...base, reason: 'name_only_candidate', proposedChanges: {}, forceCreateReadiness: { eligible: false, ready: false, blockedReason: 'source_already_mapped' } })
+  unavailable.find('select', 'Choose candidate').props.onChange({ target: { value: 'new' } }); await unavailable.flush()
+  assert.match(unavailable.text(), /already linked to an Albi record/)
+  assert.equal(unavailable.find('button', 'Create a separate Albi record'), undefined)
 })

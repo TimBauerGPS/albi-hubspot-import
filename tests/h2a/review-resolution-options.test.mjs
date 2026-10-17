@@ -76,7 +76,7 @@ test('forced create readiness permits the captured candidate set but never an ex
   assert.deepEqual(ready.forceCreateReadiness, { eligible: true, ready: true, referralSources: [{ id: '5', label: 'Network' }] })
   const mapped = await loadReviewResolutionOptions({ row: forceRow, repository: { getMappings: async () => ({ ...currentMappings,
     contacts: [{ portal_id: '321', hubspot_id: '123', albi_contact_id: '456' }] }) }, reads: currentReads })
-  assert.deepEqual(mapped.forceCreateReadiness, { eligible: false, ready: false })
+  assert.deepEqual(mapped.forceCreateReadiness, { eligible: false, ready: false, blockedReason: 'source_already_mapped' })
 
   const eleven = Array.from({ length: 11 }, (_, index) => ({ id: String(100 + index), firstName: 'Alex', lastName: 'Stone' }))
   const cappedRow = { ...forceRow, candidate_snapshots: eleven.slice(0, 10) }
@@ -253,4 +253,14 @@ test('an unmapped associated organization is gated from cheap evidence without e
   assert.deepEqual(result.organizationGate, { sourceId: '777', reviewId: '00000000-0000-4000-8000-0000000000dd' })
   const mapped = await loadReviewResolutionOptions({ row, repository: { getMappings: async () => mappings }, reads })
   assert.equal(mapped.organizationOptions.length, 1)
+})
+
+test('separate-record creation names why it is unavailable for a mapped source or several organizations', async () => {
+  const forceRow = { ...row, reason: 'name_only_candidate', candidate_snapshots: [{ id: '456', firstName: 'Alex', lastName: 'Stone' }],
+    source_snapshot: { id: '123', firstName: 'Alex', lastName: 'Stone' } }
+  const mapped = await loadReviewResolutionOptions({ row: forceRow, repository: { getMappings: async () => mappings }, reads })
+  assert.deepEqual(mapped.forceCreateReadiness, { eligible: false, ready: false, blockedReason: 'source_already_mapped' })
+  const several = await loadReviewResolutionOptions({ row: forceRow, repository: { getMappings: async () => ({ ...mappings, contacts: [] }) },
+    reads: { ...reads, hubspotRead: { ...reads.hubspotRead, getAssociations: async () => [{ fromId: '123', toObjectType: 'companies', toIds: ['777', '778'] }] } } })
+  assert.deepEqual(several.forceCreateReadiness, { eligible: false, ready: false, blockedReason: 'multiple_organizations' })
 })

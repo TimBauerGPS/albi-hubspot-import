@@ -125,9 +125,13 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
       Array.isArray(row.candidate_snapshots) && row.candidate_snapshots.length > 0
     const normal = actions.includes('create_albi') && (row.status === 'needs_review' || row.status === 'cleared' && row.recheck_outcome === 'safe_to_create') &&
       Array.isArray(row.candidate_snapshots) && row.candidate_snapshots.length === 0
-    if ((normal || forced) && associated.length <= 1 &&
-      !mappings[row.object_type === 'contacts' ? 'contacts' : 'organizations'].some(item =>
-        item?.portal_id === row.portal_id && mappedSource(item) === row.source_id)) {
+    const sourceMapped = mappings[row.object_type === 'contacts' ? 'contacts' : 'organizations'].some(item =>
+      item?.portal_id === row.portal_id && mappedSource(item) === row.source_id)
+    if (forced && (sourceMapped || associated.length > 1)) {
+      return { ...unavailable, forceCreateReadiness: { eligible: false, ready: false,
+        blockedReason: sourceMapped ? 'source_already_mapped' : 'multiple_organizations' } }
+    }
+    if ((normal || forced) && associated.length <= 1 && !sourceMapped) {
       if (!isDeepStrictEqual(safeReviewSnapshot(sourceRows[0], row.object_type), row.source_snapshot)) return unavailable
       if (normal) {
         const candidates = row.object_type === 'contacts' ? await all(args => reads.albiRead.listContacts(args))
