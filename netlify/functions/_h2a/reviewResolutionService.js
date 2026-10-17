@@ -142,7 +142,9 @@ async function evidence(deps, clients, row, decision, deadline) {
   // a later recheck verifies the result against live data.
   const capturedManualOnly = decision.action === 'resolve_fields' &&
     Object.values(decision.fieldChoices ?? {}).every(winner => winner === 'hubspot')
-  const captured = capturedForceCreate || capturedManualOnly
+  // An email-match link only saves our mapping; it is verified live by the recheck that follows.
+  const capturedEmailLink = decision.action === 'link_existing' && decision.ignoreContactDifferences === true
+  const captured = capturedForceCreate || capturedManualOnly || capturedEmailLink
   const contacts = row.object_type === 'contacts'
     ? captured ? structuredClone(row.candidate_snapshots) : await listAll(deps, args => clients.albiRead.listContacts(args), deadline)
     : []

@@ -2,6 +2,7 @@ import { ApiError, isRecord, malformed } from './http.js'
 import { assertReviewClassification, evaluateContactReview, evaluateOrganizationReview,
   selectReviewedOrganizationContext, safeReviewSnapshot, safeReviewCandidates, safeReviewEvidence, safeReviewChanges } from './review.js'
 import { resolveContactType } from './options.js'
+import { H2A_IGNORABLE_CONTACT_FIELDS, sameH2AEmail } from '../../../shared/h2aReviewReasons.js'
 
 export class H2AReviewError extends Error {
   constructor(statusCode, message) { super(message); this.name = 'H2AReviewError'; this.statusCode = statusCode }
@@ -112,6 +113,26 @@ function exactSource(records, sourceId) {
   return records[0]
 }
 
+// A reviewer's email-match link ("ignore phone/address") clears field reviews whose only differences are
+// ignorable, as long as the mapping, the linked Albi record and the exact email match still hold.
+async function acceptedEmailMatch(deps, companyId, row, evaluation, source, candidates, contactMappings, deadline) {
+  if (evaluation.outcome !== 'needs_review' || evaluation.conflictType !== 'contact_fields') return evaluation
+  const repository = deps.resolutionRepository ?? deps.repository
+  if (typeof repository.getCurrentReviewResolution !== 'function') return evaluation
+  const accepted = await bounded(deps, () => repository.getCurrentReviewResolution(companyId, row.id), deadline)
+  const decision = isRecord(accepted?.decision) ? accepted.decision : {}
+  if (accepted?.action !== 'link_existing' || decision.action !== 'link_existing' || decision.ignoreContactDifferences !== true ||
+    ['failed', 'superseded'].includes(accepted.status)) return evaluation
+  const mapped = contactMappings.filter(item => item?.portal_id === row.portal_id && item?.hubspot_id === row.source_id)
+  if (mapped.length !== 1 || mapped[0].albi_contact_id !== decision.candidateId) return evaluation
+  const target = candidates.find(item => item?.id === decision.candidateId)
+  if (!target || !sameH2AEmail(source?.properties?.email, target.email)) return evaluation
+  const changes = isRecord(evaluation.proposedChanges) ? evaluation.proposedChanges : {}
+  const differing = [...Object.keys(isRecord(changes.updates) ? changes.updates : {}), ...Object.keys(isRecord(changes.conflicts) ? changes.conflicts : {})]
+  if (!differing.every(field => H2A_IGNORABLE_CONTACT_FIELDS.includes(field))) return evaluation
+  return { ...evaluation, outcome: 'safe_to_link', targetId: decision.candidateId }
+}
+
 async function currentSource(deps, hubspot, objectType, sourceId, deadline) {
   const direct = objectType === 'contacts' ? hubspot.getContact : hubspot.getCompany
   if (typeof direct === 'function') {
@@ -208,6 +229,7 @@ export async function recheckDryRunReview(deps, { companyId, reviewId, actorId, 
         evaluation = evaluateContactReview({ source, candidates, associatedCompanyIds, organization, organizationChoice, availableCompanies,
           companyId, portalId: row.portal_id,
           mappings: mappings.contacts, optionMappings: mappings.options })
+        evaluation = await acceptedEmailMatch(deps, companyId, row, evaluation, source, candidates, mappings.contacts, deadline)
         // Samples may have used activity company context when direct associations
         // were empty. That context is intentionally not retained; only a fresh
         // sample can prove it resolved. Refresh safe evidence without clearing it.

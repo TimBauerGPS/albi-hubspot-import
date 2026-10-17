@@ -71,12 +71,18 @@ export function getH2AReviewReason(code) {
   return Object.hasOwn(H2A_REVIEW_REASON_CATALOG, code) ? H2A_REVIEW_REASON_CATALOG[code] : OTHER_REASON
 }
 
-// Contact field differences can also correct which organization the contact belongs to.
+// Contact field differences can also correct which organization the contact belongs to, and can
+// confirm the link while ignoring phone/address differences when the emails match.
 export function getH2AReviewActions(code, objectType) {
   const entry = getH2AReviewReason(code)
-  return objectType === 'contacts' && entry.category === 'field' && !entry.actions.includes('choose_organization')
-    ? Object.freeze([...entry.actions, 'choose_organization']) : entry.actions
+  return objectType === 'contacts' && entry.category === 'field'
+    ? Object.freeze([...new Set([...entry.actions, 'choose_organization', 'link_existing'])]) : entry.actions
 }
+
+// Differences an email-match link may ignore. Everything else (names, email, title) still needs review.
+export const H2A_IGNORABLE_CONTACT_FIELDS = Object.freeze(['phoneNumber', 'mobileNumber', 'address1', 'address2', 'city', 'state', 'zipcode', 'country'])
+export const sameH2AEmail = (left, right) => typeof left === 'string' && typeof right === 'string' && left.trim() !== '' &&
+  left.trim().toLocaleLowerCase('en-US') === right.trim().toLocaleLowerCase('en-US')
 
 export function listH2AReviewReasonOptions(codes) {
   const values = codes === undefined ? Object.keys(H2A_REVIEW_REASON_CATALOG) : Array.isArray(codes) ? codes : []

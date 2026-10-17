@@ -13,6 +13,8 @@ const BLOCKED_COPY = {
   multiple_organizations: 'This contact has more than one HubSpot organization. Keep one association in HubSpot, then recheck.',
   salesperson_not_found: 'The HubSpot owner’s name does not exactly match one Albi salesperson. Correct the name in Albi or HubSpot, then recheck.',
 }
+const sameEmail = (left, right) => typeof left === 'string' && typeof right === 'string' && left.trim() !== '' &&
+  left.trim().toLowerCase() === right.trim().toLowerCase()
 const display = value => value === null || value === '' ? 'Blank' : value
 
 function TaskLink({ url, children }) {
@@ -45,6 +47,9 @@ export default function SampleReviewResolution({ item, busy = false, onResolve, 
   const organizationOptions = Array.isArray(item?.organizationOptions) ? item.organizationOptions.filter(option =>
     idPattern.test(option?.sourceId) && idPattern.test(option?.targetId) && typeof option.associated === 'boolean' &&
     idPattern.test(option?.contactTargetId) && idPattern.test(option?.currentOrganizationTargetId ?? option.targetId)) : []
+  // One candidate with exactly the same email can be linked while ignoring phone/address differences.
+  const emailMatches = review.objectType === 'contacts' ? eligibleCandidates.filter(candidate => sameEmail(review.source?.email, candidate.snapshot?.email)) : []
+  const emailMatch = emailMatches.length === 1 ? emailMatches[0] : null
   const canChooseOrganization = organizationOptions.length > 0
   const organizationGate = !canChooseOrganization && idPattern.test(item?.organizationGate?.sourceId)
     ? { sourceId: item.organizationGate.sourceId, reviewId: typeof item.organizationGate.reviewId === 'string' && item.organizationGate.reviewId ? item.organizationGate.reviewId : null } : null
@@ -113,6 +118,9 @@ export default function SampleReviewResolution({ item, busy = false, onResolve, 
         setMessage('Choose a source of truth for every differing field before continuing.'); return
       }
       decision = { action, fieldChoices: Object.fromEntries(fields.map(field => [field.key, choices[field.key]])) }
+    } else if (action === 'link_email_match') {
+      if (!emailMatch) return
+      decision = { action: 'link_existing', candidateId: emailMatch.id, approveManyToOne: true, ignoreContactDifferences: true }
     } else if (action === 'link_existing') {
       if (!eligibleCandidates.some(candidate => candidate.id === candidateId)) { setMessage('Choose a valid Albi candidate.'); return }
       decision = { action, candidateId, approveManyToOne }
@@ -211,6 +219,8 @@ export default function SampleReviewResolution({ item, busy = false, onResolve, 
 
     {canAct && review.actions.includes('link_existing') && eligibleCandidates.length > 0 && <div className="mt-5 space-y-3 rounded-lg border border-gray-200 p-4">
       <h5 className="text-sm font-semibold text-gray-900">Link an existing Albi record</h5>
+      {emailMatch && <div className="rounded-lg border border-brand-200 bg-brand-50 p-3"><p className="text-xs leading-5 text-gray-800">Albi ID {emailMatch.id} has exactly the same email. Link it and ignore phone and address differences; names, email and other fields still count.</p>
+        <button type="button" className={`${primary} mt-2`} disabled={effectiveBusy} onClick={() => open('link_email_match')}>Link, emails match (ignore phone/address)</button></div>}
       <label className="block text-xs font-medium text-gray-700">Albi candidate<select value={candidateId} onChange={event => changed(choices, event.target.value, organizationSourceId, event.target.value !== '' && event.target.value !== 'new')} className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:ring-2 focus:ring-brand-500"><option value="">Choose candidate</option>{eligibleCandidates.map(candidate => <option key={candidate.id} value={candidate.id}>Albi ID {candidate.id}</option>)}{review.actions.includes('force_create_albi') && <option value="new">{`Add new ${review.objectType === 'contacts' ? 'contact' : 'organization'} in Albi`}</option>}</select></label>
       {candidateId === 'new' ? <div className="rounded-lg border border-red-200 bg-red-50 p-3"><h6 className="text-sm font-semibold text-red-950">These records are different</h6>
         <p className="mt-1 text-xs leading-5 text-red-900">Create a new Albi record and deliberately ignore the listed match candidates. This can create a duplicate, so the server rechecks every record before applying it.</p>
@@ -252,7 +262,7 @@ export default function SampleReviewResolution({ item, busy = false, onResolve, 
           <section className="rounded-lg border border-amber-200 bg-amber-50 p-3"><h4 className="text-sm font-semibold text-amber-900">You’ll update this in Albi</h4>{confirmation.preview.albiTasks.length ? <ul className="mt-2 space-y-1 text-xs text-amber-900">{confirmation.preview.albiTasks.map(task => <li key={task.field}>{task.field}: {display(task.value)}</li>)}</ul> : <p className="mt-2 text-xs text-amber-800">{confirmation.preview.mapping?.createAlbi ? 'New Record created' : 'None'}</p>}</section></div>
         {confirmation.preview.mapping && <p className={`mt-3 rounded-lg p-3 text-sm ${confirmation.preview.mapping.forced ? 'border border-red-200 bg-red-50 text-red-950' : 'bg-gray-50 text-gray-800'}`}>{confirmation.preview.mapping.forced
           ? `Creates a separate Albi record, ignores ${confirmation.preview.mapping.ignoredCandidateIds.length} listed candidate${confirmation.preview.mapping.ignoredCandidateIds.length === 1 ? '' : 's'}, and saves the new mapping. A duplicate may be created.`
-          : confirmation.preview.mapping.createAlbi ? 'Creates an Albi record and saves its mapping.' : `Saves a mapping to Albi record ${confirmation.preview.mapping.targetId}.`}</p>}
+          : confirmation.preview.mapping.createAlbi ? 'Creates an Albi record and saves its mapping.' : `Saves a mapping to Albi record ${confirmation.preview.mapping.targetId}.${confirmation.preview.mapping.ignoreContactDifferences ? ' The emails match, so phone and address differences will be ignored.' : ''}`}</p>}
         {confirmation.decision.referralSourceId && <p className="mt-3 rounded-lg bg-gray-50 p-3 text-sm text-gray-800">Referral source: {referralSources.find(source => source.id === confirmation.decision.referralSourceId)?.label ?? confirmation.decision.referralSourceId}</p>}
         {confirmation.preview.association && <p className="mt-3 rounded-lg bg-gray-50 p-3 text-sm text-gray-800">Saves HubSpot organization {confirmation.preview.association.organizationSourceId} as context. {confirmation.preview.association.addHubSpotAssociation ? 'Adds HubSpot association. ' : ''}Existing HubSpot associations will not be removed.</p>}
         <div className="mt-5 flex flex-row-reverse flex-wrap gap-2" aria-busy={effectiveBusy}><button ref={confirmRef} type="button" className={primary} disabled={effectiveBusy} onClick={submit}>{effectiveBusy ? 'Applying…' : message.startsWith('Resolution failed') ? 'Retry resolution' : 'Confirm resolution'}</button>

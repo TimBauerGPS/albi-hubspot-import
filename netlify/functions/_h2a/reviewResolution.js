@@ -1,13 +1,13 @@
 import { createHash } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
-import { H2A_REVIEW_ERROR_CATEGORIES, H2A_REVIEW_ERROR_CODES, getH2AReviewActions } from '../../../shared/h2aReviewReasons.js'
+import { H2A_REVIEW_ERROR_CATEGORIES, H2A_REVIEW_ERROR_CODES, getH2AReviewActions, sameH2AEmail } from '../../../shared/h2aReviewReasons.js'
 import { buildAlbiRecordUrl } from '../../../shared/h2aProviderLinks.js'
 import { resolveContactType } from './options.js'
 import { normalizePhone } from './normalize.js'
 
 const ACTION_FIELDS = Object.freeze({
   resolve_fields: new Set(['fieldChoices']),
-  link_existing: new Set(['candidateId', 'approveManyToOne']),
+  link_existing: new Set(['candidateId', 'approveManyToOne', 'ignoreContactDifferences']),
   create_albi: new Set(['referralSourceId']),
   force_create_albi: new Set(['ignoredCandidateIds', 'referralSourceId']),
   choose_organization: new Set(['organizationSourceId', 'addHubSpotAssociation']),
@@ -64,6 +64,10 @@ export function normalizeResolutionDecision(input) {
       if (!isResolutionProviderId(input[field])) throw new TypeError('Invalid resolution provider identity')
       decision[field] = input[field]
     }
+  }
+  if (ACTION_FIELDS[input.action].has('ignoreContactDifferences') && Object.hasOwn(input, 'ignoreContactDifferences')) {
+    if (input.ignoreContactDifferences !== true) throw new TypeError('Invalid email-match approval')
+    decision.ignoreContactDifferences = true
   }
   for (const field of ['approveManyToOne', 'addHubSpotAssociation']) {
     if (Object.hasOwn(input, field)) {
@@ -256,6 +260,9 @@ export function buildReviewResolutionPlan(input) {
   } else if (decision.action === 'link_existing') {
     const albi = reviewedAlbi(input, review, type)
     if (decision.candidateId !== albi.id) invalidPlan()
+    // Ignoring phone/address differences is only allowed for a contact whose email matches exactly.
+    if (decision.ignoreContactDifferences === true && (type !== 'contacts' ||
+      !sameH2AEmail(fieldValue(hubspot, ['email'], false), fieldValue(albi, FIELD_METADATA.contacts.email.albi, false)))) invalidPlan()
     const mappings = mappingRows(input, portalId)
     if (mappings.some(row => mappingSource(row) === sourceId && mappingTarget(row, type) !== albi.id) ||
       list(input.mappings).some(row => !sameMappingSource(row, sourceId, portalId) && mappingTarget(row, type) === albi.id) && !decision.approveManyToOne) invalidPlan()

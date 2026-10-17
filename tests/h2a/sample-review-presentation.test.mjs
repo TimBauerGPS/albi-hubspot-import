@@ -76,7 +76,10 @@ test('confirmation separates mixed writes and manual tasks and retains explicit 
   assert.deepEqual(buildResolutionConfirmation({ review, decision: { action: 'resolve_fields', fieldChoices: { city: 'albi' } } }).hubspotWrites,
     [{ field: 'City', value: null }])
   assert.throws(() => buildResolutionConfirmation({ review, decision: { action: 'resolve_fields', fieldChoices: { id: 'albi' } } }), TypeError)
-  assert.throws(() => buildResolutionConfirmation({ review, decision: { action: 'link_existing', candidateId: '2590478' } }), TypeError)
+  // Contact field reviews may confirm the link (for example, emails match and phone/address are ignored).
+  assert.equal(buildResolutionConfirmation({ review, decision: { action: 'link_existing', candidateId: '2590478' } }).mapping.targetId, '2590478')
+  const company = presentSampleReviewItem({ reason: 'nonblank_field_difference', objectType: 'companies', sourceId: '34', candidateSnapshots: [{ id: '2590478' }] })
+  assert.throws(() => buildResolutionConfirmation({ review: company, decision: { action: 'link_existing', candidateId: '2590478' } }), TypeError)
 })
 
 test('identity and organization confirmation name the consequence without trusting incoming links', () => {

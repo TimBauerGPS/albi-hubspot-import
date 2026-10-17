@@ -755,3 +755,16 @@ test('surrounding whitespace in live HubSpot values does not make a field resolu
   assert.deepEqual(f.events.at(-1).details.manualTasks[0].fields,
     [{ field: 'city', value: 'Newport Beach' }, { field: 'jobTitle', value: 'Director of engineering' }])
 })
+
+test('an email-match link saves the mapping from captured evidence without enumerating Albi', async () => {
+  const f = fixture(); f.row.reason = 'nonblank_field_difference'
+  f.source.properties.email = 'same@example.com'; f.row.source_snapshot.email = 'same@example.com'
+  f.row.candidate_snapshots = [{ ...f.row.candidate_snapshots[0], email: 'Same@Example.com' }]
+  f.row.proposed_changes = { conflicts: {}, updates: {} }
+  f.deps.albiRead.listContacts = async () => { throw Error('must not enumerate Albi contacts') }
+  const result = await executeReviewResolution(f.deps, { ...input,
+    decision: { action: 'link_existing', candidateId: '20', approveManyToOne: true, ignoreContactDifferences: true } })
+  assert.equal(result.resolution.status, 'ready_to_recheck')
+  assert.equal(f.mappings.contacts[0].albi_contact_id, '20')
+  assert.deepEqual(mutations(f), [])
+})

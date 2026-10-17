@@ -503,3 +503,19 @@ test('stale diagnostics are allowlisted in public event details', () => {
     { staleCheck: 'source', staleFields: ['email'] })
   assert.deepEqual(safeResolutionEventDetails({ staleCheck: 'secret', staleFields: 'email' }), {})
 })
+
+test('an email-match link may ignore phone/address differences only when the emails match exactly', () => {
+  assert.deepEqual(normalizeResolutionDecision({ action: 'link_existing', candidateId: '2590478', approveManyToOne: true, ignoreContactDifferences: true }),
+    { action: 'link_existing', candidateId: '2590478', approveManyToOne: true, ignoreContactDifferences: true })
+  for (const bad of [false, 'yes', 1]) assert.throws(() => normalizeResolutionDecision({ action: 'link_existing', candidateId: '1', ignoreContactDifferences: bad }), TypeError)
+  const input = fieldsInput()
+  input.hubspot.properties.email = ' Same@Example.com '
+  input.albi.email = 'same@example.com'
+  input.decision = { action: 'link_existing', candidateId: '2590478', ignoreContactDifferences: true }
+  assert.equal(plan(input).mapping.targetId, '2590478')
+  assert.deepEqual(plan(input).manualTasks, [])
+  input.albi.email = 'other@example.com'
+  assert.throws(() => plan(input), TypeError)
+  input.albi.email = 'same@example.com'; input.hubspot.properties.email = ''
+  assert.throws(() => plan(input), TypeError)
+})

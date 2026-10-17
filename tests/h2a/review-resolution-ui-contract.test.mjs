@@ -293,3 +293,22 @@ test('the link dropdown offers adding a new Albi record and explains when it is 
   assert.match(unavailable.text(), /already linked to an Albi record/)
   assert.equal(unavailable.find('button', 'Create a separate Albi record'), undefined)
 })
+
+test('the email-match link button appears only for one exact email match and links without Albi tasks', async () => {
+  const item = { ...base, reason: 'albi_contact_update_contract_unverified',
+    sourceSnapshot: { id: '123', firstName: 'Alex', lastName: 'Stone', email: 'Alex@Example.com', phoneNumber: '5551112222' },
+    candidateSnapshots: [{ id: '456', firstName: 'Alex', lastName: 'Stone', email: 'alex@example.com', phoneNumber: '555-999-0000' }],
+    proposedChanges: { conflicts: { phoneNumber: { proposed: '5551112222', current: '555-999-0000' } } } }
+  const calls = []
+  const ui = await mount(item, async (...args) => { calls.push(args); return { resolution: { status: 'ready_to_recheck' } } })
+  ui.find('button', 'Link, emails match (ignore phone/address)').props.onClick(); await ui.flush()
+  assert.match(ui.text(), /phone and address differences will be ignored/i)
+  await ui.find('button', 'Confirm resolution').props.onClick(); await ui.flush()
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[0][0])), { action: 'link_existing', candidateId: '456', approveManyToOne: true, ignoreContactDifferences: true })
+  const differentEmail = await render({ ...item, candidateSnapshots: [{ ...item.candidateSnapshots[0], email: 'other@example.com' }] })
+  assert.doesNotMatch(differentEmail, /emails match/)
+  const twoMatches = await render({ ...item, candidateSnapshots: [item.candidateSnapshots[0], { ...item.candidateSnapshots[0], id: '457' }] })
+  assert.doesNotMatch(twoMatches, /emails match/)
+  const organization = await render({ ...item, objectType: 'companies' })
+  assert.doesNotMatch(organization, /emails match/)
+})

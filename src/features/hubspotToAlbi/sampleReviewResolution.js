@@ -8,7 +8,7 @@ export const RESOLUTION_FIELDS = Object.freeze({
 const LABELS = Object.freeze({ firstName: 'First name', lastName: 'Last name', email: 'Email', phoneNumber: 'Phone',
   mobileNumber: 'Mobile', jobTitle: 'Job title', address1: 'Address', address2: 'Address line 2', city: 'City',
   state: 'State / region', zipcode: 'Postal code', country: 'Country', name: 'Name', domain: 'Domain', organizationId: 'Organization ID' })
-const ACTION_FIELDS = Object.freeze({ resolve_fields: ['fieldChoices'], link_existing: ['candidateId', 'approveManyToOne'],
+const ACTION_FIELDS = Object.freeze({ resolve_fields: ['fieldChoices'], link_existing: ['candidateId', 'approveManyToOne', 'ignoreContactDifferences'],
   create_albi: ['referralSourceId'], force_create_albi: ['ignoredCandidateIds', 'referralSourceId'], choose_organization: ['organizationSourceId', 'addHubSpotAssociation'] })
 const STATUS_LABELS = Object.freeze({ pending: 'Pending', applying: 'Applying', waiting_on_albi: 'Waiting on Albi',
   ready_to_recheck: 'Ready to recheck', completed: 'Completed', failed: 'Failed', superseded: 'Superseded' })
@@ -52,6 +52,10 @@ function decision(input) {
   for (const field of ['candidateId', 'organizationSourceId']) if (ACTION_FIELDS[input.action].includes(field)) {
     if (!id(input[field])) fail()
     result[field] = input[field]
+  }
+  if (ACTION_FIELDS[input.action].includes('ignoreContactDifferences') && Object.hasOwn(input, 'ignoreContactDifferences')) {
+    if (input.ignoreContactDifferences !== true) fail()
+    result.ignoreContactDifferences = true
   }
   for (const field of ['approveManyToOne', 'addHubSpotAssociation']) if (Object.hasOwn(input, field)) {
     if (typeof input[field] !== 'boolean') fail()
@@ -142,7 +146,8 @@ export function buildResolutionConfirmation({ review, decision: input } = {}) {
   } else if (selected.action === 'link_existing') {
     if (!id(review.sourceId) || !(Array.isArray(review.candidates) ? review.candidates : []).some(item => item.id === selected.candidateId)) fail()
     result.mapping = { objectType: review.objectType, sourceId: review.sourceId, targetId: selected.candidateId,
-      approveManyToOne: selected.approveManyToOne === true, url: buildAlbiRecordUrl(review.objectType, selected.candidateId) }
+      approveManyToOne: selected.approveManyToOne === true, url: buildAlbiRecordUrl(review.objectType, selected.candidateId),
+      ...(selected.ignoreContactDifferences === true ? { ignoreContactDifferences: true } : {}) }
   } else if (selected.action === 'create_albi') {
     if (!id(review.sourceId)) fail()
     result.mapping = { objectType: review.objectType, sourceId: review.sourceId, targetId: null, createAlbi: true }
