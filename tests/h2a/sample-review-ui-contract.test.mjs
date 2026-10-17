@@ -28,11 +28,18 @@ async function mount(overrides = {}) {
     tenantRevision: 0, completeTenantTransition: revision => completed.push(revision) }
   const completed = [], calls = [], navigations = []
   const navigate = (path, options) => navigations.push({ path, options })
-  const clients = Object.fromEntries(['getH2ADryRunReviews', 'getH2ADryRunReview', 'recheckH2ADryRunReview', 'resolveH2ADryRunReview', 'prepareH2AOrganizationReview'].map(name => [name, (...args) => {
+  const clients = Object.fromEntries(['getH2ADryRunReviews', 'getH2ADryRunReview', 'recheckH2ADryRunReview', 'resolveH2ADryRunReview', 'prepareH2AOrganizationReview',
+    'getH2ARecheckAll', 'startH2ARecheckAll'].map(name => [name, (...args) => {
     calls.push({ name, args })
     if (overrides[name]) return overrides[name](...args)
-    return Promise.resolve(name === 'getH2ADryRunReviews' ? page() : { item: full(args[2]) })
+    return Promise.resolve(name === 'getH2ADryRunReviews' ? page() : name === 'getH2ARecheckAll' ? { batch: null }
+      : name === 'startH2ARecheckAll' ? { status: 'queued', batch: { id: 'batch-1', status: 'queued', total: 0, done: 0 } } : { item: full(args[2]) })
   }]))
+  // Timers are manual so polling is driven explicitly by tests.
+  const timers = new Map()
+  let timerId = 0
+  const setTimeout = callback => { timers.set(++timerId, callback); return timerId }
+  const clearTimeout = id => { timers.delete(id) }
   const useState = initial => { const slot = index++; if (!(slot in slots)) slots[slot] = typeof initial === 'function' ? initial() : initial
     return [slots[slot], value => { slots[slot] = typeof value === 'function' ? value(slots[slot]) : value; dirty = true }] }
   const useRef = initial => { const slot = index++; return slots[slot] ??= { current: initial } }
@@ -45,7 +52,7 @@ async function mount(overrides = {}) {
   const code = transformSync(source.replace(/^import[\s\S]*?from ['"][^'"]+['"]\s*$/gm, '').replace('export default function', 'function'),
     { loader: 'jsx', jsxFactory: 'h', jsxFragment: 'Fragment' }).code
   const component = vm.runInNewContext(`${code}\nSampleReviewPage`, { ...presentation, presentSampleReviewQueryFilters, ...clients, h, Fragment: 'fragment',
-    useState, useRef, useEffect, useCallback, useOutletContext: () => context, AbortController, Intl, Date, Set, Map,
+    useState, useRef, useEffect, useCallback, useOutletContext: () => context, AbortController, Intl, Date, Set, Map, setTimeout, clearTimeout,
     useLocation: () => ({ pathname: '/hubspot-to-albi/sample-review', search: overrides.locationSearch ?? '' }),
     useNavigate: () => navigate, URLSearchParams,
     Link: function Link() {}, SampleReviewDetail: function SampleReviewDetail() {} })
@@ -55,7 +62,8 @@ async function mount(overrides = {}) {
   } return tree }
   await flush()
   const nodes = () => { const all = []; const walk = node => { if (!node || typeof node !== 'object') return; all.push(node); node.children?.forEach(walk) }; walk(tree); return all }
-  return { context, calls, completed, navigations, flush, nodes, text: () => JSON.stringify(tree),
+  const tick = async () => { const due = [...timers.values()]; timers.clear(); due.forEach(callback => callback()); return flush() }
+  return { context, calls, completed, navigations, flush, nodes, tick, timers, text: () => JSON.stringify(tree),
     rerender: () => { dirty = true; return flush() },
     find: (type, text) => nodes().find(node => node.type === type && JSON.stringify(node.children).includes(text)),
     detail: () => nodes().find(node => node.type === 'SampleReviewDetail'),
@@ -505,4 +513,53 @@ test('the queue reminds the reviewer which records are waiting on an Albi update
   const clear = await mount()
   assert.doesNotMatch(clear.text(), /waiting on an Albi update/)
   clear.unmount()
+})
+
+const batch = extra => ({ id: 'batch-1', status: 'running', total: 4, done: 1, cleared: 1, stillNeedsReview: 0,
+  noLongerInScope: 0, stale: 0, failed: 0, errorCode: null, ...extra })
+
+test('recheck all starts one batch, shows polled progress, and reloads the queue when it finishes', async () => {
+  const statuses = [{ batch: null }, { batch: batch() }, { batch: batch({ done: 3, cleared: 2, stillNeedsReview: 1 }) },
+    { batch: batch({ status: 'completed', done: 4, cleared: 3, stillNeedsReview: 1 }) }]
+  const ui = await mount({ getH2ARecheckAll: () => Promise.resolve(statuses.shift() ?? { batch: batch({ status: 'completed', done: 4, cleared: 3, stillNeedsReview: 1 }) }) })
+  const button = () => ui.find('button', 'Recheck all')
+  assert.equal(button().props.disabled, false)
+  button().props.onClick(); await ui.flush()
+  assert.equal(ui.calls.filter(call => call.name === 'startH2ARecheckAll').length, 1)
+  assert.equal(ui.calls.find(call => call.name === 'startH2ARecheckAll').args[1], 'company-1')
+  assert.match(ui.text(), /Rechecking 1 of 4 open records/)
+  assert.equal(ui.find('button', 'Rechecking').props.disabled, true)
+  const listsBefore = ui.calls.filter(call => call.name === 'getH2ADryRunReviews').length
+  await ui.tick()
+  assert.match(ui.text(), /Rechecking 3 of 4 open records/)
+  await ui.tick()
+  assert.match(ui.text(), /Recheck all finished: 3 cleared, 1 still need review, 0 no longer in scope\./)
+  assert.equal(ui.calls.filter(call => call.name === 'getH2ADryRunReviews').length, listsBefore + 1)
+  assert.equal(ui.timers.size, 0)
+  ui.unmount()
+})
+
+test('recheck all resumes showing an active batch on load and hides old finished batches', async () => {
+  const active = await mount({ getH2ARecheckAll: () => Promise.resolve({ batch: batch() }) })
+  assert.match(active.text(), /Rechecking 1 of 4 open records/)
+  assert.equal(active.timers.size, 1)
+  active.unmount()
+  const old = await mount({ getH2ARecheckAll: () => Promise.resolve({ batch: batch({ status: 'completed', done: 4 }) }) })
+  assert.doesNotMatch(old.text(), /Recheck all finished/)
+  assert.equal(old.find('button', 'Recheck all').props.disabled, false)
+  old.unmount()
+})
+
+test('recheck all start failures are shown without starting polling', async () => {
+  const ui = await mount({ startH2ARecheckAll: () => Promise.reject(new Error('Unable to start rechecking all reviews.')) })
+  ui.find('button', 'Recheck all').props.onClick(); await ui.flush()
+  assert.match(ui.text(), /Unable to start rechecking all reviews\./)
+  assert.equal(ui.find('button', 'Recheck all').props.disabled, false)
+  ui.unmount()
+})
+
+test('recheck all is disabled when nothing needs review', async () => {
+  const ui = await mount({ getH2ADryRunReviews: () => Promise.resolve(page([row()], { progress: { ...progress, needsReview: 0, cleared: 2 } })) })
+  assert.equal(ui.find('button', 'Recheck all').props.disabled, true)
+  ui.unmount()
 })

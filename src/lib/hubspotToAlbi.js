@@ -45,6 +45,8 @@ const SAFE_SERVER_MESSAGES = Object.freeze({
   'Invalid request body.': 'Invalid request body.',
   'Invalid sample review cursor.': 'Invalid sample review cursor.',
   'Invalid sample review request.': 'Invalid sample review request.',
+  'Unable to start rechecking all reviews.': 'Unable to start rechecking all reviews.',
+  'Unable to load recheck progress.': 'Unable to load recheck progress.',
   'Invalid sync mode.': 'Invalid sync mode.',
   'Linking requires an explicit target ID.': 'Linking requires an explicit target ID.',
   'Many-to-one approval must be boolean.': 'Many-to-one approval must be boolean.',
@@ -230,6 +232,15 @@ export function recheckH2ADryRunReview(session, companyId, input = {}, { signal 
     method: 'POST', companyId,
     body: { reviewId: input?.reviewId, expectedUpdatedAt: input?.expectedUpdatedAt }, signal,
   })
+}
+
+// Queues one background recheck of every open review in the current sample; poll getH2ARecheckAll for progress.
+export function startH2ARecheckAll(session, companyId, { signal } = {}) {
+  return request(session, 'h2a-dry-run-review-recheck-all', { method: 'POST', companyId, body: {}, signal })
+}
+
+export function getH2ARecheckAll(session, companyId, { signal } = {}) {
+  return request(session, 'h2a-dry-run-review-recheck-all', { companyId, signal })
 }
 
 // Captures (or finds) the one associated organization's own review so it can be created before the contact.

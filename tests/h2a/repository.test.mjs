@@ -19,7 +19,7 @@ function reviewRepositoryFixture(responses = []) {
       const call = { table, steps: [] }
       calls.push(call)
       const query = {}
-      for (const method of ['select', 'eq', 'neq', 'in', 'gt', 'order', 'limit', 'range', 'or', 'insert', 'update', 'delete']) {
+      for (const method of ['select', 'eq', 'neq', 'in', 'gt', 'lt', 'order', 'limit', 'range', 'or', 'insert', 'update', 'delete']) {
         query[method] = (...args) => { call.steps.push([method, ...args]); return query }
       }
       const finish = () => {
@@ -989,4 +989,59 @@ test('a skipped activity in an old portal does not suppress that ID in a new por
   assert.equal(await repository.isSkippedItem('company-1', 'new-portal', 'calls', 'activity-1'), false)
   assert.equal(filtersByLookup.length, 2)
   assert.ok(filtersByLookup.every(filters => filters.some(([key, value]) => key === 'portal_id' && value === 'new-portal')))
+})
+
+const BATCH_ID = '00000000-0000-4000-8000-0000000000b1'
+const BATCH_TIME = '2026-10-12T12:00:00.000Z'
+const batchRow = { id: BATCH_ID, company_id: 'company-1', run_id: 'sample-2', requested_by: ACTOR_ID, status: 'queued',
+  total: 0, done: 0, cleared: 0, still_needs_review: 0, no_longer_in_scope: 0, stale: 0, failed: 0, error_code: null,
+  heartbeat_at: BATCH_TIME, started_at: null, finished_at: null, created_at: BATCH_TIME, updated_at: BATCH_TIME }
+
+test('recheck batch creation expires abandoned batches first, then inserts one queued batch per company', async () => {
+  const { repository, calls } = reviewRepositoryFixture([data([]), data(batchRow)])
+  const result = await repository.createReviewRecheckBatch('company-1', { runId: 'sample-2', requestedBy: ACTOR_ID,
+    now: BATCH_TIME, staleBefore: '2026-10-12T11:40:00.000Z' })
+  assert.equal(result.batch.id, BATCH_ID)
+  assert.equal(calls[0].table, 'h2a_review_recheck_batches')
+  assert.deepEqual(calls[0].steps.find(step => step[0] === 'update')[1], { status: 'failed', error_code: 'expired',
+    finished_at: BATCH_TIME, updated_at: BATCH_TIME })
+  assert.deepEqual(calls[0].steps.find(step => step[0] === 'in'), ['in', 'status', ['queued', 'running']])
+  assert.deepEqual(calls[0].steps.find(step => step[0] === 'lt'), ['lt', 'heartbeat_at', '2026-10-12T11:40:00.000Z'])
+  assert.deepEqual(equalityFilters(calls[0]), [['company_id', 'company-1']])
+  assert.deepEqual(calls[1].steps.find(step => step[0] === 'insert')[1], { company_id: 'company-1', run_id: 'sample-2',
+    requested_by: ACTOR_ID, status: 'queued', heartbeat_at: BATCH_TIME, created_at: BATCH_TIME, updated_at: BATCH_TIME })
+})
+
+test('a second concurrent batch returns the active one instead of starting another', async () => {
+  const { repository } = reviewRepositoryFixture([data([]), { data: null, error: { code: '23505' } },
+    data({ ...batchRow, status: 'running' })])
+  const result = await repository.createReviewRecheckBatch('company-1', { runId: 'sample-2', requestedBy: ACTOR_ID,
+    now: BATCH_TIME, staleBefore: BATCH_TIME })
+  assert.equal(result.error, 'active')
+  assert.equal(result.batch.status, 'running')
+})
+
+test('recheck batch claim, heartbeat and finish are conditional state transitions under company scope', async () => {
+  const { repository, calls } = reviewRepositoryFixture([data({ ...batchRow, status: 'running' }), data(null),
+    data([{ id: BATCH_ID }]), data([{ id: BATCH_ID }])])
+  const counts = { total: 3, done: 1, cleared: 1, stillNeedsReview: 0, noLongerInScope: 0, stale: 0, failed: 0 }
+  assert.equal((await repository.claimReviewRecheckBatch('company-1', BATCH_ID, BATCH_TIME)).status, 'running')
+  assert.deepEqual(equalityFilters(calls[0]), [['company_id', 'company-1'], ['id', BATCH_ID], ['status', 'queued']])
+  assert.equal(await repository.claimReviewRecheckBatch('company-1', BATCH_ID, BATCH_TIME), null)
+  assert.equal(await repository.updateReviewRecheckBatch('company-1', BATCH_ID, { counts, now: BATCH_TIME }), true)
+  assert.deepEqual(equalityFilters(calls[2]), [['company_id', 'company-1'], ['id', BATCH_ID], ['status', 'running']])
+  assert.deepEqual(calls[2].steps.find(step => step[0] === 'update')[1], { total: 3, done: 1, cleared: 1, still_needs_review: 0,
+    no_longer_in_scope: 0, stale: 0, failed: 0, heartbeat_at: BATCH_TIME, updated_at: BATCH_TIME })
+  assert.equal(await repository.finishReviewRecheckBatch('company-1', BATCH_ID, { status: 'failed', errorCode: 'timeout', counts, now: BATCH_TIME }), true)
+  assert.equal(calls[3].steps.find(step => step[0] === 'update')[1].status, 'failed')
+  assert.equal(calls[3].steps.find(step => step[0] === 'update')[1].error_code, 'timeout')
+})
+
+test('recheck batch writes reject unknown statuses, error codes and malformed counts before storage', async () => {
+  const { repository } = reviewRepositoryFixture([])
+  const counts = { total: 1, done: 0, cleared: 0, stillNeedsReview: 0, noLongerInScope: 0, stale: 0, failed: 0 }
+  await assert.rejects(repository.finishReviewRecheckBatch('company-1', BATCH_ID, { status: 'running', errorCode: null, counts }), TypeError)
+  await assert.rejects(repository.finishReviewRecheckBatch('company-1', BATCH_ID, { status: 'failed', errorCode: 'secret text', counts }), TypeError)
+  await assert.rejects(repository.updateReviewRecheckBatch('company-1', BATCH_ID, { counts: { ...counts, done: -1 } }), TypeError)
+  await assert.rejects(repository.claimReviewRecheckBatch('', BATCH_ID), TypeError)
 })

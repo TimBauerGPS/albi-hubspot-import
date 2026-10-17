@@ -103,6 +103,33 @@ export function presentSampleReviewItem(item) {
   }
 }
 
+// Progress and outcome copy for a "Recheck all" batch polled from the server.
+export function presentRecheckAllBatch(batch) {
+  const value = safeRecord(batch)
+  if (!['queued', 'running', 'completed', 'failed'].includes(value.status)) return null
+  const count = number => Number.isSafeInteger(number) && number >= 0 ? number : 0
+  const total = count(value.total), done = Math.min(count(value.done), total)
+  const percent = total ? Math.round(done / total * 100) : value.status === 'completed' ? 100 : 0
+  if (value.status === 'queued' || value.status === 'running') {
+    return { active: true, tone: 'info', percent, message: total
+      ? `Rechecking ${done} of ${total} open records…` : 'Reading the latest Albi and HubSpot records…' }
+  }
+  if (value.status === 'completed') {
+    if (!total) return { active: false, tone: 'success', percent, message: 'There were no open records to recheck.' }
+    const stale = count(value.stale), failed = count(value.failed)
+    const message = [`Recheck all finished: ${count(value.cleared)} cleared, ${count(value.stillNeedsReview)} still need review, ${count(value.noLongerInScope)} no longer in scope.`,
+      stale ? `${stale} changed during the recheck and were skipped.` : '',
+      failed ? `${failed} could not be rechecked; open them to retry.` : ''].filter(Boolean).join(' ')
+    return { active: false, tone: stale || failed ? 'warning' : 'success', percent, message }
+  }
+  const progress = `${done} of ${total} records`
+  const message = value.errorCode === 'superseded' ? `A newer sample replaced this one, so recheck all stopped after ${progress}. Reload the queue.`
+    : value.errorCode === 'timeout' ? `Recheck all stopped after ${progress}. Run it again to recheck the rest.`
+      : done ? `Recheck all stopped unexpectedly after ${progress}. Run it again to recheck the rest.`
+        : 'Recheck all could not read the latest Albi or HubSpot records. No records were changed. Try again.'
+  return { active: false, tone: 'error', percent, message }
+}
+
 export function presentSampleReviewProgress(progress) {
   const value = safeRecord(progress)
   const count = number => Number.isSafeInteger(number) && number >= 0 ? number : 0

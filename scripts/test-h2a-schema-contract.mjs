@@ -7,6 +7,7 @@ const schemaUrl = new URL('../supabase/h2a-schema.sql', import.meta.url)
 const sampleMigrationUrl = new URL('../supabase/h2a-dry-run-samples.sql', import.meta.url)
 const reviewMigrationUrl = new URL('../supabase/h2a-dry-run-review-workflow.sql', import.meta.url)
 const resolutionMigrationUrl = new URL('../supabase/h2a-review-resolutions.sql', import.meta.url)
+const recheckBatchMigrationUrl = new URL('../supabase/h2a-review-recheck-batches.sql', import.meta.url)
 const mappingOwnershipMigrationUrl = new URL('../supabase/h2a-mapping-target-ownership.sql', import.meta.url)
 const requiredTables = [
   'h2a_company_config', 'h2a_option_mappings', 'h2a_sync_runs',
@@ -17,8 +18,10 @@ const requiredTables = [
   'h2a_run_checkpoints',
   'h2a_dry_run_reviews', 'h2a_dry_run_review_events',
   'h2a_dry_run_review_resolutions', 'h2a_dry_run_review_resolution_events', 'h2a_contact_organization_choices',
+  'h2a_review_recheck_batches',
 ]
 const serviceOnlyTables = ['h2a_dry_run_reviews', 'h2a_dry_run_review_events']
+const batchTables = ['h2a_review_recheck_batches']
 const resolutionTables = ['h2a_dry_run_review_resolutions', 'h2a_dry_run_review_resolution_events', 'h2a_contact_organization_choices']
 const readSchema = () => readFileSync(schemaUrl, 'utf8').replace(/--[^\n]*/g, '').toLowerCase()
 const readSampleMigration = () => readFileSync(sampleMigrationUrl, 'utf8').replace(/--[^\n]*/g, '').toLowerCase()
@@ -48,7 +51,7 @@ test('all tenant tables have UUID keys, ownership, RLS, and authenticated read-o
     assert.match(body, /\buuid primary key/)
     assert.match(body, /company_id uuid (?:primary key|not null)/)
     assert.match(sql, new RegExp(`alter table public\\.${table} enable row level security;`))
-    if ([...serviceOnlyTables, ...resolutionTables].includes(table)) {
+    if ([...serviceOnlyTables, ...resolutionTables, ...batchTables].includes(table)) {
       assert.match(sql, new RegExp(`revoke all on table public\\.${table} from public, anon, authenticated, service_role;`))
       assert.doesNotMatch(sql, new RegExp(`grant [^;]*on (?:table )?public\\.${table} to authenticated;`))
       assert.doesNotMatch(sql, new RegExp(`create policy[^;]+on public\\.${table}`))
@@ -610,4 +613,28 @@ test('targeted resume dispatch claims are fenced and remain retryable until acce
   assert.match(functionBody(sql, 'h2a_finish_conflict_resume'), /p_accepted and not worker_failed then 'dispatched' else 'pending'/)
   assert.match(functionBody(sql, 'h2a_finish_conflict_resume'), /dispatch_owner_token = p_owner_token/)
   assert.match(functionBody(sql, 'h2a_requeue_conflict_resume'), /worker_failed = true/)
+})
+
+test('recheck batches allow one active batch per company and stay service-only in migration and canonical schema', () => {
+  assert.ok(existsSync(recheckBatchMigrationUrl), 'deployable recheck batch migration must exist')
+  const migration = readFileSync(recheckBatchMigrationUrl, 'utf8').replace(/--[^\n]*/g, '').toLowerCase()
+  for (const sql of [readSchema(), migration]) {
+    const body = tableBody(sql, sql === migration ? 'if not exists public.h2a_review_recheck_batches' : 'public.h2a_review_recheck_batches')
+    assert.match(body, /id uuid primary key default gen_random_uuid\(\)/)
+    assert.match(body, /company_id uuid not null references public\.companies\(id\)/)
+    assert.match(body, /foreign key \(company_id, run_id\) references public\.h2a_sync_runs \(company_id, id\) on delete cascade/)
+    assert.match(body, /status text not null default 'queued' check \(status in \('queued', 'running', 'completed', 'failed'\)\)/)
+    for (const column of ['total', 'done', 'cleared', 'still_needs_review', 'no_longer_in_scope', 'stale', 'failed']) {
+      assert.match(body, new RegExp(`${column} integer not null default 0 check \\(${column} >= 0\\)`))
+    }
+    assert.match(body, /error_code text check \(error_code in \(/)
+    assert.match(sql, /create unique index (?:if not exists )?h2a_review_recheck_batches_one_active_idx\s+on public\.h2a_review_recheck_batches \(company_id\)\s+where status in \('queued', 'running'\)/)
+    assert.match(sql, /create index (?:if not exists )?\w+\s+on public\.h2a_review_recheck_batches \(requested_by\)/)
+    assert.match(sql, /create index (?:if not exists )?\w+\s+on public\.h2a_review_recheck_batches \(company_id, created_at desc, id desc\)/)
+    assert.match(sql, /alter table public\.h2a_review_recheck_batches enable row level security;/)
+    assert.match(sql, /revoke all on table public\.h2a_review_recheck_batches from public, anon, authenticated, service_role;/)
+    assert.match(sql, /grant select, insert, update on table public\.h2a_review_recheck_batches to service_role;/)
+    assert.doesNotMatch(sql, /grant [^;]*public\.h2a_review_recheck_batches to (?:public|anon|authenticated)/)
+    assert.doesNotMatch(sql, /create policy[^;]*public\.h2a_review_recheck_batches/)
+  }
 })

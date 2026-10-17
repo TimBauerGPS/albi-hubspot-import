@@ -104,6 +104,13 @@ async function listAll(deps, method, deadline) {
   throw pagination()
 }
 
+// A batch recheck walks Albi once and passes that snapshot to every row; a single recheck reads it live.
+function albiRecords(deps, albi, kind, deadline) {
+  const snapshot = deps.albiSnapshot?.[kind]
+  if (snapshot) return snapshot
+  return listAll(deps, kind === 'contacts' ? args => albi.listContacts(args) : args => albi.listOrganizations(args), deadline)
+}
+
 function exactSource(records, sourceId) {
   if (!Array.isArray(records)) malformed('review')
   if (records.length === 0) return null
@@ -202,7 +209,7 @@ export async function recheckDryRunReview(deps, { companyId, reviewId, actorId, 
       if (row.object_type === 'contacts' && typeof resolutionRepository.getContactOrganizationChoice === 'function') {
         organizationChoice = await bounded(deps, () => resolutionRepository.getContactOrganizationChoice(companyId, row.portal_id, row.source_id), deadline)
       }
-      const candidates = await listAll(deps, row.object_type === 'contacts' ? args => albi.listContacts(args) : args => albi.listOrganizations(args), deadline)
+      const candidates = await albiRecords(deps, albi, row.object_type === 'contacts' ? 'contacts' : 'organizations', deadline)
       const mappings = await bounded(deps, () => repository.getMappings(companyId), deadline)
       if (!mappings || !['contacts', 'organizations', 'options'].every(key => Array.isArray(mappings[key]))) malformed('review')
       if (row.object_type === 'companies') evaluation = evaluateOrganizationReview({ source, candidates, portalId: row.portal_id,
@@ -220,7 +227,7 @@ export async function recheckDryRunReview(deps, { companyId, reviewId, actorId, 
           if (!company || company.archived === true) organization = { outcome: 'needs_review' }
           else {
             availableCompanies.push(company)
-            const organizations = await listAll(deps, args => albi.listOrganizations(args), deadline)
+            const organizations = await albiRecords(deps, albi, 'organizations', deadline)
             const result = evaluateOrganizationReview({ source: company, candidates: organizations, portalId: row.portal_id,
               mappings: mappings.organizations, optionMappings: mappings.options })
             organization = organizationContext(result, organizations, mappings.organizations, id, row.portal_id, mappings.options)
@@ -272,4 +279,89 @@ export async function recheckDryRunReview(deps, { companyId, reviewId, actorId, 
   const { finalizeRecheckedResolution } = await import('./reviewResolutionService.js')
   await finalizeRecheckedResolution(deps, { companyId, reviewId, actorId }, result.review)
   return { review: result.review, sample, config }
+}
+
+// Batch rechecks read the open queue and claim, heartbeat and finish their own batch row.
+export function createReviewBatchCapabilities(repository) {
+  return Object.freeze({
+    repository: Object.freeze({ ...createReviewRepositoryCapabilities(repository),
+      listDryRunReviews: repository.listDryRunReviews.bind(repository) }),
+    batchRepository: Object.freeze({
+      claimReviewRecheckBatch: repository.claimReviewRecheckBatch.bind(repository),
+      updateReviewRecheckBatch: repository.updateReviewRecheckBatch.bind(repository),
+      finishReviewRecheckBatch: repository.finishReviewRecheckBatch.bind(repository),
+    }),
+  })
+}
+
+async function openReviews(repository, companyId, runId) {
+  const rows = []
+  let before = null
+  for (let page = 0; page < 100; page++) {
+    const result = await repository.listDryRunReviews(companyId, runId, { limit: 100, before, status: 'needs_review', objectType: null, reason: null })
+    if (!isRecord(result) || !Array.isArray(result.items)) malformed('review')
+    rows.push(...result.items.filter(row => ['contacts', 'companies'].includes(row?.object_type)))
+    const last = result.items.at(-1)
+    if (!result.hasMore || !last) return rows
+    before = { createdAt: last.created_at, id: last.id }
+  }
+  throw pagination()
+}
+
+// Rechecks every open review of the current sample against one Albi snapshot. Each row still goes
+// through recheckDryRunReview, so its audit events, stale check and resolution finalization are unchanged.
+export async function runReviewRecheckBatch(deps, { companyId, batchId }) {
+  const { repository, batchRepository } = deps
+  const batch = await batchRepository.claimReviewRecheckBatch(companyId, batchId, iso(deps))
+  if (!batch) return { status: 'not_claimed' }
+  const actorId = batch.requested_by
+  const counts = { total: 0, done: 0, cleared: 0, stillNeedsReview: 0, noLongerInScope: 0, stale: 0, failed: 0 }
+  const finish = async (status, errorCode = null) => {
+    await batchRepository.finishReviewRecheckBatch(companyId, batchId, { status, errorCode, counts: { ...counts } })
+    return { status, errorCode, counts: { ...counts } }
+  }
+  const started = clock(deps)
+  const deadline = started + Math.min(13 * 60000, Math.max(1, deps.batchDeadlineMs ?? 13 * 60000))
+  let rows, snapshot
+  try {
+    const { config, sample } = await resolveReviewSample(repository, companyId)
+    if (!sample || sample.id !== batch.run_id) return await finish('failed', 'superseded')
+    rows = await openReviews(repository, companyId, sample.id)
+    counts.total = rows.length
+    await batchRepository.updateReviewRecheckBatch(companyId, batchId, { counts: { ...counts } })
+    if (!rows.length) return await finish('completed')
+    const controller = new AbortController()
+    const abortTimer = setTimeout(() => controller.abort(), Math.max(1, deadline - clock(deps)))
+    try {
+      const clients = await bounded(deps, () => deps.getReadClients(companyId, config, { signal: controller.signal }), deadline)
+      const albi = clients.albiRead
+      snapshot = {
+        contacts: rows.some(row => row.object_type === 'contacts')
+          ? await listAll(deps, args => albi.listContacts(args), deadline) : [],
+        organizations: await listAll(deps, args => albi.listOrganizations(args), deadline),
+      }
+      snapshot.clients = clients
+    } finally { clearTimeout(abortTimer) }
+  } catch (error) {
+    return finish('failed', error instanceof H2AReviewError ? 'operation_failed' : fixedFailure(error).code)
+  }
+  const rowDeps = { ...deps, getReadClients: undefined, hubspotRead: snapshot.clients.hubspotRead, albiRead: snapshot.clients.albiRead,
+    albiSnapshot: { contacts: snapshot.contacts, organizations: snapshot.organizations } }
+  for (const row of rows) {
+    if (clock(deps) >= deadline) return finish('failed', 'timeout')
+    try {
+      const { review } = await recheckDryRunReview(rowDeps, { companyId, reviewId: row.id, actorId, expectedUpdatedAt: row.updated_at })
+      if (review.status === 'cleared') counts.cleared++
+      else if (review.status === 'no_longer_in_scope') counts.noLongerInScope++
+      else counts.stillNeedsReview++
+    } catch (error) {
+      if (error?.message === MESSAGES.superseded) return finish('failed', 'superseded')
+      if (error?.message === MESSAGES.stale || error?.message === MESSAGES.not_found) counts.stale++
+      else counts.failed++
+    }
+    counts.done++
+    // A false heartbeat means the batch row expired or finished elsewhere; another batch may now own the queue.
+    if (!await batchRepository.updateReviewRecheckBatch(companyId, batchId, { counts: { ...counts } })) return { status: 'lost', errorCode: null, counts: { ...counts } }
+  }
+  return finish('completed')
 }

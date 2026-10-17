@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate, useOutletContext } from 'react-router-dom'
-import { getH2ADryRunReview, getH2ADryRunReviews, prepareH2AOrganizationReview, recheckH2ADryRunReview, resolveH2ADryRunReview } from '../../lib/hubspotToAlbi'
-import { presentSampleReviewItem, presentSampleReviewProgress, SAMPLE_REVIEW_REASON_OPTIONS } from './sampleReview.js'
+import { getH2ADryRunReview, getH2ADryRunReviews, getH2ARecheckAll, prepareH2AOrganizationReview, recheckH2ADryRunReview, resolveH2ADryRunReview, startH2ARecheckAll } from '../../lib/hubspotToAlbi'
+import { presentRecheckAllBatch, presentSampleReviewItem, presentSampleReviewProgress, SAMPLE_REVIEW_REASON_OPTIONS } from './sampleReview.js'
 import { presentSampleReviewQueryFilters } from './preflightPresentation.js'
 import SampleReviewDetail from './SampleReviewDetail'
 
@@ -12,6 +12,9 @@ const statusTone = { needs_review: 'bg-amber-50 text-amber-800 ring-amber-600/20
 const resolutionLabels = { pending: 'Needs decision', applying: 'Applying', waiting_on_albi: 'Waiting on Albi',
   ready_to_recheck: 'Ready to recheck', completed: 'Completed', failed: 'Action failed', superseded: 'Superseded' }
 const initialFilters = { status: '', objectType: '', reason: '' }
+const RECHECK_ALL_POLL_MS = 3000
+const recheckAllTone = { info: 'border-brand-200 bg-brand-50 text-brand-800', success: 'border-green-200 bg-green-50 text-green-800',
+  warning: 'border-amber-200 bg-amber-50 text-amber-800', error: 'border-red-200 bg-red-50 text-red-800' }
 
 function queuePresentation(item) {
   return presentSampleReviewItem({ ...item, sourceSnapshot: item.sourceSnapshot ?? {
@@ -58,6 +61,12 @@ export default function SampleReviewPage() {
   const [busyId, setBusyId] = useState(null)
   const [retryToken, setRetryToken] = useState(0)
   const [detailRetry, setDetailRetry] = useState(0)
+  // "Recheck all" batch polled from the server; `watched` marks a batch this page saw running.
+  const [recheckAll, setRecheckAll] = useState(null)
+  const [recheckAllPoll, setRecheckAllPoll] = useState(0)
+  const [recheckAllStarting, setRecheckAllStarting] = useState(false)
+  const [recheckAllError, setRecheckAllError] = useState('')
+  const recheckAllWatching = useRef(null)
 
   const replaceItem = useCallback(item => {
     if (!item?.id) return
@@ -124,6 +133,55 @@ export default function SampleReviewPage() {
     })
     return () => { controller.abort(); controllers.current.delete(controller) }
   }, [companyId, session, tenantKey, selectedId, detailRetry, replaceItem])
+
+  useEffect(() => {
+    if (!companyId) return undefined
+    const controller = new AbortController()
+    const startedFor = tenantKey
+    let timer = null
+    const current = () => !controller.signal.aborted && tenantKeyRef.current === startedFor
+    const watching = () => recheckAllWatching.current?.tenant === startedFor ? recheckAllWatching.current.id : null
+    getH2ARecheckAll(session, companyId, { signal: controller.signal }).then(result => {
+      if (!current()) return
+      const batch = result?.batch ?? null
+      const active = batch?.status === 'queued' || batch?.status === 'running'
+      const watched = Boolean(batch?.id) && (active || watching() === batch.id)
+      if (active) {
+        recheckAllWatching.current = { tenant: startedFor, id: batch.id }
+        timer = setTimeout(() => setRecheckAllPoll(value => value + 1), RECHECK_ALL_POLL_MS)
+      } else if (watched) {
+        // The batch finished while this page watched it: reload the queue and progress counters.
+        recheckAllWatching.current = null
+        setRetryToken(value => value + 1)
+      }
+      setRecheckAll({ tenant: startedFor, batch, watched })
+      setRecheckAllError('')
+    }).catch(cause => {
+      if (!current() || cause?.name === 'AbortError') return
+      setRecheckAllError(cause.message)
+      if (watching()) timer = setTimeout(() => setRecheckAllPoll(value => value + 1), RECHECK_ALL_POLL_MS)
+    })
+    return () => { controller.abort(); clearTimeout(timer) }
+  }, [companyId, session, tenantKey, recheckAllPoll])
+
+  async function startRecheckAll() {
+    if (recheckAllStarting || !companyId) return
+    const startedFor = tenantKey
+    setRecheckAllStarting(true); setRecheckAllError('')
+    try {
+      const result = await startH2ARecheckAll(session, companyId)
+      if (tenantKeyRef.current !== startedFor) return
+      if (result?.batch?.id) {
+        recheckAllWatching.current = { tenant: startedFor, id: result.batch.id }
+        setRecheckAll({ tenant: startedFor, batch: result.batch, watched: true })
+      }
+      setRecheckAllPoll(value => value + 1)
+    } catch (cause) {
+      if (tenantKeyRef.current === startedFor) setRecheckAllError(cause.message)
+    } finally {
+      if (tenantKeyRef.current === startedFor) setRecheckAllStarting(false)
+    }
+  }
 
   async function loadMore() {
     if (!nextCursor || loadingMore || recheckLock.current) return
@@ -321,6 +379,9 @@ export default function SampleReviewPage() {
   const historical = sample && (sample.historical || sample.reviewCaptureVersion !== 1)
   const clean = sample?.reviewCaptureVersion === 1 && progress?.total === 0 && progress?.fullDryRunReady === true
   const allCleared = sample?.reviewCaptureVersion === 1 && progress?.total > 0 && progress?.needsReview === 0
+  const batchState = recheckAll?.tenant === tenantKey ? recheckAll : null
+  const batchView = presentRecheckAllBatch(batchState?.batch)
+  const batchActive = Boolean(batchView?.active)
   const setFilter = (key, value) => setFilters(current => ({ ...current, [key]: value }))
   const clearFilters = () => setFilters({ ...initialFilters })
 
@@ -343,6 +404,26 @@ export default function SampleReviewPage() {
         <label htmlFor="sample-review-reason" className="text-xs font-medium text-gray-700">Reason<select id="sample-review-reason" value={filters.reason} onChange={event => setFilter('reason', event.target.value)} className={selectClass}><option value="">All reasons</option>{SAMPLE_REVIEW_REASON_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
         <button type="button" className={secondaryButton} onClick={clearFilters}>Clear filters</button>
       </div>
+
+      {visible && sample?.reviewCaptureVersion === 1 && <section className="rounded-xl border border-gray-200 bg-white p-4" aria-labelledby="sample-review-recheck-all">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0">
+            <h3 id="sample-review-recheck-all" className="text-sm font-semibold text-gray-900">Recheck all open records</h3>
+            <p className="mt-1 max-w-2xl text-sm leading-6 text-gray-600">After correcting records in Albi or HubSpot, recheck every open record at once. Albi is read once for the whole batch, and nothing is written to Albi or HubSpot.</p>
+          </div>
+          <button type="button" className={`${secondaryButton} shrink-0`} onClick={startRecheckAll}
+            disabled={loading || recheckAllStarting || batchActive || Boolean(busyId) || !progress?.needsReview}>
+            {batchActive ? 'Rechecking…' : recheckAllStarting ? 'Starting…' : 'Recheck all'}
+          </button>
+        </div>
+        {batchView && (batchActive || batchState.watched) && <div className={`mt-3 rounded-lg border px-4 py-3 text-sm ${recheckAllTone[batchView.tone]}`} role="status" aria-live="polite">
+          <p>{batchView.message}</p>
+          {batchActive && <div className="mt-2 h-2 overflow-hidden rounded-full bg-white" role="progressbar" aria-label="Recheck all progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={batchView.percent}>
+            <div className="h-full rounded-full bg-brand-600 transition-all" style={{ width: `${batchView.percent}%` }} />
+          </div>}
+        </div>}
+        {recheckAllError && <p className="mt-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800" role="alert">{recheckAllError}</p>}
+      </section>}
 
       <div className="text-sm" aria-live="polite">
         {visible && notice && <p className="rounded-lg border border-brand-200 bg-brand-50 px-4 py-3 text-brand-800" role="status">{notice}</p>}
