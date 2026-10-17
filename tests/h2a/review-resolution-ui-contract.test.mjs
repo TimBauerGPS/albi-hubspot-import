@@ -8,6 +8,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { presentSampleReviewItem } from '../../src/features/hubspotToAlbi/sampleReview.js'
 import { buildResolutionConfirmation } from '../../src/features/hubspotToAlbi/sampleReviewResolution.js'
 import { mountSampleReviewResolution } from './ui-render-fixture.mjs'
+const mountSampleReviewResolutionWith = (item, onOpenMergedSurvivor) => mountSampleReviewResolution(item, async () => ({ resolution: { status: 'ready_to_recheck' } }), undefined, onOpenMergedSurvivor)
 
 const url = new URL('../../src/features/hubspotToAlbi/SampleReviewResolution.jsx', import.meta.url)
 const base = { id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', runId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
@@ -311,4 +312,19 @@ test('the email-match link button appears only for one exact email match and lin
   assert.doesNotMatch(twoMatches, /emails match/)
   const organization = await render({ ...item, objectType: 'companies' })
   assert.doesNotMatch(organization, /emails match/)
+})
+
+test('a cleared safe-to-link review shows the link control', async () => {
+  const html = await render({ ...base, reason: 'no_match', status: 'cleared', recheckOutcome: 'safe_to_link', proposedChanges: {} })
+  assert.match(html, /Link selected Albi record/)
+})
+
+test('a merged-away source points to its surviving HubSpot record', async () => {
+  const calls = []
+  const ui = await mount({ ...base, mergedInto: { sourceId: '570263829186', reviewId: null } }, undefined, undefined)
+  assert.match(ui.text(), /merged in HubSpot/i)
+  assert.match(ui.text(), /570263829186/)
+  const opened = await mountSampleReviewResolutionWith({ ...base, mergedInto: { sourceId: '570263829186', reviewId: null } }, survivor => calls.push(survivor))
+  opened.find('button', 'Review the surviving record').props.onClick(); await opened.flush()
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [{ sourceId: '570263829186', reviewId: null }])
 })

@@ -523,3 +523,13 @@ test('a HubSpot record merged into another reads as missing instead of malformed
   const records = await new HubSpotClient({ token: 'token', fetch: batch.fetch }).getContacts(['535984814798', '42'])
   assert.deepEqual(records.map(record => record.id), ['42'])
 })
+
+test('a merged-away HubSpot ID resolves to its surviving record only when HubSpot lists the merge', async () => {
+  const survivor = { id: '570263829186', properties: { hs_merged_object_ids: '535984814798;570263828217' } }
+  const f = transport([survivor, { id: '42', properties: {} }, { id: '99', properties: { hs_merged_object_ids: '1;2' } }])
+  const c = new HubSpotClient({ token: 'token', fetch: f.fetch })
+  assert.equal(await c.getMergedInto('contacts', '535984814798'), '570263829186')
+  assert.equal(await c.getMergedInto('contacts', '42'), null)
+  assert.equal(await c.getMergedInto('companies', '7'), null)
+  assert.equal(f.calls[0].url.searchParams.get('properties'), 'hs_merged_object_ids')
+})

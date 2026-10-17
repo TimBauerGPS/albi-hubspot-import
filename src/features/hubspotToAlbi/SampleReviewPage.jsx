@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate, useOutletContext } from 'react-router-dom'
-import { getH2ADryRunReview, getH2ADryRunReviews, getH2ARecheckAll, prepareH2AOrganizationReview, recheckH2ADryRunReview, resolveH2ADryRunReview, startH2ARecheckAll } from '../../lib/hubspotToAlbi'
+import { getH2ADryRunReview, getH2ADryRunReviews, getH2ARecheckAll, prepareH2AMergedSurvivorReview, prepareH2AOrganizationReview, recheckH2ADryRunReview, resolveH2ADryRunReview, startH2ARecheckAll } from '../../lib/hubspotToAlbi'
 import { presentRecheckAllBatch, presentSampleReviewItem, presentSampleReviewProgress, SAMPLE_REVIEW_REASON_OPTIONS } from './sampleReview.js'
 import { presentSampleReviewQueryFilters } from './preflightPresentation.js'
 import SampleReviewDetail from './SampleReviewDetail'
@@ -294,23 +294,23 @@ export default function SampleReviewPage() {
     }
   }
 
-  // Opens the contact's organization review (capturing it first when needed) so it is created and audited on its own.
-  async function handleOpenOrganization(organization) {
+  // Opens a related review (an organization to sync first, or the survivor of a HubSpot merge), capturing it when needed.
+  async function openRelatedReview(target, prepare, pick) {
     if (!detail?.updatedAt || detail.id !== selectedId || recheckLock.current) return
     const contactId = detail.id
-    let reviewId = typeof organization?.reviewId === 'string' && organization.reviewId ? organization.reviewId : null
+    let reviewId = typeof target?.reviewId === 'string' && target.reviewId ? target.reviewId : null
     if (!reviewId) {
       const controller = new AbortController()
       controllers.current.add(controller)
       recheckLock.current = controller
       setBusyId(contactId); setActionError(''); setNotice('')
       try {
-        const result = await prepareH2AOrganizationReview(session, companyId,
+        const result = await prepare(session, companyId,
           { reviewId: contactId, expectedUpdatedAt: detail.updatedAt }, { signal: controller.signal })
-        reviewId = result?.organization?.reviewId ?? null
-        if (!reviewId) setActionError('The organization could not be opened. Recheck this record and try again.')
+        reviewId = pick(result) ?? null
+        if (!reviewId) setActionError('The related record could not be opened. Recheck this record and try again.')
       } catch (cause) {
-        if (cause?.name !== 'AbortError') setActionError(cause?.message || 'The organization review could not be prepared.')
+        if (cause?.name !== 'AbortError') setActionError(cause?.message || 'The related review could not be prepared.')
       } finally {
         controllers.current.delete(controller)
         if (recheckLock.current === controller) recheckLock.current = null
@@ -320,6 +320,8 @@ export default function SampleReviewPage() {
     }
     setReturnToId(contactId); setSelectedId(reviewId)
   }
+  const handleOpenOrganization = organization => openRelatedReview(organization, prepareH2AOrganizationReview, result => result?.organization?.reviewId)
+  const handleOpenMergedSurvivor = survivor => openRelatedReview(survivor, prepareH2AMergedSurvivorReview, result => result?.survivor?.reviewId)
 
   async function handleResolve(decision, clientRequestId, expectedUpdatedAt) {
     if (!detail?.updatedAt || detail.id !== selectedId || recheckLock.current) return null
@@ -466,7 +468,7 @@ export default function SampleReviewPage() {
                 <span className="ml-3 text-xs text-gray-600">Create the organization here, then return to create the contact.</span></div>}
               {detailLoading ? <section className="rounded-xl border border-gray-200 bg-white px-5 py-10 text-sm text-gray-600" role="status">Loading selected record…</section>
                 : detailError ? <section className="rounded-xl border border-red-200 bg-red-50 px-5 py-6" role="alert"><h3 className="font-semibold text-red-900">Record could not be loaded</h3><p className="mt-1 text-sm text-red-800">{detailError}</p><button type="button" className={`${secondaryButton} mt-3`} onClick={() => setDetailRetry(value => value + 1)}>Retry loading record</button></section>
-                  : detail?.id === selectedId ? <SampleReviewDetail item={detail} busy={busyId === selectedId} recheckPending={Boolean(busyId)} onRecheck={handleRecheck} onResolve={handleResolve} onOpenOrganization={handleOpenOrganization} />
+                  : detail?.id === selectedId ? <SampleReviewDetail item={detail} busy={busyId === selectedId} recheckPending={Boolean(busyId)} onRecheck={handleRecheck} onResolve={handleResolve} onOpenOrganization={handleOpenOrganization} onOpenMergedSurvivor={handleOpenMergedSurvivor} />
                     : <section className="rounded-xl border border-gray-200 bg-white px-5 py-10 text-sm text-gray-600">Select a record to review its evidence.</section>}
               </div>
             </div>}

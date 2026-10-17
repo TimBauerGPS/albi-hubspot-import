@@ -251,6 +251,14 @@ export function prepareH2AOrganizationReview(session, companyId, input = {}, { s
   })
 }
 
+// Captures (or finds) the review for the HubSpot record a merged-away source now points to.
+export function prepareH2AMergedSurvivorReview(session, companyId, input = {}, { signal } = {}) {
+  return request(session, 'h2a-dry-run-reviews', {
+    method: 'POST', companyId,
+    body: { reviewId: input?.reviewId, expectedUpdatedAt: input?.expectedUpdatedAt, prepareMergedSurvivor: true }, signal,
+  })
+}
+
 function resolutionCompany(companyId) {
   if (companyId !== undefined && companyId !== null && (typeof companyId !== 'string' || !companyId.trim() || companyId.length > 200)) {
     throw new TypeError('A single company selector is required.')

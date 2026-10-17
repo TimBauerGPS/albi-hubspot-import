@@ -176,6 +176,20 @@ export class HubSpotClient {
       throw error
     }
   }
+  // The surviving record a merged-away ID now points to, only when HubSpot lists that ID as merged into it.
+  async getMergedInto(objectType, targetId) {
+    if (!['contacts', 'companies'].includes(objectType)) invalid('getMergedInto')
+    const target = id(targetId, 'getMergedInto')
+    const query = new URLSearchParams({ archived: 'false', properties: 'hs_merged_object_ids' })
+    let data
+    try { data = await this.#request(`${ROOT}/${objectType}/${target}?${query}`, { operation: 'getMergedInto' }) } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return null
+      throw error
+    }
+    const survivor = isRecord(data) ? responseId(data.id, 'getMergedInto') : null
+    const merged = typeof data?.properties?.hs_merged_object_ids === 'string' ? data.properties.hs_merged_object_ids.split(';').map(value => value.trim()) : []
+    return survivor && survivor !== target && merged.includes(target) ? survivor : null
+  }
   async getContact(targetId) { return this.#getRecord('contacts', targetId) }
   async getCompany(targetId) { return this.#getRecord('companies', targetId) }
   async #updateRecord(objectType, targetId, properties, operation) {

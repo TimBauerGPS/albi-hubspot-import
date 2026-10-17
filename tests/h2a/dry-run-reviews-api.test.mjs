@@ -462,3 +462,43 @@ test('contact detail shows the live HubSpot organization association by name, or
   none.options.makeClients = async () => ({ hubspot: { getAssociations: async () => [{ fromId: '10', toObjectType: 'companies', toIds: [] }] }, albi: {} })
   assert.deepEqual(JSON.parse((await createDryRunReviewHandler(none.options)(get({ reviewId }))).body).item.hubspotOrganizations, [])
 })
+
+function mergedFixture({ existing = null } = {}) {
+  const f = fixture(), recorded = []
+  f.options.env = { H2A_REVIEW_RESOLUTION_MODE: 'admins' }
+  f.options.requireRequest = async () => ({ companyId: 'authorized-company', role: 'admin', isSuperAdmin: false, userId: '00000000-0000-4000-8000-000000000002' })
+  f.repository.findDryRunReviewBySource = async (...args) => { f.calls.push(['find', ...args]); return existing }
+  f.repository.recordDryRunReview = async (...args) => { recorded.push(args); return { id: '00000000-0000-4000-8000-0000000000ee' } }
+  f.options.makeClients = async () => ({ hubspot: {
+    getMergedInto: async (type, id) => type === 'contacts' && id === '10' ? '77' : null,
+    getContact: async id => id === '77' ? { id: '77', properties: { firstname: 'Jaime', lastname: 'Talmi', email: 'jtalmi@example.com', apiKey: 'secret' } } : null,
+    getContacts: async () => [], getAssociations: async ({ objectIds }) => [{ fromId: objectIds[0], toObjectType: 'companies', toIds: objectIds[0] === '77' ? ['30'] : [] }],
+    getCompanies: async ids => [{ id: ids[0], properties: { name: 'Cushman & Wakefield' } }] },
+  albi: { listContacts: async () => ({ records: [], cursor: null }), listOrganizations: async () => ({ records: [], cursor: null }) } })
+  f.handler = createDryRunReviewHandler(f.options)
+  return { ...f, recorded }
+}
+
+test('detail of a merged-away HubSpot source names the surviving record and its organization', async () => {
+  const f = mergedFixture()
+  const item = JSON.parse((await f.handler(get({ reviewId }))).body).item
+  assert.deepEqual(item.mergedInto, { sourceId: '77', reviewId: null })
+  assert.deepEqual(item.hubspotOrganizations, [{ sourceId: '30', name: 'Cushman & Wakefield' }])
+})
+
+test('the surviving record of a merge gets its own captured review once', async () => {
+  const f = mergedFixture()
+  const response = await f.handler({ httpMethod: 'POST', body: JSON.stringify({ companyId: 'selected', reviewId, expectedUpdatedAt: stamp, prepareMergedSurvivor: true }) })
+  assert.equal(response.statusCode, 200)
+  assert.deepEqual(JSON.parse(response.body).survivor, { sourceId: '77', reviewId: '00000000-0000-4000-8000-0000000000ee' })
+  const [, captured] = f.recorded[0]
+  assert.deepEqual([captured.object_type, captured.source_id, captured.reason, captured.conflict_type, captured.run_id],
+    ['contacts', '77', 'no_match', 'contact_match', 'server-run'])
+  assert.equal(JSON.stringify(captured).includes('secret'), false)
+  const reuse = mergedFixture({ existing: { id: '00000000-0000-4000-8000-0000000000ff' } })
+  const again = JSON.parse((await reuse.handler({ httpMethod: 'POST', body: JSON.stringify({ companyId: 'selected', reviewId, expectedUpdatedAt: stamp, prepareMergedSurvivor: true }) })).body)
+  assert.deepEqual(again.survivor, { sourceId: '77', reviewId: '00000000-0000-4000-8000-0000000000ff' })
+  assert.equal(reuse.recorded.length, 0)
+  const notMerged = mergedFixture(); notMerged.row.source_id = '11'
+  assert.equal((await notMerged.handler({ httpMethod: 'POST', body: JSON.stringify({ companyId: 'selected', reviewId, expectedUpdatedAt: stamp, prepareMergedSurvivor: true }) })).statusCode, 409)
+})

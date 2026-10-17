@@ -511,7 +511,8 @@ export async function executeReviewResolution(deps, input) {
   const saved = rpc(created)
   if (terminal(saved)) return { resolution: saved }
   if (context.row.status !== 'needs_review' && !(decision.action === 'create_albi' &&
-    context.row.status === 'cleared' && context.row.recheck_outcome === 'safe_to_create')) stale('review')
+    context.row.status === 'cleared' && context.row.recheck_outcome === 'safe_to_create') && !(decision.action === 'link_existing' &&
+    context.row.status === 'cleared' && context.row.recheck_outcome === 'safe_to_link')) stale('review')
   return runClaim(deps, input, saved, context)
 }
 

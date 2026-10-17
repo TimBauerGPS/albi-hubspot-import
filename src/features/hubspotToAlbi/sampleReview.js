@@ -95,7 +95,9 @@ export function presentSampleReviewItem(item) {
     candidates, matchEvidence: Array.isArray(input.matchEvidence) ? [...new Set(input.matchEvidence.filter(value => EVIDENCE.has(value)))] : [],
     proposedChanges: safeChanges(input.proposedChanges),
     resolutionFields, actions: input.status === 'needs_review' || input.status === undefined ? [...getH2AReviewActions(input.reason, objectType)]
-      : input.status === 'cleared' && input.recheckOutcome === 'safe_to_create' && copy.actions.includes('create_albi') ? ['create_albi'] : [],
+      : input.status === 'cleared' && input.recheckOutcome === 'safe_to_create' && copy.actions.includes('create_albi') ? ['create_albi']
+        // Recheck found one safe Albi match; let the reviewer save that link now instead of waiting for a sync.
+        : input.status === 'cleared' && input.recheckOutcome === 'safe_to_link' && copy.actions.includes('link_existing') && candidates.length > 0 ? ['link_existing'] : [],
     portalId, hubspotUrl: buildHubSpotRecordUrl(portalId, objectType, input.sourceId ?? source.id),
     candidateLinks: candidates.map(candidate => ({ id: candidate.id, url: buildAlbiRecordUrl(objectType, candidate.id) })),
     resolution: presentReviewResolution(input.resolution), resolutionCapability: presentResolutionCapability(input.resolutionCapability),

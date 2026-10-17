@@ -768,3 +768,12 @@ test('an email-match link saves the mapping from captured evidence without enume
   assert.equal(f.mappings.contacts[0].albi_contact_id, '20')
   assert.deepEqual(mutations(f), [])
 })
+
+test('a review cleared as safe to link can save that link now', async () => {
+  const f = fixture(); f.row.reason = 'no_match'; f.row.status = 'cleared'; f.row.recheck_outcome = 'safe_to_link'
+  const result = await executeReviewResolution(f.deps, { ...input, decision: { action: 'link_existing', candidateId: '20', approveManyToOne: true } })
+  assert.equal(result.resolution.status, 'ready_to_recheck')
+  assert.equal(f.mappings.contacts[0].albi_contact_id, '20')
+  const other = fixture(); other.row.status = 'cleared'; other.row.recheck_outcome = 'safe_to_create'
+  await assert.rejects(executeReviewResolution(other.deps, { ...input, decision: { action: 'link_existing', candidateId: '20' } }), error => error.statusCode === 409)
+})

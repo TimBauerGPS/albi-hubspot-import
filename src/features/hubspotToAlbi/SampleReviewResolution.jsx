@@ -21,7 +21,7 @@ function TaskLink({ url, children }) {
   return url && <a href={url} target="_blank" rel="noreferrer" className="inline-flex text-sm font-semibold text-brand-700 underline underline-offset-4 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500">{children}</a>
 }
 
-export default function SampleReviewResolution({ item, busy = false, onResolve, onOpenOrganization }) {
+export default function SampleReviewResolution({ item, busy = false, onResolve, onOpenOrganization, onOpenMergedSurvivor }) {
   const review = presentSampleReviewItem(item)
   const capability = review.resolutionCapability
   const resolution = review.resolution
@@ -66,7 +66,7 @@ export default function SampleReviewResolution({ item, busy = false, onResolve, 
     eligibleCandidates.length === review.candidates.length && referralSources.length > 0
   const effectiveBusy = busy || submitting
   const canAct = capability.canResolve && review.actions.length > 0 && (review.status === 'needs_review' ||
-    review.status === 'cleared' && item?.recheckOutcome === 'safe_to_create')
+    review.status === 'cleared' && ['safe_to_create', 'safe_to_link'].includes(item?.recheckOutcome))
 
   useEffect(() => {
     setChoices({}); setCandidateId(''); setOrganizationSourceId(''); setApproveAssociation(false); setApproveManyToOne(false); setReferralSourceId('')
@@ -196,6 +196,12 @@ export default function SampleReviewResolution({ item, busy = false, onResolve, 
       <TaskLink url={review.hubspotUrl}>Open source in HubSpot</TaskLink>
       {review.candidateLinks.map(link => <TaskLink key={link.id} url={link.url}>Open {review.objectType === 'contacts' ? 'contact' : 'organization'} in Albi</TaskLink>)}
     </div>
+
+    {idPattern.test(item?.mergedInto?.sourceId) && <div className="mt-3 rounded-lg border border-amber-300 bg-amber-50 p-3">
+      <p className="text-sm font-semibold text-amber-950">This record was merged in HubSpot</p>
+      <p className="mt-1 text-xs leading-5 text-amber-900">HubSpot now keeps it as {review.objectType === 'contacts' ? 'contact' : 'company'} {item.mergedInto.sourceId}. Review and link the surviving record instead; this one is out of date.</p>
+      <button type="button" className={`${secondary} mt-2`} disabled={effectiveBusy || !onOpenMergedSurvivor}
+        onClick={() => onOpenMergedSurvivor?.({ sourceId: item.mergedInto.sourceId, reviewId: typeof item.mergedInto.reviewId === 'string' && item.mergedInto.reviewId ? item.mergedInto.reviewId : null })}>Review the surviving record</button></div>}
 
     {review.objectType === 'contacts' && item?.hubspotOrganizations !== undefined && <p className="mt-3 text-xs leading-5 text-gray-700">
       <span className="font-semibold text-gray-900">HubSpot organization: </span>

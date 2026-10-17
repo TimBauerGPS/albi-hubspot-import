@@ -52,7 +52,8 @@ function request(event) {
   let body = {}
   if (event.httpMethod === 'POST') {
     try { body = typeof event.body === 'string' ? JSON.parse(event.body) : event.body } catch { fail(400, 'Invalid request body.') }
-    if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !['companyId', 'reviewId', 'expectedUpdatedAt', 'prepareOrganization'].includes(key))) fail(400, 'Unsupported request fields.')
+    if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !['companyId', 'reviewId', 'expectedUpdatedAt', 'prepareOrganization', 'prepareMergedSurvivor'].includes(key))) fail(400, 'Unsupported request fields.')
+    if (Object.hasOwn(body, 'prepareMergedSurvivor') && body.prepareMergedSurvivor !== true) fail(400, 'Invalid sample review request.')
     if (Object.hasOwn(body, 'prepareOrganization') && body.prepareOrganization !== true) fail(400, 'Invalid sample review request.')
     if (Object.keys(query).some(key => key !== 'companyId')) fail(400, 'Unsupported query parameters.')
     if (!UUID.test(body.reviewId ?? '') || !validTime(body.expectedUpdatedAt)) fail(400, 'Invalid sample review request.')
@@ -100,16 +101,22 @@ async function detail(repository, companyId, runId, row, auth, options, config) 
   }
   // Live association names (the contact's own snapshot only carries a free-text company property).
   // null means unknown, [] means HubSpot has none.
-  let hubspotOrganizations = null
-  if (row.object_type === 'contacts' && resolutionCapability.canResolve) {
+  let hubspotOrganizations = null, mergedInto = null
+  if (resolutionCapability.canResolve) {
     try {
-      hubspotOrganizations = await advisoryWithin(async () => {
+      const loaded = await advisoryWithin(async () => {
         const clients = options.makeClients ? await options.makeClients(companyId) : await createH2AProviderClients({
           companyId, repository, keyring: options.keyring, env: options.env, fetch: options.fetch })
         if (!options.makeClients && (await clients.hubspot.getAccountInfo()).portalId !== config.portal_id) return null
-        const associations = await clients.hubspot.getAssociations({ objectType: 'contacts', objectIds: [row.source_id], toObjectTypes: ['companies'] })
-        if (!Array.isArray(associations) || associations.length !== 1 || associations[0]?.fromId !== row.source_id ||
-          associations[0]?.toObjectType !== 'companies' || !Array.isArray(associations[0].toIds)) return null
+        // HubSpot merges move a record to a new ID; follow it so the survivor's data is shown.
+        const survivor = typeof clients.hubspot.getMergedInto === 'function' ? await clients.hubspot.getMergedInto(row.object_type, row.source_id) : null
+        const merge = providerId(survivor) ? { sourceId: survivor,
+          reviewId: (await repository.findDryRunReviewBySource?.(companyId, runId, row.object_type, survivor))?.id ?? null } : null
+        if (row.object_type !== 'contacts') return { organizations: null, merge }
+        const contactId = merge?.sourceId ?? row.source_id
+        const associations = await clients.hubspot.getAssociations({ objectType: 'contacts', objectIds: [contactId], toObjectTypes: ['companies'] })
+        if (!Array.isArray(associations) || associations.length !== 1 || associations[0]?.fromId !== contactId ||
+          associations[0]?.toObjectType !== 'companies' || !Array.isArray(associations[0].toIds)) return { organizations: null, merge }
         const found = []
         for (const sourceId of [...new Set(associations[0].toIds)].filter(providerId).slice(0, 5)) {
           const companies = await clients.hubspot.getCompanies([sourceId])
@@ -117,13 +124,37 @@ async function detail(repository, companyId, runId, row, auth, options, config) 
           const name = typeof company?.properties?.name === 'string' ? company.properties.name.trim().slice(0, 200) : ''
           found.push({ sourceId, name: name || 'Unnamed organization' })
         }
-        return found
+        return { organizations: found, merge }
       }, Number.isFinite(options.detailDeadlineMs) ? Math.min(10000, Math.max(1, options.detailDeadlineMs)) : 5000)
+      hubspotOrganizations = loaded?.organizations ?? null
+      mergedInto = loaded?.merge ?? null
     } catch { hubspotOrganizations = null }
   }
   return { ...projectReviewRow(row, { detail: true }), resolutionStatus: projected.resolution?.status ?? null,
     events: events.map(projectReviewEvent), resolution: projected.resolution,
-    resolutionCapability, hubspotOrganizations, ...resolutionOptions }
+    resolutionCapability, hubspotOrganizations, ...(mergedInto ? { mergedInto } : {}), ...resolutionOptions }
+}
+
+// Captures (or finds) a review for the HubSpot record a merged-away source now points to, in the current run.
+async function prepareMergedSurvivorReview({ repository, options, companyId, input }) {
+  const { config, sample } = await resolveReviewSample(repository, companyId)
+  if (!sample) fail(409, 'Run a new sample to create detailed review data.')
+  const row = await repository.getDryRunReview(companyId, sample.id, input.reviewId)
+  if (!row) fail(404, 'Sample review item not found.')
+  if (row.updated_at !== input.expectedUpdatedAt) fail(409, 'This sample review changed. Refresh it first.')
+  const clients = options.makeClients ? await options.makeClients(companyId) : await createH2AProviderClients({
+    companyId, repository, keyring: options.keyring, env: options.env, fetch: options.fetch })
+  if (!options.makeClients && (await clients.hubspot.getAccountInfo()).portalId !== config.portal_id) throw new ApiError('permission')
+  const survivor = typeof clients.hubspot.getMergedInto === 'function' ? await clients.hubspot.getMergedInto(row.object_type, row.source_id) : null
+  if (!providerId(survivor)) fail(409, 'HubSpot does not list this record as merged into another one.')
+  const existing = await repository.findDryRunReviewBySource(companyId, sample.id, row.object_type, survivor)
+  if (existing) return { sourceId: survivor, reviewId: existing.id }
+  const record = row.object_type === 'contacts' ? await clients.hubspot.getContact(survivor) : await clients.hubspot.getCompany(survivor)
+  if (!record || record.id !== survivor || record.archived === true) fail(409, 'The surviving HubSpot record is not available.')
+  const created = await repository.recordDryRunReview(companyId, { run_id: sample.id, portal_id: row.portal_id, object_type: row.object_type,
+    source_id: survivor, reason: 'no_match', conflict_type: row.object_type === 'contacts' ? 'contact_match' : 'organization_match',
+    source_snapshot: safeReviewSnapshot(record, row.object_type), candidate_snapshots: [], match_evidence: { evidence: [] }, proposed_changes: {} })
+  return { sourceId: survivor, reviewId: created.id }
 }
 
 // Captures (or finds) the review for a contact's one unmapped organization so it can be created and
@@ -170,6 +201,9 @@ export function createDryRunReviewHandler(options = {}) {
         getSupabase: options.getSupabase, requireAdmin: true, requestedCompanyId: input.companyId })
       const repository = options.repository ?? createH2ARepository(auth.supabase)
       const companyId = auth.companyId
+      if (isRecheck && input.prepareMergedSurvivor === true) {
+        return reply(200, { survivor: await prepareMergedSurvivorReview({ repository, options, companyId, input }) })
+      }
       if (isRecheck && input.prepareOrganization === true) {
         return reply(200, { organization: await prepareOrganizationReview({ repository, options, auth, companyId, input }) })
       }

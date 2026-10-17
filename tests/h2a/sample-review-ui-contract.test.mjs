@@ -28,7 +28,7 @@ async function mount(overrides = {}) {
     tenantRevision: 0, completeTenantTransition: revision => completed.push(revision) }
   const completed = [], calls = [], navigations = []
   const navigate = (path, options) => navigations.push({ path, options })
-  const clients = Object.fromEntries(['getH2ADryRunReviews', 'getH2ADryRunReview', 'recheckH2ADryRunReview', 'resolveH2ADryRunReview', 'prepareH2AOrganizationReview',
+  const clients = Object.fromEntries(['getH2ADryRunReviews', 'getH2ADryRunReview', 'recheckH2ADryRunReview', 'resolveH2ADryRunReview', 'prepareH2AOrganizationReview', 'prepareH2AMergedSurvivorReview',
     'getH2ARecheckAll', 'startH2ARecheckAll'].map(name => [name, (...args) => {
     calls.push({ name, args })
     if (overrides[name]) return overrides[name](...args)
@@ -562,4 +562,19 @@ test('recheck all is disabled when nothing needs review', async () => {
   const ui = await mount({ getH2ADryRunReviews: () => Promise.resolve(page([row()], { progress: { ...progress, needsReview: 0, cleared: 2 } })) })
   assert.equal(ui.find('button', 'Recheck all').props.disabled, true)
   ui.unmount()
+})
+
+test('reviewing a merge survivor captures its review once and selects it', async () => {
+  const ui = await mount({ prepareH2AMergedSurvivorReview: () => Promise.resolve({ survivor: { sourceId: '570263829186', reviewId: 'survivor-review' } }) })
+  await ui.detail().props.onOpenMergedSurvivor({ sourceId: '570263829186', reviewId: null }); await ui.flush()
+  const prepared = ui.calls.filter(call => call.name === 'prepareH2AMergedSurvivorReview')
+  assert.equal(prepared.length, 1)
+  assert.deepEqual({ ...prepared[0].args[2] }, { reviewId: 'review-1', expectedUpdatedAt: '2026-10-12T12:00:00.000Z' })
+  assert.equal(ui.calls.filter(call => call.name === 'getH2ADryRunReview').at(-1).args[2], 'survivor-review')
+  ui.unmount()
+  const known = await mount()
+  await known.detail().props.onOpenMergedSurvivor({ sourceId: '570263829186', reviewId: 'known-survivor' }); await known.flush()
+  assert.equal(known.calls.filter(call => call.name === 'prepareH2AMergedSurvivorReview').length, 0)
+  assert.equal(known.calls.filter(call => call.name === 'getH2ADryRunReview').at(-1).args[2], 'known-survivor')
+  known.unmount()
 })

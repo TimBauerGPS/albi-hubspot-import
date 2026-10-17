@@ -6,7 +6,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { presentSampleReviewItem } from '../../src/features/hubspotToAlbi/sampleReview.js'
 import { buildResolutionConfirmation } from '../../src/features/hubspotToAlbi/sampleReviewResolution.js'
 
-export async function mountSampleReviewResolution(item, onResolve, onOpenOrganization) {
+export async function mountSampleReviewResolution(item, onResolve, onOpenOrganization, onOpenMergedSurvivor) {
   const source = await readFile(new URL('../../src/features/hubspotToAlbi/SampleReviewResolution.jsx', import.meta.url), 'utf8')
   const code = transformSync(source.replace(/^import[\s\S]*?from ['"][^'"]+['"]\s*$/gm, '').replace('export default function', 'function'),
     { loader: 'jsx', jsxFactory: 'h', jsxFragment: 'Fragment' }).code
@@ -42,7 +42,7 @@ export async function mountSampleReviewResolution(item, onResolve, onOpenOrganiz
     crypto: { randomUUID: () => (++ids === 1 ? 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' : 'dddddddd-dddd-4ddd-8ddd-dddddddddddd') },
     document: documentState, Date, Intl, Object, Set })
   const nodes = (root = tree) => { const all = []; const walk = node => { if (!node || typeof node !== 'object') return; all.push(node); node.children?.forEach(walk) }; walk(root); return all }
-  const flush = async () => { for (let n = 0; n < 12; n++) { if (dirty) { dirty = false; index = 0; tree = Component({ item, onResolve, onOpenOrganization })
+  const flush = async () => { for (let n = 0; n < 12; n++) { if (dirty) { dirty = false; index = 0; tree = Component({ item, onResolve, onOpenOrganization, onOpenMergedSurvivor })
       for (const node of nodes()) if (node.props?.ref) node.props.ref.current = node.dom
       while (pending.length) pending.shift()() }
     await Promise.resolve() } }

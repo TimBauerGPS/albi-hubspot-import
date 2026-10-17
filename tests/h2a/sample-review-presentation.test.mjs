@@ -245,3 +245,9 @@ test('the live HubSpot association fills the source organization when the snapsh
     assert.equal(presentSampleReviewItem({ ...base, hubspotOrganizations: bad }).source.organizationName, undefined)
   }
 })
+
+test('a cleared safe-to-link review offers only linking', () => {
+  const linkable = presentSampleReviewItem({ reason: 'no_match', objectType: 'contacts', status: 'cleared', recheckOutcome: 'safe_to_link', candidateSnapshots: [{ id: '20' }] })
+  assert.deepEqual(linkable.actions, ['link_existing'])
+  assert.deepEqual(presentSampleReviewItem({ reason: 'no_match', objectType: 'contacts', status: 'cleared', recheckOutcome: 'safe_to_link', candidateSnapshots: [] }).actions, [])
+})
