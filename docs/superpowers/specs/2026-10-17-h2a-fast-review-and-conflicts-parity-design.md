@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-17
 
-**Status:** Draft. Awaiting approval. The user asked for the design to be drafted from the reviewer's own calls, so every decision below is a design call unless marked *User decided*.
+**Status:** Approved 2026-10-17. The user asked for the design to be drafted from the reviewer's own calls, so every decision below is a design call unless marked *User decided*.
 
 **Application:** `albi-hubspot-import`
 
