@@ -3,8 +3,8 @@
 import { Fragment, StrictMode, useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 
-const REFERRALS = ['Google', 'Insurance Agent', 'Plumber', 'Property Manager', 'Repeat Customer']
-const COMPANY_DEFAULT_REFERRAL = 'Property Manager'
+const REFERRALS = ['Contractor', 'Employee', 'Fire Chasing', 'Insurance', 'Network', 'Online Marketing', 'Other', 'Plumber', 'Property Management',
+  'Real Estate', 'Returning Customer', 'TPA', 'Vehicle Wraps']
 const UNDO_MS = 5000
 
 const c = (id, name, fields, reasons, extra = {}) => ({ id, name, ...fields, reasons, warnings: [], linkedElsewhere: 0, ...extra })
@@ -108,7 +108,8 @@ function App() {
   const [view, setView] = useState('quick')
   const [selectedId, setSelectedId] = useState(null)
   const [candidateIndex, setCandidateIndex] = useState(0)
-  const [referral, setReferral] = useState(() => storage.get('proto.referral', COMPANY_DEFAULT_REFERRAL))
+  const [referrals, setReferrals] = useState({})
+  const referralRef = useRef(null)
   const [pending, setPending] = useState([])
   const [dialog, setDialog] = useState(null)
   const [checked, setChecked] = useState(() => new Set())
@@ -136,7 +137,6 @@ function App() {
 
   useEffect(() => { if (view !== 'todo' && !list.some(record => record.id === selectedId)) setSelectedId(list.find(record => !pendingIds.has(record.id))?.id ?? list[0]?.id ?? null) }, [view, list]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { setCandidateIndex(0); setShowMatching(false); setFieldChoices({}) }, [selectedId])
-  useEffect(() => { storage.set('proto.referral', referral) }, [referral])
   useEffect(() => { storage.set('proto.todoDone', [...todoDone]) }, [todoDone])
 
   const note = text => setLog(current => [{ id: crypto.randomUUID(), text, at: new Date() }, ...current].slice(0, 30))
@@ -188,7 +188,8 @@ function App() {
     queue(record, label, () => patch(record.id, { status: 'done', outcome: `Linked to Albi ${target.id}` }))
   }
   function create(record) {
-    if (!referral) return
+    const referral = referrals[record.id]
+    if (!referral) { referralRef.current?.focus(); return }
     if (record.candidates.length > 0) {
       setDialog({ title: 'Create a separate Albi record?', danger: true, body: [`${record.candidates.length} possible match${record.candidates.length === 1 ? '' : 'es'} will be ignored. Albi records can’t be deleted from here, so this may create a duplicate.`, `Referral source: ${referral}`],
         confirm: 'Create separate record', onConfirm: () => { setDialog(null); patch(record.id, { status: 'done', outcome: 'Created (separate record)' }); note(`Sent: Create ${record.name} in Albi despite candidates`); advanceFrom(record.id) } })
@@ -223,15 +224,14 @@ function App() {
   }
 
   const bulkLinkable = buckets.quick.filter(record => record.candidates.length === 1 && !pendingIds.has(record.id))
-  const bulkCreatable = buckets.quick.filter(record => record.candidates.length === 0 && !pendingIds.has(record.id))
   function bulk(kindOf) {
-    const chosen = (kindOf === 'link' ? bulkLinkable : bulkCreatable).filter(record => checked.size === 0 || checked.has(record.id))
+    const chosen = bulkLinkable.filter(record => checked.size === 0 || checked.has(record.id))
     if (!chosen.length) return
     setDialog({
-      title: kindOf === 'link' ? `Link ${chosen.length} exact matches?` : `Create ${chosen.length} records in Albi?`,
-      body: [...chosen.slice(0, 6).map(record => kindOf === 'link' ? `${record.name} → Albi ${record.candidates[0].name} (${record.candidates[0].id})` : `${record.name} · referral ${referral}`),
+      title: `Link ${chosen.length} exact matches?`,
+      body: [...chosen.slice(0, 6).map(record => `${record.name} → Albi ${record.candidates[0].name} (${record.candidates[0].id})`),
         ...(chosen.length > 6 ? [`…and ${chosen.length - 6} more`] : []), 'Each record is rechecked on the server first. Any that changed are skipped, never forced.'],
-      confirm: kindOf === 'link' ? `Link ${chosen.length}` : `Create ${chosen.length}`,
+      confirm: `Link ${chosen.length}`,
       onConfirm: () => {
         setDialog(null)
         let index = 0; const skipped = []
@@ -239,7 +239,7 @@ function App() {
         const step = () => {
           const record = chosen[index]
           if (record.staleOnBulk) skipped.push(record.name)
-          else patch(record.id, { status: 'done', outcome: kindOf === 'link' ? `Linked to Albi ${record.candidates[0].id} (bulk)` : `Created in Albi (${referral}, bulk)` })
+          else patch(record.id, { status: 'done', outcome: `Linked to Albi ${record.candidates[0].id} (bulk)` })
           index += 1
           setBusy(`Working… ${index} / ${chosen.length}`)
           if (index < chosen.length) setTimeout(step, 350)
@@ -316,13 +316,7 @@ function App() {
             <span className="block text-xs font-medium text-gray-600">{text}{value === 'todo' && <Kbd>t</Kbd>}</span>
             <span className={`block text-xl font-semibold tabular-nums ${value === 'quick' ? 'text-green-700' : value === 'todo' && buckets.todo.length ? 'text-amber-700' : ''}`}>{buckets[value].length}</span>
           </button>))}
-        <div className="ml-auto flex items-center gap-3 self-center text-xs text-gray-600">
-          <label className="flex items-center gap-2">Referral source
-            <select value={referral} onChange={event => setReferral(event.target.value)} className="rounded-md border border-gray-300 bg-white px-2 py-1 text-sm">
-              {REFERRALS.map(value => <option key={value}>{value}</option>)}</select></label>
-          <span title="Falls back to the company's confirmed auto-create source">remembered · default {COMPANY_DEFAULT_REFERRAL}</span>
-        </div>
-      </nav>
+</nav>
 
       {busy && <p className="mt-3 rounded-lg border border-brand-200 bg-brand-50 px-3 py-2 text-sm text-brand-800" role="status">{busy}</p>}
 
@@ -330,10 +324,9 @@ function App() {
         <div className="mt-4 grid gap-4 lg:grid-cols-[20rem_minmax(0,1fr)]">
           <aside className="overflow-hidden rounded-xl border border-gray-200 bg-white">
             {view === 'quick' && <div className="space-y-2 border-b border-gray-200 p-3">
-              <p className="text-xs text-gray-600">{checked.size ? `${checked.size} selected` : 'Bulk actions apply to all, or to the rows you tick (x).'}</p>
+              <p className="text-xs text-gray-600">{checked.size ? `${checked.size} selected` : 'Bulk link applies to all exact matches, or to the rows you tick (x). Creates are one at a time.'}</p>
               <div className="flex flex-wrap gap-2">
                 <button type="button" className={btn} disabled={!bulkLinkable.length || Boolean(busy)} onClick={() => bulk('link')}>Link all exact matches ({bulkLinkable.filter(r => !checked.size || checked.has(r.id)).length})</button>
-                <button type="button" className={btn} disabled={!bulkCreatable.length || Boolean(busy)} onClick={() => bulk('create')}>Create all ready ({bulkCreatable.filter(r => !checked.size || checked.has(r.id)).length})</button>
               </div></div>}
             <ol className="max-h-[38rem] divide-y divide-gray-100 overflow-y-auto">
               {list.length === 0 && <li className="px-4 py-8 text-sm text-gray-600">Nothing here.</li>}
@@ -353,7 +346,8 @@ function App() {
           </aside>
 
           {selected ? <Record record={selected} kind={kind} candidates={candidates} candidateIndex={candidateIndex} setCandidateIndex={setCandidateIndex} top={top}
-            pending={pendingIds.has(selected.id)} referral={referral} showMatching={showMatching} setShowMatching={setShowMatching}
+            pending={pendingIds.has(selected.id)} referral={referrals[selected.id] ?? ''} referralRef={referralRef}
+            onReferral={value => setReferrals(current => ({ ...current, [selected.id]: value }))} showMatching={showMatching} setShowMatching={setShowMatching}
             fieldChoices={fieldChoices} setFieldChoices={setFieldChoices}
             onLink={(target, options) => link(selected, target, options)} onCreate={() => create(selected)} onSkip={() => skip(selected)} onRecheck={() => recheck(selected)} onApplyFields={() => applyFields(selected)} />
             : <section className="rounded-xl border border-gray-200 bg-white px-5 py-10 text-sm text-gray-600">{list.length ? 'Select a record.' : 'This bucket is empty. Nice.'}</section>}
@@ -396,7 +390,7 @@ function diffRows(record, candidate) {
   }).filter(Boolean).sort((a, b) => ['differs', 'one_side', 'hubspot_only', 'same'].indexOf(a.kind) - ['differs', 'one_side', 'hubspot_only', 'same'].indexOf(b.kind))
 }
 
-function Record({ record, kind, candidates, candidateIndex, setCandidateIndex, top, pending, referral, showMatching, setShowMatching, fieldChoices, setFieldChoices, onLink, onCreate, onSkip, onRecheck, onApplyFields }) {
+function Record({ record, kind, candidates, candidateIndex, setCandidateIndex, top, pending, referral, referralRef, onReferral, showMatching, setShowMatching, fieldChoices, setFieldChoices, onLink, onCreate, onSkip, onRecheck, onApplyFields }) {
   const candidate = candidates[candidateIndex] ?? null
   const rows = diffRows(record, candidate)
   const visible = rows.filter(row => row.kind !== 'same')
@@ -461,8 +455,12 @@ function Record({ record, kind, candidates, candidateIndex, setCandidateIndex, t
         </> : <>
           {top && <button type="button" className={primary} disabled={disabled || record.blocked} onClick={() => onLink(top, { emailMatch: top.reasons.includes('same_email') })}>Accept suggestion{top.reasons.includes('same_email') ? ' (emails match)' : ''}<Kbd>Enter</Kbd></button>}
           {candidate && (!top || candidate.id !== top.id) && <button type="button" className={top ? btn : primary} disabled={disabled} onClick={() => onLink(candidate)}>Link {candidate.name}<Kbd>l</Kbd></button>}
-          {!record.mergedInto && !record.blocked && <button type="button" className={candidates.length || top ? btn : primary} disabled={disabled} onClick={onCreate}>
-            {record.orgFirst ? `Create organization + contact (${referral})` : candidates.length ? 'Add new in Albi instead' : `Create in Albi (${referral})`}<Kbd>n</Kbd></button>}
+          {!record.mergedInto && !record.blocked && <span className="flex flex-wrap items-center gap-2">
+            <select ref={referralRef} value={referral} disabled={disabled} onChange={event => { onReferral(event.target.value); event.target.blur() }} aria-label="Referral source"
+              className={`rounded-lg border bg-white px-2 py-1.5 text-sm ${referral ? 'border-gray-300' : 'border-amber-400'}`}>
+              <option value="">Referral source…</option>{REFERRALS.map(value => <option key={value}>{value}</option>)}</select>
+            <button type="button" className={candidates.length || top ? btn : primary} disabled={disabled || !referral} onClick={onCreate}>
+              {record.orgFirst ? 'Create organization + contact' : candidates.length ? 'Add new in Albi instead' : 'Create in Albi'}<Kbd>n</Kbd></button></span>}
           {kind === 'live' && <button type="button" className={btn} disabled={disabled} onClick={onSkip}>Skip<Kbd>s</Kbd></button>}
         </>}
         <button type="button" className={`${btn} ml-auto`} onClick={onRecheck}>Recheck<Kbd>r</Kbd></button>

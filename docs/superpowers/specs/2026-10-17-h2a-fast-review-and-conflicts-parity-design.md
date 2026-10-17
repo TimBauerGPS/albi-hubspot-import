@@ -41,7 +41,7 @@ This project makes the daily review fast, and it brings Conflicts to parity befo
 
 - Changing the Guardian Albi Wrapper. Existing Albi records still cannot be edited by API.
 - Changing **automatic** link rules in the sync. Ranking and reasons only change what the reviewer sees and the suggested default. Nothing links automatically that does not link today.
-- Bulk force-create, bulk field resolution, or bulk many-to-one approval of an Albi record already linked elsewhere. These stay one record at a time.
+- Any bulk create, bulk field resolution, or bulk many-to-one approval of an Albi record already linked elsewhere. These stay one record at a time.
 - Deleting, merging or deduplicating provider records.
 - Changing the fresh-sample gate before the full dry run.
 
@@ -146,7 +146,11 @@ Keyboard shortcuts (shown in a "?" overlay, active only when focus is not in a t
 
 **Undo window (deferred commit):** a no-dialog action is held client-side for 5 seconds with a toast ("Linking Jane Doe → Albi Jane Doe · Undo"). It is sent to the server when the timer expires. Undo cancels it before anything is written. Leaving the page flushes pending actions immediately, with a `beforeunload` guard while any are pending. A failed send puts the record back in its bucket with the error on it. The server-side request is unchanged: same `clientRequestId` and `expectedUpdatedAt`, so retries stay idempotent.
 
-**Remember the referral source:** the referral picker preselects the last source this reviewer used for this company (per-viewer browser storage). It falls back to the company's confirmed auto-create referral source (§7). The picker stays visible on every create.
+**Referral source per record** (*User decided*: referral sources rarely repeat between records):
+- Every create has its own **Referral source** dropdown, filled from Albi's live referral source list. In Allied's Albi that list is currently: Contractor, Employee, Fire Chasing, Insurance, Network, Online Marketing, Other, Plumber, Property Management, Real Estate, Returning Customer, TPA, Vehicle Wraps.
+- The dropdown starts blank on every record, with nothing preselected and nothing remembered, and the create button stays disabled until a source is chosen.
+- Pressing `n` focuses the dropdown when it is blank. Type-ahead picks an option, and `n` again creates.
+- "Create organization and contact" uses one choice for both records.
 
 ### 6. Org-first in one step
 
@@ -172,7 +176,6 @@ Each bucket header offers the bulk actions valid for every selected record:
 
 - **Link all exact email matches (N)**: Quick-win contacts with one same-email candidate.
 - **Link all single strong organization matches (N)**.
-- **Create all ready records (N)**: zero candidates, create-ready, organization already mapped. It uses one referral source chosen in the bulk dialog (preselected as in §5).
 - **Recheck selected (N)**: queues the existing recheck batch for just those rows.
 
 Records can be selected with checkboxes, "Select all in bucket", or `x` on the focused row.
@@ -181,7 +184,7 @@ Records can be selected with checkboxes, "Select all in bucket", or `x` on the f
 - The server receives one request per chunk of 25 rows and processes each row through the normal engine with that row's `expectedUpdatedAt` and its own `clientRequestId`. Each row is audited individually.
 - Rows that changed (409) or no longer qualify are skipped and reported, never forced.
 - A bulk run shows progress and ends with a summary: done / skipped (why) / failed.
-- Bulk actions never include force-create, field writes or approval of an Albi record linked elsewhere.
+- Bulk actions never create Albi records (*User decided*: each create needs its own referral source), and never include field writes or approval of an Albi record linked elsewhere.
 
 ### 10. Albi to-do
 
@@ -198,7 +201,7 @@ Requires extending the recheck batch to accept an optional list of review IDs (d
 
 All of these must work on `kind="live"`, covered by tests:
 
-- Referral picker on every create (remembered default).
+- Referral source dropdown on every single create, starting blank.
 - Many-to-one shown up front as a warning chip and pre-checked approval in the single-record flow (not discovered by a 409).
 - "Link, emails match (ignore phone/address)".
 - "Add new contact/organization in Albi" in the target list.
@@ -217,7 +220,7 @@ A throwaway, clickable prototype of the workspace runs locally on mock data so t
 
 - A separate Vite page `prototype/review.html` (dev server only; not in the production build), opened at `http://localhost:5180/prototype/review.html` via `npm run dev`.
 - Mock records cover: exact-email quick wins, ranked candidates, a zero-candidate create, an org-first contact, a waiting-on-Albi record, a merged record, a blocked record, and a many-to-one warning.
-- It demonstrates: buckets and counters, keyboard flow, auto-advance, undo toast, trimmed field diff, candidate reasons, bulk link with confirmation, Albi to-do with copy and done checkboxes, and the referral default.
+- It demonstrates: buckets and counters, keyboard flow, auto-advance, undo toast, trimmed field diff, candidate reasons, bulk link with confirmation, Albi to-do with copy and done checkboxes, and the per-record referral dropdown.
 - It writes nothing anywhere. Feedback from trying it updates this spec before planning. The prototype is deleted once Phase 2 starts.
 
 ## Testing and verification
