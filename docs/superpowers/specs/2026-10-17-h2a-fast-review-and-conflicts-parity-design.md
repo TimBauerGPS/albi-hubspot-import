@@ -24,17 +24,17 @@ This project makes the daily review fast, and it brings Conflicts to parity befo
 | Noise | A ~18-row field grid per candidate (mostly "Blank"), a second duplicate differences grid, capability copy, HubSpot ID and last recheck on every queue row, audit history with UUIDs |
 | Queue | Pages of 25, no keyboard, no "easy ones first" |
 | Conflicts | Raw snapshots. "Create new target" has no referral source. Many-to-one only after a failed 409. No email-match shortcut, provider links, org-first gate, merge following or named blocked reasons |
-| Live sync | `orchestrator.js` `createContact` / `createOrganization` send no `referralSourceId` and skip the Referrer type, Active status and owner-matched salesperson. Contacts can be created without a mapped organization |
+| Live sync | `orchestrator.js` `createContact` / `createOrganization` auto-create with no `referralSourceId`, relationship status or salesperson (types come from the mapped defaults, not Referrer), so Albi rejects them. Contacts can be created without a mapped organization |
 
 ## Goals
 
 1. A typical "quick win" record takes one keystroke and no wait before the next record is on screen.
-2. Low-risk work (exact email links, ready creates) can be done in bulk with one confirmation.
+2. Low-risk work (exact-match links and rechecks) can be done in bulk with one confirmation.
 3. All pending manual Albi edits are in one to-do list, followed by one targeted recheck.
 4. A record shows only what matters for the decision. Everything else is one click away.
 5. Candidates are ranked with visible reasons, and the top suggestion can be accepted in one action.
 6. Conflicts (live) has every Sample review capability through the same component and engine.
-7. Live-sync creates succeed in Albi: confirmed referral source, Referrer type, Active status, owner-matched salesperson, organization first.
+7. Live sync never creates Albi records on its own. New HubSpot records wait in Conflicts, where a reviewer creates them with their own referral source plus the Referrer type, Active status and owner-matched salesperson, organization first.
 8. Every write stays audited, admin-only, tenant-isolated, version-checked and duplicate-safe.
 
 ## Non-goals
@@ -71,14 +71,38 @@ Build a single `ReviewWorkspace` component, used by both pages:
 
 Both pages read and write the same review row shape and call the same resolution engine (`reviewResolutionService.js`, `reviewResolutionOptions.js`, `reviewService.js` recheck). `SampleReviewResolution.jsx` and `ConflictDetail.jsx` are replaced by shared pieces: `ReviewQueue`, `ReviewRecord`, `CandidateList`, `FieldDiff`, `ResolutionBar`, `AlbiTodo`.
 
-**Live conflicts become review rows.** Add `review_kind text not null default 'sample' check (review_kind in ('sample','live'))` and a nullable `conflict_id uuid` (FK to `h2a_conflicts (company_id, id)`) to `h2a_dry_run_reviews`.
+**Live conflicts become review rows.** Every point below is a design call settled after the builder check.
 
-- When live sync records a contacts or companies conflict, it also captures a `live` review row through the same capture path the dry run uses (same snapshots, candidates, evidence, readiness).
-- Existing open contact and company conflicts are backfilled by a one-off server task. It runs on demand from the Conflicts page ("Prepare open conflicts for review") and is idempotent on `(company_id, conflict_id)`.
-- When a live review row's resolution **completes**, or a recheck clears it as safe to link or create, the engine closes the linked `h2a_conflicts` row (`resolved`, with the matching `resolution_action`) and enqueues its `h2a_conflict_resumes` intent. Held activities resume through the existing dispatch path. This step is idempotent: replaying it never enqueues twice (the existing `unique (company_id, conflict_id)` on resumes).
-- "Skip" on a live row maps to the existing `skip_item` conflict action and its skipped-item ledger.
-- All sample queries (progress, fresh-sample gate, recheck-all batch) filter `review_kind = 'sample'`. Live queries filter `review_kind = 'live'`.
-- Activity-only conflict types that have no contact or company subject keep a minimal read-only legacy view inside the live queue until inventoried (see Left to the builder).
+- **Columns.** Add `review_kind text not null default 'sample' check (review_kind in ('sample','live'))` to `h2a_dry_run_reviews`.
+- **One live row per HubSpot record, never one per conflict.**
+  - Conflicts are deduplicated per held activity, so one contact can have many open conflicts. Creates can't be undone, so the record must have exactly one place where it can be created.
+  - A partial unique index on `(company_id, portal_id, object_type, source_id) where review_kind = 'live' and status = 'needs_review'` enforces this.
+  - A new link table `h2a_live_review_conflicts (company_id, review_id, conflict_id, unique (company_id, conflict_id))` attaches every open contact or company conflict for that source to its live row.
+- **Run ownership.**
+  - `run_id` stays not null and holds the live run that first captured the row. Later runs refresh the row's evidence in place instead of capturing a new row.
+  - Runs that still have open live rows are not pruned. Change the live-row FK path so a run delete is restricted while open live rows exist, rather than cascading.
+  - The per-run unique key keeps applying to sample rows. Live rows rely on the partial index above.
+- **Currency rule.**
+  - `stillCurrent()` (`reviewResolutionService.js`) becomes kind-aware. A sample row is current under today's rule (latest completed sample dry run, capture version 1).
+  - A live row is current while it is `needs_review` and its `updated_at` matches the expected version.
+  - `getDryRunReview` and the recheck batch stop requiring a matching sample `run_id` for live rows. Batches gain `review_kind`, with `run_id` nullable for live batches, and the Albi to-do batch may span both kinds.
+- **Capture.**
+  - Live capture is a new path beside `conflict()` → `recordDryRunReview`, because that path only runs when `capturesReview(ctx)` is true and is keyed per run.
+  - Both paths share the snapshot, candidate, evidence and readiness builders. Only the upsert differs: live capture upserts on the live partial key and links the conflict.
+- **Backfill.**
+  - A one-off server task, run on demand from the Conflicts page ("Prepare open conflicts for review"), captures existing open contact and company conflicts.
+  - It is idempotent on the link table's `(company_id, conflict_id)` and the live partial key.
+- **Closing, in one transaction.**
+  - When a live row's resolution completes, a new RPC does all of the following in a single transaction: saves the mapping, marks every linked open conflict `resolved` (with the matching `resolution_action`), and inserts one `h2a_conflict_resumes` intent per conflict (existing `unique (company_id, conflict_id)`).
+  - It extends the pattern of the existing conflict-resolve RPC in `h2a-mapping-target-ownership.sql`. Resume dispatch then uses the existing path.
+- **Clears without a reviewer.**
+  - A later sync run, or a recheck, may find the record now auto-links or is already mapped. The same RPC then closes the row (`no_longer_in_scope`, outcome `resolved_by_sync`) and resolves and resumes its conflicts.
+- **Source gone.**
+  - When the HubSpot source was merged, the row shows the merge banner and the reviewer follows the survivor. Resolving the survivor's row closes this one the same way.
+  - When the source was deleted (recheck outcome `source_missing` with no `mergedInto`), the row becomes `no_longer_in_scope`. Its conflicts are marked `skipped` and added to the existing skipped-item ledger, audited.
+- **Skip.** "Skip" on a live row marks all its linked conflicts skipped through the existing `skip_item` semantics and ledger.
+- **Kind filters.** All sample queries (progress, fresh-sample gate, recheck-all batch) filter `review_kind = 'sample'`. Live queries filter `review_kind = 'live'`.
+- **Retiring the old endpoint.** After cutover, `h2a-conflict-resolve` rejects contact and company conflicts that have a live row (409 with "Resolve this in the review workspace"). It stays only for activity-only conflict types. Those keep a minimal read-only legacy view inside the live queue until inventoried (see Left to the builder).
 
 ### 2. Triage queue
 
@@ -158,17 +182,23 @@ When a contact's create is blocked only by `organization_not_synced`, and the or
 
 Contacts are never created without a mapped organization when HubSpot has one associated. A contact with no HubSpot organization may still be created without one (unchanged behavior).
 
-### 7. Live-sync creates (go-live fix)
+### 7. Live sync never auto-creates (go-live fix)
 
-- New company setting in `h2a_company_config`: `auto_create_referral_source_id` and `auto_create_referral_source_label`, plus `auto_create_referral_confirmed_by` / `_confirmed_at`. Settings shows a picker of live Albi referral sources and a **Confirm** button. Changing it requires confirming again. *Which source to use: open question for the user (see below).*
-- `orchestrator.js` live `createContact` and `createOrganization` load create defaults once per run (`loadCreateDefaults` / `resolveCreateDefaults`) and send `referralSourceID`, relationship type Referrer, relationship status Active and the owner-matched salesperson. They use the same field names and defaults as review creates. This is one shared helper, not a copy.
-- If the setting is unconfirmed, the confirmed source no longer exists in Albi, or defaults return a blocked reason, the live create does **not** call Albi. It records a live review row with the named blocked reason (`referral_source_not_configured`, `referrer_type_missing`, `active_status_missing`, `owner_not_found`, `salesperson_not_found`).
-- Live contact creates require a mapped organization when HubSpot has an associated company. Otherwise the contact is held with `organization_not_synced` (org-first).
-- Preflight reports an unconfirmed auto-create referral source as a blocking item before live sync can be enabled.
+*User decided:* live sync never creates Albi records itself. A new record waits in Conflicts until a reviewer creates it with a referral source chosen from the dropdown.
+
+- In `orchestrator.js`, the live paths that call `deps.albi.createContact` and `deps.albi.createOrganization` are replaced by capturing a `live` review row with reason `new_record_needs_review` (one new reason in the shared catalog, plain copy: "New in HubSpot, not in Albi yet"). No live-sync code path calls an Albi create.
+  - The row carries the same create readiness the dry run computes (`createReadiness`, `organization_not_synced`, named blocked reasons).
+  - The item result is recorded as held, not created.
+  - Held activities that depend on the record wait on its conflict and resume through the existing `h2a_conflict_resumes` path once the review creates or links it.
+- Create-ready new records with zero candidates land in the **Quick wins** bucket. They are still one-at-a-time creates with a blank referral dropdown (§5), never bulk.
+- Creates made from a live review use the shared engine and `createDefaults.js` (Referrer, Active, owner-matched salesperson, chosen referral source), exactly like Sample review creates.
+- Org-first applies: a new contact whose HubSpot organization is also new waits behind the organization. Its record offers "Create organization and contact" (§6).
+- Repeat runs are duplicate-safe: a source that already has an open `live` review row or open conflict is not captured again. That row's evidence is refreshed instead.
+- No referral-source company setting and no Preflight item are needed.
 
 ### 8. Named blocked reasons everywhere
 
-One catalog (extending `BLOCKED_COPY` into `shared/`) with plain copy for: `referral_source_not_configured`, `referrer_type_missing`, `active_status_missing`, `owner_not_found`, `salesperson_not_found`, `source_already_mapped`, `multiple_organizations`, `organization_not_synced`. It is used by the queue badge, the record view and Preflight.
+One catalog (extending `BLOCKED_COPY` into `shared/`) with plain copy for: `referrer_type_missing`, `active_status_missing`, `owner_not_found`, `salesperson_not_found`, `source_already_mapped`, `multiple_organizations`, `organization_not_synced`. It is used by the queue badge, the record view and Preflight.
 
 ### 9. Bulk actions
 
@@ -227,7 +257,7 @@ A throwaway, clickable prototype of the workspace runs locally on mock data so t
 
 Test-first throughout:
 
-- `npm run test:h2a` for engine, ranking, buckets, bulk eligibility, live capture, close-and-resume, orchestrator create defaults, org-first.
+- `npm run test:h2a` for engine, ranking, buckets, bulk eligibility, live capture, close-and-resume, live sync never calling an Albi create, live capture of new records, org-first.
 - `npm run test:h2a:schema` for new columns, constraints, `review_kind` filters.
 - `npm run test:h2a:e2e` for one live conflict → review → resolve → resume path.
 - `npm run build`.
@@ -241,7 +271,3 @@ Before any push, the real app is exercised locally with `npm run dev:local` (Vit
 - How the backfill task is triggered and paginated.
 - Inventory of activity-only conflict types and whether any need more than a read-only view.
 - Visual styling, within the existing Tailwind brand palette, without emojis.
-
-## Open question for the user
-
-1. **Which Albi referral source should automatic (live-sync) creates use?** It is stored as a confirmed company setting. Until it is confirmed, live creates are held for review instead of sent to Albi.
