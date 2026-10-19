@@ -184,3 +184,47 @@ test('capture requires a persisted conflict id and a valid classification', asyn
   await assert.rejects(() => captureLiveReview(deps, { ...base, conflictId: undefined }), /conflict/i)
   await assert.rejects(() => captureLiveReview(deps, { ...base, conflictType: 'RAW', conflictId: 'conflict-a' }), /classification/)
 })
+
+test('capture passes create readiness into triage', async () => {
+  const { db, deps } = fixture()
+  await captureLiveReview(deps, { ...base, conflictId: 'conflict-a', createReadiness: { ready: true, referralSources: [{ id: '1', label: 'Web' }] } })
+  assert.equal(db.tables.h2a_dry_run_reviews[0].triage_bucket, 'quick')
+  assert.deepEqual(db.tables.h2a_dry_run_reviews[0].triage_details, { quickKind: 'create' })
+  const { db: other, deps: otherDeps } = fixture()
+  await captureLiveReview(otherDeps, { ...base, conflictId: 'conflict-a', createReadiness: { ready: false, blockedReason: 'salesperson_not_found' } })
+  assert.equal(other.tables.h2a_dry_run_reviews[0].triage_bucket, 'blocked')
+  assert.deepEqual(other.tables.h2a_dry_run_reviews[0].triage_details, { blockedReason: 'salesperson_not_found' })
+})
+
+test('a capture without a source keeps the stored source snapshot', async () => {
+  const { db, deps } = fixture()
+  await captureLiveReview(deps, { ...base, conflictId: 'conflict-a' })
+  await captureLiveReview(deps, { ...base, source: undefined, reason: 'missing_hubspot_contact', conflictType: 'missing_source',
+    runId: 'run-2', conflictId: 'conflict-b' })
+  const row = db.tables.h2a_dry_run_reviews[0]
+  assert.equal(row.reason, 'missing_hubspot_contact')
+  assert.deepEqual(row.source_snapshot, { id: '10', firstName: 'Ada', lastName: 'Lovelace', email: 'ada@example.com' })
+  // A first capture without a source still stores the bare identity.
+  const { db: fresh, deps: freshDeps } = fixture()
+  await captureLiveReview(freshDeps, { ...base, source: undefined, reason: 'missing_hubspot_contact', conflictType: 'missing_source', conflictId: 'conflict-c' })
+  assert.deepEqual(fresh.tables.h2a_dry_run_reviews[0].source_snapshot, { id: '10' })
+})
+
+test('refresh keeps stored merge and blocked knowledge the capture lacks', async () => {
+  const { db, deps } = fixture()
+  await captureLiveReview(deps, { ...base, conflictId: 'conflict-a', createReadiness: { ready: false, blockedReason: 'salesperson_not_found' } })
+  // Readiness unknown on this capture (read failed): the stored block stays.
+  await captureLiveReview(deps, { ...base, runId: 'run-2', conflictId: 'conflict-b', evidence: ['name'] })
+  assert.equal(db.tables.h2a_dry_run_reviews[0].triage_bucket, 'blocked')
+  assert.deepEqual(db.tables.h2a_dry_run_reviews[0].triage_details, { blockedReason: 'salesperson_not_found' })
+  // Merge state is only known from a live HubSpot read; capture never clears it.
+  db.tables.h2a_dry_run_reviews[0].triage_details = { merged: true }
+  db.tables.h2a_dry_run_reviews[0].triage_bucket = 'blocked'
+  await captureLiveReview(deps, { ...base, runId: 'run-3', conflictId: 'conflict-c', createReadiness: { ready: true } })
+  assert.equal(db.tables.h2a_dry_run_reviews[0].triage_bucket, 'blocked')
+  assert.deepEqual(db.tables.h2a_dry_run_reviews[0].triage_details, { merged: true })
+  // Known readiness replaces a stored block.
+  db.tables.h2a_dry_run_reviews[0].triage_details = { blockedReason: 'salesperson_not_found' }
+  await captureLiveReview(deps, { ...base, runId: 'run-4', conflictId: 'conflict-d', createReadiness: { ready: true } })
+  assert.deepEqual(db.tables.h2a_dry_run_reviews[0].triage_details, { quickKind: 'create' })
+})

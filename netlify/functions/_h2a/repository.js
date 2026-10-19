@@ -449,11 +449,22 @@ export function createH2ARepository(supabase) {
       for (let attempt = 0; attempt < 3; attempt += 1) {
         const existing = checked(await openLive().maybeSingle())
         if (existing?.id) {
-          if (Object.keys(evidence).every(key => stableJson(existing[key]) === stableJson(evidence[key]))) {
+          const next = { ...evidence }
+          // A capture with no HubSpot source (e.g. missing contact) never replaces a rich stored snapshot with {id}.
+          if (input.source_known === false && Object.keys(existing.source_snapshot ?? {}).some(key => key !== 'id')) {
+            next.source_snapshot = existing.source_snapshot
+          }
+          if (typeof input.triage_for === 'function') {
+            const triage = input.triage_for(existing)
+            requireReviewValue(triage?.bucket, new Set(TRIAGE_BUCKETS), 'bucket')
+            next.triage_bucket = triage.bucket
+            next.triage_details = safeTriageDetails(triage.details ?? {})
+          }
+          if (Object.keys(next).every(key => stableJson(existing[key]) === stableJson(next[key]))) {
             return { id: existing.id, inserted: false }
           }
           const refreshed = checked(await supabase.from('h2a_dry_run_reviews')
-            .update({ ...evidence, updated_at: new Date().toISOString() })
+            .update({ ...next, updated_at: new Date().toISOString() })
             .eq('company_id', companyId).eq('id', existing.id).eq('review_kind', 'live').eq('status', 'needs_review')
             .select(REVIEW_COLUMNS).maybeSingle())
           if (refreshed?.id) return { id: refreshed.id, inserted: false }

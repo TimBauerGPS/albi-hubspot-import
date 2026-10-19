@@ -33,6 +33,20 @@ export function createTriageCapabilities(repository) {
     getCurrentReviewResolution: bind('getCurrentReviewResolution') })
 }
 
+// Merge state is live-only: carry a stored merge block forward unless the caller says (null) it is not merged.
+export function carriedMerge(stored, mergedInto) {
+  return mergedInto === undefined && stored?.triage_details?.merged ? { sourceId: 'stored' } : mergedInto
+}
+
+// Readiness the caller did not read is carried over from the stored triage rather than guessed.
+export function carriedReadiness(stored, createReadiness) {
+  if (createReadiness !== undefined) return createReadiness
+  const details = stored?.triage_details ?? {}
+  if (details.blockedReason) return { ready: false, blockedReason: details.blockedReason }
+  if (stored?.triage_bucket === 'quick' && details.quickKind === 'create') return { ready: true }
+  return undefined
+}
+
 const sameTriage = (row, next) => row?.triage_bucket === next.bucket &&
   JSON.stringify(row?.triage_details ?? {}) === JSON.stringify(next.details)
 
@@ -53,15 +67,8 @@ export async function refreshReviewTriage(repository, { companyId, row, resoluti
       ? await repository.getMappings(companyId).catch(() => null) : null
     const mappings = Array.isArray(all) ? all : all?.[objectType === 'companies' ? 'organizations' : 'contacts'] ?? []
     const ranking = rankReviewCandidates({ objectType, source, candidates, mappings, portalId: row.portal_id, sourceId: row.source_id })
-    // Merge state is live-only: carry a stored merge block forward unless the caller says (null) it is not merged.
-    const merged = mergedInto === undefined && row.triage_details?.merged ? { sourceId: 'stored' } : mergedInto
-    let readiness = createReadiness
-    if (readiness === undefined) {
-      const stored = row.triage_details ?? {}
-      if (stored.blockedReason) readiness = { ready: false, blockedReason: stored.blockedReason }
-      else if (row.triage_bucket === 'quick' && stored.quickKind === 'create') readiness = { ready: true }
-    }
-    const next = computeTriage({ row, ranking, createReadiness: readiness, resolutionStatus: status, mergedInto: merged })
+    const next = computeTriage({ row, ranking, createReadiness: carriedReadiness(row, createReadiness),
+      resolutionStatus: status, mergedInto: carriedMerge(row, mergedInto) })
     if (sameTriage(row, next)) return next
     await repository.setReviewTriage(companyId, row.id, next)
     return next

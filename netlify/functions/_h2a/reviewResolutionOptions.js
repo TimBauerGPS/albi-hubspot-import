@@ -4,7 +4,7 @@ import { buildAlbiRecordUrl } from '../../../shared/h2aProviderLinks.js'
 import { resolveContactType } from './options.js'
 import { decideContactMatch, decideOrganizationMatch } from './match.js'
 import { safeReviewSnapshot } from './review.js'
-import { loadCreateDefaults } from './createDefaults.js'
+import { buildCreateReadiness, loadCreateDefaults, safeReferralSources } from './createDefaults.js'
 
 const providerId = value => typeof value === 'string' && /^[1-9]\d{0,99}$/.test(value)
 const record = value => value && typeof value === 'object' && !Array.isArray(value)
@@ -180,15 +180,10 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
       const typeReady = type.action === 'resolved' && providerId(type.contactTypeId) &&
         Number.isSafeInteger(Number(type.contactTypeId))
       const baseReady = nameReady && organizationReady && typeReady && !organizationBlock
-      const sources = baseReady ? await reads.albiRead.listReferralSources() : []
-      const referralSources = Array.isArray(sources) ? sources.filter(option => providerId(option?.id) && typeof option.label === 'string')
-        .map(option => ({ id: option.id, label: option.label })).slice(0, 100) : []
+      const referralSources = safeReferralSources(baseReady ? await reads.albiRead.listReferralSources() : [])
       const defaults = baseReady && referralSources.length > 0 ? await loadCreateDefaults({ hubspotRead: hubspot, albiRead: reads.albiRead,
         objectType: row.object_type, sourceId: row.source_id }) : null
-      const ready = baseReady && referralSources.length > 0 && defaults?.ok === true
-      const blockedReason = organizationBlock ? 'organization_not_synced' : defaults && defaults.ok !== true ? defaults.reason : undefined
-      const details = { ready, ...(ready ? { referralSources } : {}), ...(blockedReason ? { blockedReason } : {}),
-        ...(organizationBlock ? { organization: organizationBlock } : {}) }
+      const details = buildCreateReadiness({ baseReady, organizationBlock, referralSources, defaults })
       return { ...unavailable, ...(forced ? { forceCreateReadiness: { eligible: true, ...details } } : { createReadiness: details }) }
     }
   } catch { /* A failed read cannot become an actionable projection. */ }

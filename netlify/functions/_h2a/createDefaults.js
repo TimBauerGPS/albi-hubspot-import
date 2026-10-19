@@ -33,3 +33,18 @@ export async function loadCreateDefaults({ hubspotRead, albiRead, objectType, so
   const owners = ownerId ? await hubspotRead.listOwners() : []
   return resolveCreateDefaults({ ...options, ownerId, owners })
 }
+
+// Bounded, id/label-only copy of Albi's live referral-source list.
+export function safeReferralSources(sources) {
+  return Array.isArray(sources) ? sources.filter(option => providerId(option?.id) && typeof option.label === 'string')
+    .map(option => ({ id: option.id, label: option.label })).slice(0, 100) : []
+}
+
+// Pure. The one create-readiness shape, shared by the review detail projection and live capture.
+// baseReady covers the record's own checks; an organization block always names organization_not_synced.
+export function buildCreateReadiness({ baseReady, organizationBlock = null, referralSources = [], defaults = null }) {
+  const ready = Boolean(baseReady) && referralSources.length > 0 && defaults?.ok === true
+  const blockedReason = organizationBlock ? 'organization_not_synced' : defaults && defaults.ok !== true ? defaults.reason : undefined
+  return { ready, ...(ready ? { referralSources } : {}), ...(blockedReason ? { blockedReason } : {}),
+    ...(organizationBlock ? { organization: organizationBlock } : {}) }
+}

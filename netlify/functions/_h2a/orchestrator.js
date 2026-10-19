@@ -8,6 +8,7 @@ import { resolveActivityTargets, buildAlbiActivity } from './activity.js'
 import { resolveActivityType, resolveContactType } from './options.js'
 import { reserveDelivery, completeDelivery } from './deliveries.js'
 import { captureLiveReview } from './liveReview.js'
+import { buildCreateReadiness, resolveCreateDefaults, safeReferralSources } from './createDefaults.js'
 
 const text = value => value == null ? '' : String(value).trim()
 const sourceFields = record => record?.properties ?? record ?? {}
@@ -135,7 +136,7 @@ async function conflict(deps, ctx, data) {
     // Live and backfill runs both write to Albi, so both hold contact/company conflicts in the live review queue.
     if (['contacts', 'companies'].includes(data.objectType)) {
       await captureLiveReview(deps, { companyId, runId, portalId, objectType: data.objectType, sourceId: data.sourceId,
-        reason: data.reason, conflictType: data.type, source: data.source ?? { id: data.sourceId },
+        reason: data.reason, conflictType: data.type, source: data.source, createReadiness: data.createReadiness,
         candidates: data.candidates ?? [], evidence: data.evidence, proposedChanges: data.proposedChanges,
         conflictId: text(persisted?.id),
         mappings: data.objectType === 'companies' ? ctx.mappings?.organizations : ctx.mappings?.contacts })
@@ -145,6 +146,30 @@ async function conflict(deps, ctx, data) {
     source_id: data.sourceId, outcome: ctx.mode === 'dry_run' ? 'dry_run' : 'conflict',
     sanitized_details: { reason: data.reason, conflictType: data.type,
       ...(ctx.mode === 'dry_run' ? { proposedAction: 'review_conflict' } : {}) } })
+}
+
+// Create readiness for a new record at live capture, built like the review detail projection:
+// Albi create options and referral sources once per run, the record's HubSpot owner, and the org gate.
+// Any read failure leaves readiness unknown so the record is still captured (triage refreshes later).
+async function captureCreateReadiness(deps, ctx, { objectType, sourceId, organization = null }) {
+  try {
+    const organizationBlock = objectType === 'contacts' && organization?.id &&
+      !mappingFor(ctx.mappings.organizations, ctx.portalId, text(organization.id)) ? { sourceId: text(organization.id), reviewId: null } : null
+    if (organizationBlock) return buildCreateReadiness({ baseReady: false, organizationBlock })
+    ctx.createOptions ??= Promise.resolve().then(async () => ({ options: await deps.albi.listCreateOptions(),
+      referralSources: safeReferralSources(await deps.albi.listReferralSources()) }))
+    const { options, referralSources } = await ctx.createOptions
+    let defaults = null
+    if (referralSources.length > 0) {
+      const ownerId = await deps.hubspot.getOwnerId(objectType, sourceId)
+      if (ownerId && !ctx.owners.has(String(ownerId))) {
+        ctx.createOwners ??= Promise.resolve().then(() => deps.hubspot.listOwners())
+        for (const owner of await ctx.createOwners) ctx.owners.set(String(owner.id), owner)
+      }
+      defaults = resolveCreateDefaults({ ...options, ownerId, owners: [...ctx.owners.values()] })
+    }
+    return buildCreateReadiness({ baseReady: true, referralSources, defaults })
+  } catch { return undefined }
 }
 
 async function resolveOrganization(deps, ctx, source) {
@@ -183,7 +208,8 @@ async function resolveOrganization(deps, ctx, source) {
   // Live sync never creates Albi records: a new organization waits for a reviewer in the live review queue.
   // outcome stays safe_to_create so a contact behind it is evaluated (and held) the same way as in the dry run.
   await conflict(deps, ctx, { objectType: 'companies', sourceId, type: 'identity', reason: 'new_record_needs_review',
-    source, candidates: [], evidence: evaluation.evidence, proposedChanges: evaluation.proposedChanges })
+    source, candidates: [], evidence: evaluation.evidence, proposedChanges: evaluation.proposedChanges,
+    createReadiness: await captureCreateReadiness(deps, ctx, { objectType: 'companies', sourceId }) })
   return { id: sourceId, action: 'conflict', outcome: 'safe_to_create', reason: 'new_record_needs_review',
     organizationTypeId: String(orgTypeId) }
 }
@@ -223,7 +249,8 @@ async function resolveContact(deps, ctx, source, organization, associatedCompany
   }
   // Live sync never creates Albi records: a new contact waits for a reviewer in the live review queue.
   await conflict(deps, ctx, { objectType: 'contacts', sourceId, type: 'identity', reason: 'new_record_needs_review',
-    source, candidates: [], evidence: evaluation.evidence, proposedChanges: evaluation.proposedChanges })
+    source, candidates: [], evidence: evaluation.evidence, proposedChanges: evaluation.proposedChanges,
+    createReadiness: await captureCreateReadiness(deps, ctx, { objectType: 'contacts', sourceId, organization }) })
   return { id: sourceId, action: 'conflict', reason: 'new_record_needs_review' }
 }
 
@@ -279,8 +306,16 @@ async function processActivity(deps, ctx, activity, deadline) {
   for (const id of contactIds) {
     const source = contacts.find(record => idOf(record) === id)
     if (!source) {
-      await conflict(deps, ctx, { objectType: 'contacts', sourceId: id, type: 'missing_source', reason: 'missing_hubspot_contact' })
-      contactsResolved.push({ id, action: 'conflict', reason: 'missing_hubspot_contact' })
+      try {
+        await conflict(deps, ctx, { objectType: 'contacts', sourceId: id, type: 'missing_source', reason: 'missing_hubspot_contact' })
+        contactsResolved.push({ id, action: 'conflict', reason: 'missing_hubspot_contact' })
+      } catch (error) {
+        // Like the create branches: a capture failure fails this item and holds the activity, not the run.
+        if (error instanceof ReviewCaptureError) throw error
+        await recordOnce(deps.repository, companyId, runId, { portal_id: portalId, object_type: 'contacts', source_id: id,
+          outcome: 'failed', sanitized_details: safeFailure(error) })
+        contactsResolved.push({ id, action: 'conflict', reason: safeError(error) })
+      }
       continue
     }
     try {

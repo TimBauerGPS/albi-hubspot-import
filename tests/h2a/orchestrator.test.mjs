@@ -702,6 +702,67 @@ test('backfill divides a seeded range into Pacific day reads across spring DST',
   assert.deepEqual(saved.at(-1), { id: 'window1', patch: { status: 'completed', run_id: 'run1' } })
 })
 
+// Albi create options and HubSpot owners that make a new record create-ready.
+const createReadyReads = (deps, { ownerId = '7', salespeople = [{ id: '5', label: 'Pat Lee' }] } = {}) => {
+  deps.createOptionCalls = 0
+  deps.albi.listCreateOptions = async () => {
+    deps.createOptionCalls += 1
+    return { relationshipTypes: [{ id: '1', label: 'Referrer' }], relationshipStatuses: [{ id: '2', label: 'Active' }], salespeople }
+  }
+  deps.albi.listReferralSources = async () => [{ id: '3', label: 'Web' }]
+  deps.hubspot.getOwnerId = async () => ownerId
+  deps.hubspot.listOwners = async () => [{ id: '7', firstName: 'Pat', lastName: 'Lee' }]
+  return deps
+}
+
+test('create-ready new contact with mapped organization is captured as quick create', async () => {
+  const deps = createReadyReads(exactAssociations(throwingCreates(liveFixture({ albiOrganizations: existingAlbi().albiOrganizations,
+    activities: [
+      { id: '50', occurredAt: '2026-10-02T12:00:00Z', objectType: 'calls', properties: { hs_timestamp: '2026-10-02T12:00:00Z' } },
+      { id: '51', occurredAt: '2026-10-02T12:01:00Z', objectType: 'calls', properties: { hs_timestamp: '2026-10-02T12:01:00Z' } },
+    ] }))))
+  await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
+  assert.deepEqual(deps.liveReviews.map(review => [review.object_type, review.reason, review.triage_bucket, review.triage_details]),
+    [['contacts', 'new_record_needs_review', 'quick', { quickKind: 'create' }]])
+  assert.equal(deps.createOptionCalls, 1, 'create options are read once per run')
+})
+
+test('new contact behind an unmapped organization is captured blocked organization_not_synced', async () => {
+  const deps = createReadyReads(exactAssociations(throwingCreates(liveFixture())))
+  await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
+  const contact = deps.liveReviews.find(review => review.object_type === 'contacts')
+  assert.equal(contact.triage_bucket, 'blocked')
+  assert.deepEqual(contact.triage_details, { blockedReason: 'organization_not_synced' })
+  const organization = deps.liveReviews.find(review => review.object_type === 'companies')
+  assert.deepEqual([organization.triage_bucket, organization.triage_details], ['quick', { quickKind: 'create' }])
+})
+
+test('owner without matching salesperson captures blocked salesperson_not_found', async () => {
+  const deps = createReadyReads(exactAssociations(throwingCreates(liveFixture({ companyIds: [] })), ['10'], []), { salespeople: [] })
+  await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
+  assert.deepEqual(deps.liveReviews.map(review => [review.triage_bucket, review.triage_details]),
+    [['blocked', { blockedReason: 'salesperson_not_found' }]])
+})
+
+test('readiness read failure still captures the row', async () => {
+  const deps = createReadyReads(exactAssociations(throwingCreates(liveFixture({ companyIds: [] })), ['10'], []))
+  deps.albi.listCreateOptions = async () => { throw new ApiError('transient', { operation: 'listRelationshipTypes', status: 503 }) }
+  await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
+  assert.deepEqual(deps.liveReviews.map(review => [review.reason, review.triage_bucket]), [['new_record_needs_review', 'decision']])
+  assert.ok(!deps.items.some(item => item.outcome === 'failed'))
+})
+
+test('a missing HubSpot contact capture failure fails the item, not the run', async () => {
+  const deps = exactAssociations(throwingCreates(liveFixture({ companyIds: [] })), ['10'], [])
+  deps.hubspot.getContacts = async () => []
+  deps.repository.upsertLiveReview = async () => { throw Error('storage unavailable') }
+  const result = await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
+  assert.equal(result.status, 'partially_failed')
+  assert.ok(deps.items.some(item => item.object_type === 'contacts' && item.source_id === '10' && item.outcome === 'failed'))
+  assert.ok(!deps.items.some(item => item.object_type === 'calls' && item.outcome === 'delivered'))
+  assert.equal(deps.cursors.length, 0)
+})
+
 test('backfill also never auto-creates and holds new records as live review rows', async () => {
   const deps = exactAssociations(throwingCreates(liveFixture()))
   deps.repository.listBackfillWindows = async (_company, objectType) => objectType === 'calls' ? [{
