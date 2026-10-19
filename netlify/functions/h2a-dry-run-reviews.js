@@ -130,7 +130,8 @@ async function detail(repository, companyId, runId, row, auth, options, config) 
       mergedInto = loaded?.merge ?? null
     } catch { hubspotOrganizations = null }
   }
-  return { ...projectReviewRow(row, { detail: true }), resolutionStatus: projected.resolution?.status ?? null,
+  const mappings = row.candidate_snapshots?.length ? await repository.getMappings(companyId).catch(() => null) : null
+  return { ...projectReviewRow(row, { detail: true, mappings: mappings ?? [] }), resolutionStatus: projected.resolution?.status ?? null,
     events: events.map(projectReviewEvent), resolution: projected.resolution,
     resolutionCapability, hubspotOrganizations, ...(mergedInto ? { mergedInto } : {}), ...resolutionOptions }
 }

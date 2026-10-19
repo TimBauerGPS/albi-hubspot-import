@@ -66,12 +66,12 @@ function idOf(record) {
   return value === undefined || value === null || String(value).trim() === '' ? null : String(value)
 }
 
-function mappedSourceId(record) {
+export function mappedSourceId(record) {
   const value = record?.sourceId ?? record?.hubspotId ?? record?.hubspot_id
   return value === undefined || value === null || String(value).trim() === '' ? null : String(value)
 }
 
-function mappedTargetId(record) {
+export function mappedTargetId(record) {
   const value = record?.targetId ?? record?.albiId ?? record?.albi_contact_id ??
     record?.albi_organization_id ?? record?.target_id
   return value === undefined || value === null || String(value).trim() === '' ? null : String(value)
@@ -86,7 +86,7 @@ function phoneInfo(value) {
   return normalizePhone(value)
 }
 
-function exactPhone(left, right) {
+export function exactPhone(left, right) {
   const a = phoneInfo(left)
   const b = phoneInfo(right)
   return !a.conflictReason && !b.conflictReason && a.comparable !== null && a.comparable === b.comparable

@@ -313,7 +313,9 @@ test('detail projection independently re-sanitizes stored JSON into the exact de
     portalId: null,
     sourceSnapshot: { id: 'hs', firstName: 'A', lastName: 'Person', email: 'a@example.com', phoneNumber: '5551112222', organizationName: 'Allied' },
     candidateSnapshots: [{ id: 'albi', firstName: 'A' }], matchEvidence: ['email'],
-    proposedChanges: { updates: { jobTitle: 'Owner' }, conflicts: {}, unchanged: ['email'] }, lastRecheckedAt: null, lastRecheckedBy: null, createdAt: 'created', updatedAt: 'updated' })
+    proposedChanges: { updates: { jobTitle: 'Owner' }, conflicts: {}, unchanged: ['email'] },
+    rankedCandidates: [{ id: 'albi', matchReasons: ['same_first_name'], warnings: [], strength: 'Weak', linkedElsewhere: 0 }], suggestedCandidateId: null,
+    lastRecheckedAt: null, lastRecheckedBy: null, createdAt: 'created', updatedAt: 'updated' })
 })
 
 test('unknown classifications are generic on display and rejected for capture', () => {

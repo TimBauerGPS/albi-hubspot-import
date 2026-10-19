@@ -2,6 +2,7 @@ import { H2A_REVIEW_REASON_CATALOG, H2A_REVIEW_ERROR_CATEGORIES, H2A_REVIEW_ERRO
 import { decideContactMatch, decideOrganizationMatch, selectReviewCandidates } from './match.js'
 import { normalizePhone } from './normalize.js'
 import { resolveContactType } from './options.js'
+import { rankReviewCandidates } from './ranking.js'
 
 const MAX_STRING = 500
 const MAX_CANDIDATES = 10
@@ -36,7 +37,7 @@ const SHARED_FIELDS = {
 }
 const CONTACT_FIELDS = {
   id: ['id', 'targetId', 'albiId'], firstName: ['firstName', 'firstname'], lastName: ['lastName', 'lastname'], fullName: ['fullName', 'fullname'],
-  email: SHARED_FIELDS.email, phoneNumber: SHARED_FIELDS.phoneNumber, mobileNumber: ['mobileNumber', 'mobilePhone', 'mobilephone', 'mobile'],
+  email: SHARED_FIELDS.email, additionalEmails: ['hs_additional_emails', 'additionalEmails'], phoneNumber: SHARED_FIELDS.phoneNumber, mobileNumber: ['mobileNumber', 'mobilePhone', 'mobilephone', 'mobile'],
   organizationId: ['organizationId', 'organization_id'], organizationName: ['organizationName', 'company', 'companyName'], jobTitle: ['jobTitle', 'jobtitle', 'title'],
   address1: SHARED_FIELDS.address1, address2: SHARED_FIELDS.address2, city: SHARED_FIELDS.city, state: SHARED_FIELDS.state,
   zipcode: SHARED_FIELDS.zipcode, country: SHARED_FIELDS.country,
@@ -221,7 +222,7 @@ export function evaluateContactReview({ source, candidates = [], mappings = [], 
   return reviewResult('safe_to_create', '', decision, [], 'contact')
 }
 
-export function projectReviewRow(row, { detail = false } = {}) {
+export function projectReviewRow(row, { detail = false, mappings = [] } = {}) {
   const stored = object(row)
   const objectType = ['contacts', 'companies'].includes(stored.object_type) ? stored.object_type : null
   const source = safeReviewSnapshot(stored.source_snapshot, objectType)
@@ -237,6 +238,11 @@ export function projectReviewRow(row, { detail = false } = {}) {
     projected.candidateSnapshots = safeReviewCandidates(stored.candidate_snapshots, objectType)
     projected.matchEvidence = safeReviewEvidence(stored.match_evidence)
     projected.proposedChanges = safeReviewChanges(stored.proposed_changes, objectType)
+    const scoped = Array.isArray(mappings) ? mappings : array(object(mappings)[objectType === 'companies' ? 'organizations' : 'contacts'])
+    const ranked = rankReviewCandidates({ objectType, source, candidates: projected.candidateSnapshots, mappings: scoped,
+      portalId: projected.portalId, sourceId: projected.sourceId })
+    projected.rankedCandidates = ranked.candidates
+    projected.suggestedCandidateId = ranked.suggestedCandidateId
   } else {
     projected.displayName = scalar(source.fullName ?? (objectType === 'companies' ? source.name : [source.firstName, source.lastName].filter(Boolean).join(' ')))
     projected.identity = { email: source.email ?? null, phone: source.phoneNumber ?? source.mobileNumber ?? null,
