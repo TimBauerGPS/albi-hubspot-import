@@ -271,9 +271,9 @@ test('orgFirstCreate is eligible only for a blocked contact whose organization i
   const contact = { company_id: 'c', id: 'k', portal_id: '123', object_type: 'contacts', review_kind: 'live', candidate_snapshots: [] }
   const org = { id: 'o', status: 'needs_review', object_type: 'companies', source_id: '900', candidate_snapshots: [], source_snapshot: { name: 'Acme' } }
   const repository = { findOpenLiveReviewBySource: async () => org }
-  const load = async () => ({ createReadiness: { ready: true } })
+  const load = async () => ({ createReadiness: { ready: true, referralSources: [{ id: '5', label: 'Network', extra: 'x' }, { id: 'bad', label: '' }] } })
   assert.deepEqual(await loadOrgFirstCreate({ row: contact, readiness, repository, reads: {}, load }),
-    { eligible: true, organizationReviewId: 'o', organizationName: 'Acme' })
+    { eligible: true, organizationReviewId: 'o', organizationName: 'Acme', referralSources: [{ id: '5', label: 'Network' }] })
   assert.deepEqual(await loadOrgFirstCreate({ row: contact, readiness, repository: { findOpenLiveReviewBySource: async () => null }, reads: {}, load }), { eligible: false })
   assert.deepEqual(await loadOrgFirstCreate({ row: contact, readiness, repository, reads: {}, load: async () => ({ createReadiness: { ready: false } }) }), { eligible: false })
   assert.deepEqual(await loadOrgFirstCreate({ row: contact, readiness: { ...readiness, blockedReason: 'x' }, repository, reads: {}, load }), { eligible: false })

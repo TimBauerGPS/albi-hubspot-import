@@ -51,6 +51,7 @@ export default function ReviewRecord({
   const snapshots = new Map(review.candidates.map(candidate => [candidate.id, candidate.snapshot]))
   const rankedInput = Array.isArray(item?.rankedCandidates) ? item.rankedCandidates
     : review.candidates.map(candidate => ({ id: candidate.id, matchReasons: [], warnings: [], strength: 'Weak', linkedElsewhere: 0 }))
+  const allIdsValid = rankedInput.every(ranked => idPattern.test(ranked?.id))
   const candidates = rankedInput.filter(ranked => idPattern.test(ranked?.id)).map(ranked => candidateView(ranked, snapshots.get(ranked.id)))
   const selected = candidates[candidateIndex] ?? null
   const suggested = candidates.find(candidate => candidate.id === item?.suggestedCandidateId) ?? null
@@ -72,7 +73,7 @@ export default function ReviewRecord({
   const identityActions = canAct && !merged && !fieldMode
   const canCreateNew = identityActions && (orgFirst ? review.actions.includes('create_albi') && referralSources.length > 0
     : candidates.length === 0 ? review.actions.includes('create_albi') && readiness?.ready === true && referralSources.length > 0
-      : review.actions.includes('force_create_albi') && readiness?.ready === true && referralSources.length > 0)
+      : review.actions.includes('force_create_albi') && allIdsValid && readiness?.ready === true && referralSources.length > 0)
   const create = canCreateNew ? { kind: orgFirst ? 'org' : candidates.length ? 'force' : 'create',
     label: orgFirst ? 'Create organization and contact' : candidates.length ? 'Add new in Albi instead' : 'Create in Albi' } : null
   const canLink = identityActions && review.actions.includes('link_existing')
@@ -98,9 +99,15 @@ export default function ReviewRecord({
   const allChosen = fieldMode && review.resolutionFields.every(field => fieldChoices[field.key] === 'hubspot' || fieldChoices[field.key] === 'albi')
   const setAll = value => setFieldChoices(Object.fromEntries(review.resolutionFields.map(field => [field.key, value])))
 
+  const emailMatchOf = candidate => candidate.matchReasons.includes('same_email') && !candidate.warnings.includes('different_email')
   function requestLink(candidate) {
-    if (candidate.linkedElsewhere > 0) setManyToOne(candidate.id)
-    else onLink?.(candidate, { approveManyToOne: false })
+    if (candidate.linkedElsewhere > 0) setManyToOne({ id: candidate.id, accept: false })
+    else onLink?.(candidate, { approveManyToOne: false, ...(emailMatchOf(candidate) ? { emailMatch: true } : {}) })
+  }
+  function requestAccept(candidate, emailMatch) {
+    // A stale suggestion that has since been linked elsewhere still needs explicit many-to-one approval.
+    if (candidate.linkedElsewhere > 0) setManyToOne({ id: candidate.id, accept: true, emailMatch })
+    else onAccept?.(candidate, { emailMatch })
   }
   function onCreateClick() {
     if (!referralSourceId) return
@@ -145,7 +152,10 @@ export default function ReviewRecord({
           onClick={() => onOpenMergedSurvivor?.({ sourceId: merged.sourceId, reviewId: typeof merged.reviewId === 'string' && merged.reviewId ? merged.reviewId : null })}>Review the surviving record</button></div>}
       {!merged && blockedCopy && !orgFirst && canAct && <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-900" role="status">
         <p className="font-semibold">Can’t create yet</p><p className="mt-1 text-xs">{blockedCopy}</p></div>}
+      {!merged && canAct && !blockedCopy && !create && !fieldMode && !showOrganizationChoice && !orgGate && !orgFirst && readiness && readiness.ready !== true && (review.actions.includes('create_albi') || review.actions.includes('force_create_albi')) &&
+        <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800" role="status">Creation is unavailable until the candidate and type checks are ready. Recheck this record after correcting them.</p>}
       {orgGate && organizationFirstCard(unsyncedOrganization)}
+      {create?.kind === 'force' && <p className="text-xs text-red-800">Adding a new record can create a duplicate, so the server rechecks every record before applying it.</p>}
       {orgFirst && canAct && <p className="rounded-lg border border-brand-200 bg-brand-50 px-3 py-2 text-sm text-gray-800">
         {item.orgFirstCreate.organizationName ? `${item.orgFirstCreate.organizationName} is not in Albi yet. ` : 'This contact’s HubSpot organization is not in Albi yet. '}
         Choose a referral source to create the organization and the contact together.</p>}
@@ -192,13 +202,13 @@ export default function ReviewRecord({
     {capability.canResolve && <ResolutionBar disabled={disabled} fieldMode={fieldMode} applyDisabled={!allChosen}
       onAllHubSpot={() => setAll('hubspot')} onAllAlbi={() => setAll('albi')}
       onApplyFields={() => onApplyFields?.(Object.fromEntries(review.resolutionFields.map(field => [field.key, fieldChoices[field.key]])))}
-      suggestion={suggestion} onAccept={() => suggestion && onAccept?.(suggestion.candidate, { emailMatch: suggestion.emailMatch })}
+      suggestion={suggestion} onAccept={() => suggestion && requestAccept(suggestion.candidate, suggestion.emailMatch)}
       selectedLink={selectedLink} onLinkSelected={() => selectedLink && requestLink(selectedLink)}
       create={create} referralSources={referralSources} referralSourceId={referralSourceId} onReferral={onReferral} referralRef={referralRef} onCreate={onCreateClick}
       showSkip={kind === 'live'} onSkip={onSkip} showRecheck onRecheck={onRecheck} />}
 
-    <ManyToOneDialog candidate={candidates.find(candidate => candidate.id === manyToOne) ?? null} objectLabel={objectLabel} busy={disabled}
+    <ManyToOneDialog candidate={candidates.find(candidate => candidate.id === manyToOne?.id) ?? null} objectLabel={objectLabel} busy={disabled}
       onCancel={() => setManyToOne(null)}
-      onConfirm={candidate => { setManyToOne(null); onLink?.(candidate, { approveManyToOne: true }) }} />
+      onConfirm={candidate => { setManyToOne(null); onLink?.(candidate, { approveManyToOne: true, ...(emailMatchOf(candidate) ? { emailMatch: true } : {}) }) }} />
   </section>
 }

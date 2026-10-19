@@ -223,6 +223,6 @@ export async function loadOrgFirstCreate({ row, readiness, repository, reads, lo
     if (loaded?.createReadiness?.ready !== true) return no
     const name = typeof candidate.source_snapshot?.name === 'string' ? candidate.source_snapshot.name.trim().slice(0, 200) : ''
     return { eligible: true, ...(organization?.id ? { organizationReviewId: organization.id } : {}),
-      ...(name ? { organizationName: name } : {}) }
+      ...(name ? { organizationName: name } : {}), referralSources: safeReferralSources(loaded.createReadiness.referralSources) }
   } catch { return no }
 }

@@ -171,7 +171,7 @@ test('linking a candidate with linkedElsewhere > 0 opens the many-to-one dialog 
   const plain = []
   const direct = await mount({ ...base, suggestedCandidateId: null }, { onLink: (...args) => plain.push(JSON.parse(JSON.stringify(args))) })
   direct.find('button', 'Link selected').props.onClick()
-  assert.deepEqual(j(plain[0][1]), { approveManyToOne: false })
+  assert.deepEqual(j(plain[0][1]), { approveManyToOne: false, emailMatch: true })
 })
 
 test('the referral select blurs after a change and create sends the chosen source', async () => {
@@ -243,4 +243,43 @@ test('shortcut help lists the keys and hides skip outside live', async () => {
   const sample = await rendered('ShortcutHelp.jsx', { open: true, kind: 'sample' })
   assert.match(sample, /Keyboard shortcuts/); assert.match(sample, /Accept the suggestion/); assert.doesNotMatch(sample, /Skip/)
   assert.match(await rendered('ShortcutHelp.jsx', { open: true, kind: 'live' }), /Skip \(live records only\)/)
+})
+
+test('accepting a stale suggestion that is now linked elsewhere goes through the many-to-one dialog', async () => {
+  const item = { ...base, rankedCandidates: [{ ...base.rankedCandidates[0], linkedElsewhere: 2 }] }
+  const links = [], accepts = []
+  const ui = await mount(item, { onLink: (...a) => links.push(j(a)), onAccept: (...a) => accepts.push(j(a)) })
+  ui.find('button', 'Accept suggestion').props.onClick(); ui.run()
+  assert.equal(accepts.length, 0); assert.equal(links.length, 0)
+  assert.match(ui.plain(), /already linked to 2 other HubSpot records/)
+  ui.find('button', 'Link anyway').props.onClick(); ui.run()
+  assert.deepEqual(links[0][1], { approveManyToOne: true, emailMatch: true })
+})
+
+test('a non-suggested same_email candidate keeps email-match semantics when linked', async () => {
+  const calls = []
+  const ui = await mount({ ...base, suggestedCandidateId: null }, { onLink: (...a) => calls.push(j(a)) })
+  ui.find('button', 'Link selected').props.onClick()
+  assert.equal(calls[0][1].emailMatch, true)
+})
+
+test('not-ready create without a blocked reason explains itself; force create warns about duplicates', async () => {
+  const out = await html({ ...none, createReadiness: { ready: false } })
+  assert.match(out, /Creation is unavailable until the candidate and type checks are ready\. Recheck this record after correcting them\./)
+  const forced = await html({ ...base, suggestedCandidateId: null })
+  assert.match(forced, /can create a duplicate, so the server rechecks every record before applying it/)
+  assert.doesNotMatch(await html({ ...none }), /create a duplicate/)
+})
+
+test('force create is not offered when a listed candidate id is invalid', async () => {
+  const item = { ...base, suggestedCandidateId: null, rankedCandidates: [...base.rankedCandidates, { id: 'bad', matchReasons: [], warnings: [], strength: 'Weak', linkedElsewhere: 0 }] }
+  assert.doesNotMatch(await html(item), /Add new in Albi instead/)
+})
+
+test('org-first create is enabled once a source from orgFirstCreate is chosen', async () => {
+  const item = { ...none, createReadiness: { ready: false, blockedReason: 'organization_not_synced', organization: { sourceId: '777' } },
+    orgFirstCreate: { eligible: true, organizationName: 'Acme', referralSources: SOURCES } }
+  const blank = await html(item)
+  assert.match(blank, /Real Estate/); assert.match(blank, /<button[^>]*disabled=""[^>]*>Create organization and contact/)
+  assert.doesNotMatch(await html(item, { referralSourceId: '5' }), /<button[^>]*disabled=""[^>]*>Create organization and contact/)
 })
