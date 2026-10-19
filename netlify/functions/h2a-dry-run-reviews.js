@@ -7,6 +7,7 @@ import { REVIEW_REASONS, projectReviewRow, projectReviewEvent, safeReviewSnapsho
 import { ApiError } from './_h2a/http.js'
 import { currentResolutionProjection } from './h2a-dry-run-review-resolutions.js'
 import { projectResolutionCapability } from './_h2a/resolutionCapability.js'
+import { createTriageCapabilities, refreshReviewTriage } from './_h2a/triage.js'
 import { loadReviewResolutionOptions } from './_h2a/reviewResolutionOptions.js'
 import { getH2AReviewActions } from '../../shared/h2aReviewReasons.js'
 
@@ -131,7 +132,12 @@ async function detail(repository, companyId, runId, row, auth, options, config) 
     } catch { hubspotOrganizations = null }
   }
   const mappings = row.candidate_snapshots?.length ? await repository.getMappings(companyId).catch(() => null) : null
-  return { ...projectReviewRow(row, { detail: true, mappings: mappings ?? [] }), resolutionStatus: projected.resolution?.status ?? null,
+  // Detail knows the live create readiness and merge state, so refresh the stored bucket (written only when changed).
+  const projectedRow = projectReviewRow(row, { detail: true, mappings: mappings ?? [] })
+  const refreshed = await refreshReviewTriage(repository, { companyId, row, resolutionStatus: projected.resolution?.status ?? null,
+    createReadiness: resolutionCapability.canResolve ? resolutionOptions.createReadiness : undefined, mergedInto })
+  if (refreshed) { projectedRow.triageBucket = refreshed.bucket; projectedRow.triageDetails = refreshed.details }
+  return { ...projectedRow, resolutionStatus: projected.resolution?.status ?? null,
     events: events.map(projectReviewEvent), resolution: projected.resolution,
     resolutionCapability, hubspotOrganizations, ...(mergedInto ? { mergedInto } : {}), ...resolutionOptions }
 }
@@ -212,6 +218,7 @@ export function createDryRunReviewHandler(options = {}) {
         const resolutionRepository = ['getCurrentReviewResolution', 'claimReviewResolution', 'finishReviewResolution', 'getContactOrganizationChoice']
           .every(method => typeof repository[method] === 'function') ? createReviewReconciliationCapabilities(repository) : undefined
         const result = await recheckDryRunReview({ repository: createReviewRepositoryCapabilities(repository), resolutionRepository,
+          triageRepository: createTriageCapabilities(repository),
           now: options.now, clockMs: options.clockMs,
           sleep: options.sleep, deadlineMs: options.deadlineMs, getReadClients: async (_companyId, config, { signal }) => {
             const clients = options.makeClients ? await options.makeClients(companyId) : await createH2AProviderClients({

@@ -262,7 +262,7 @@ test('review list binds company and server-selected run, validates filters, and 
     status: 'needs_review', objectType: 'contacts', reason: 'name_only_candidate' })
   assert.deepEqual(result, { items: [reviewRow], hasMore: true })
   assert.deepEqual(equalityFilters(calls[0]), [['company_id', 'company-1'], ['run_id', 'sample-2'],
-    ['status', 'needs_review'], ['object_type', 'contacts'], ['reason', 'name_only_candidate']])
+    ['status', 'needs_review'], ['object_type', 'contacts'], ['reason', 'name_only_candidate'], ['review_kind', 'sample']])
   assert.deepEqual(calls[0].steps.filter(step => step[0] === 'order'), [
     ['order', 'created_at', { ascending: false }], ['order', 'id', { ascending: false }],
   ])
@@ -1044,4 +1044,33 @@ test('recheck batch writes reject unknown statuses, error codes and malformed co
   await assert.rejects(repository.finishReviewRecheckBatch('company-1', BATCH_ID, { status: 'failed', errorCode: 'secret text', counts }), TypeError)
   await assert.rejects(repository.updateReviewRecheckBatch('company-1', BATCH_ID, { counts: { ...counts, done: -1 } }), TypeError)
   await assert.rejects(repository.claimReviewRecheckBatch('', BATCH_ID), TypeError)
+})
+
+test('listDryRunReviews filters by kind and bucket and returns bucketCounts', async () => {
+  const counts = [3, 1, 4, 0, 2].map(count => ({ count, error: null }))
+  const { repository, calls } = reviewRepositoryFixture([data([reviewRow]), ...counts])
+  const result = await repository.listDryRunReviews('company-1', 'sample-2', { kind: 'live', bucket: 'quick', includeCounts: true })
+  assert.deepEqual(result.bucketCounts, { quick: 3, todo: 1, decision: 4, blocked: 0, done: 2 })
+  assert.deepEqual(equalityFilters(calls[0]), [['company_id', 'company-1'], ['run_id', 'sample-2'],
+    ['review_kind', 'live'], ['triage_bucket', 'quick']])
+  for (const call of calls.slice(1)) {
+    assert.deepEqual(equalityFilters(call).slice(0, 3), [['company_id', 'company-1'], ['run_id', 'sample-2'], ['review_kind', 'live']])
+  }
+  await assert.rejects(() => repository.listDryRunReviews('company-1', 'sample-2', { kind: 'other' }), TypeError)
+  await assert.rejects(() => repository.listDryRunReviews('company-1', 'sample-2', { bucket: 'nope' }), TypeError)
+})
+
+test('listDryRunReviews defaults to sample kind and omits counts unless requested', async () => {
+  const { repository, calls } = reviewRepositoryFixture([data([reviewRow])])
+  const result = await repository.listDryRunReviews('company-1', 'sample-2')
+  assert.equal(result.bucketCounts, undefined)
+  assert.deepEqual(equalityFilters(calls[0]), [['company_id', 'company-1'], ['run_id', 'sample-2'], ['review_kind', 'sample']])
+})
+
+test('setReviewTriage writes bucket and details scoped to the company', async () => {
+  const { repository, calls } = reviewRepositoryFixture([data(null)])
+  await repository.setReviewTriage('company-1', REVIEW_ID, { bucket: 'quick', details: { quickKind: 'link' } })
+  assert.deepEqual(calls[0].steps.find(step => step[0] === 'update'), ['update', { triage_bucket: 'quick', triage_details: { quickKind: 'link' } }])
+  assert.deepEqual(equalityFilters(calls[0]), [['company_id', 'company-1'], ['id', REVIEW_ID]])
+  await assert.rejects(() => repository.setReviewTriage('company-1', REVIEW_ID, { bucket: 'x', details: {} }), TypeError)
 })

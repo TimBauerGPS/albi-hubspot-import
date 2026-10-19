@@ -7,10 +7,12 @@ import { normalizeResolutionDecision, hashResolutionDecision, safeResolutionEven
 
 const BASE_RUN_TOTAL_FIELDS = ['created', 'updated', 'linked', 'delivered', 'reconciled', 'skipped', 'conflict', 'failed', 'dry_run']
 const REVIEW_RUN_COLUMNS = 'id,company_id,mode,status,sample_limit_per_type,review_capture_version,created_at,finished_at'
-const REVIEW_COLUMNS = 'id,company_id,run_id,portal_id,object_type,source_id,reason,conflict_type,source_snapshot,candidate_snapshots,match_evidence,proposed_changes,status,recheck_outcome,last_rechecked_at,last_rechecked_by,created_at,updated_at'
+const REVIEW_COLUMNS = 'id,company_id,run_id,portal_id,object_type,source_id,reason,conflict_type,source_snapshot,candidate_snapshots,match_evidence,proposed_changes,status,recheck_outcome,last_rechecked_at,last_rechecked_by,created_at,updated_at,review_kind,triage_bucket,triage_details'
 const REVIEW_EVENT_COLUMNS = 'id,company_id,review_id,actor_id,event_type,reason,sanitized_details,created_at'
 const CAPTURED_EVENT_INDEX = 'h2a_dry_review_events_captured_once_idx'
 const REVIEW_STATUSES = new Set(['needs_review', 'cleared', 'no_longer_in_scope'])
+const REVIEW_KINDS = new Set(['sample', 'live'])
+const TRIAGE_BUCKETS = ['quick', 'todo', 'decision', 'blocked', 'done']
 const REVIEW_OBJECT_TYPES = new Set(['contacts', 'companies'])
 const REVIEW_EVENT_TYPES = new Set(['captured', 'recheck_started', 'still_needs_review', 'cleared', 'no_longer_in_scope', 'recheck_failed'])
 const RECHECK_ERRORS = new Set(['not_found', 'stale', 'superseded', 'invalid_recheck'])
@@ -309,11 +311,13 @@ export function createH2ARepository(supabase) {
       const current = await this.getLatestCompletedSampleDryRun(companyId, after)
       return current?.id === run.id && current?.review_capture_version === 1
     },
-    async listDryRunReviews(companyId, runId, { limit = 25, before = null, status = null, objectType = null, reason = null } = {}) {
+    async listDryRunReviews(companyId, runId, { limit = 25, before = null, status = null, objectType = null, reason = null, kind = 'sample', bucket = null, includeCounts = false } = {}) {
       if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new TypeError('Invalid review page size')
       if (status !== null) requireReviewValue(status, REVIEW_STATUSES, 'status')
       if (objectType !== null) requireReviewValue(objectType, REVIEW_OBJECT_TYPES, 'object type')
       if (reason !== null) requireReviewValue(reason, REVIEW_REASONS, 'reason')
+      requireReviewValue(kind, REVIEW_KINDS, 'kind')
+      if (bucket !== null) requireReviewValue(bucket, new Set(TRIAGE_BUCKETS), 'bucket')
       if (before !== null) {
         requireReviewTimestamp(before.createdAt)
         if (typeof before.id !== 'string' || !UUID_SHAPE.test(before.id)) throw new TypeError('Invalid review cursor')
@@ -322,10 +326,39 @@ export function createH2ARepository(supabase) {
       if (status !== null) query = query.eq('status', status)
       if (objectType !== null) query = query.eq('object_type', objectType)
       if (reason !== null) query = query.eq('reason', reason)
+      query = query.eq('review_kind', kind)
+      if (bucket !== null) query = query.eq('triage_bucket', bucket)
       if (before !== null) query = query.or(`created_at.lt.${before.createdAt},and(created_at.eq.${before.createdAt},id.lt.${before.id})`)
       const rows = checked(await query.order('created_at', { ascending: false }).order('id', { ascending: false }).limit(limit + 1))
       if (!Array.isArray(rows)) throw new Error('Invalid review page')
-      return { items: rows.slice(0, limit), hasMore: rows.length > limit }
+      const page = { items: rows.slice(0, limit), hasMore: rows.length > limit }
+      if (includeCounts) page.bucketCounts = await this.countReviewBuckets(companyId, runId, kind)
+      return page
+    },
+    // Counts for the current kind and run; independent of the page filters so tabs stay stable.
+    async countReviewBuckets(companyId, runId, kind = 'sample') {
+      requireReviewIdentity(companyId)
+      requireReviewIdentity(runId)
+      requireReviewValue(kind, REVIEW_KINDS, 'kind')
+      const entries = await Promise.all(TRIAGE_BUCKETS.map(async triageBucket => {
+        const result = await supabase.from('h2a_dry_run_reviews').select('id', { count: 'exact', head: true })
+          .eq('company_id', companyId).eq('run_id', runId).eq('review_kind', kind).eq('triage_bucket', triageBucket)
+        if (result?.error) throw result.error
+        if (!Number.isSafeInteger(result?.count) || result.count < 0) throw new Error('Invalid review count')
+        return [triageBucket, result.count]
+      }))
+      return Object.fromEntries(entries)
+    },
+    async setReviewTriage(companyId, reviewId, { bucket, details = {} } = {}) {
+      requireReviewIdentity(companyId)
+      requireReviewIdentity(reviewId)
+      requireReviewValue(bucket, new Set(TRIAGE_BUCKETS), 'bucket')
+      if (!details || typeof details !== 'object' || Array.isArray(details)) throw new TypeError('Invalid triage details')
+      const safe = {}
+      if (typeof details.blockedReason === 'string') safe.blockedReason = details.blockedReason.slice(0, 80)
+      if (['link', 'create'].includes(details.quickKind)) safe.quickKind = details.quickKind
+      checked(await supabase.from('h2a_dry_run_reviews').update({ triage_bucket: bucket, triage_details: safe })
+        .eq('company_id', companyId).eq('id', reviewId))
     },
     async getDryRunReview(companyId, runId, reviewId) {
       requireReviewIdentity(reviewId)

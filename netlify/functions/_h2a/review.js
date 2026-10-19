@@ -222,6 +222,14 @@ export function evaluateContactReview({ source, candidates = [], mappings = [], 
   return reviewResult('safe_to_create', '', decision, [], 'contact')
 }
 
+const TRIAGE_BUCKET_VALUES = new Set(['quick', 'todo', 'decision', 'blocked', 'done'])
+function safeTriageDetails(value) {
+  const details = object(value), safe = {}
+  if (typeof details.blockedReason === 'string') safe.blockedReason = details.blockedReason.slice(0, 80)
+  if (['link', 'create'].includes(details.quickKind)) safe.quickKind = details.quickKind
+  return safe
+}
+
 export function projectReviewRow(row, { detail = false, mappings = [] } = {}) {
   const stored = object(row)
   const objectType = ['contacts', 'companies'].includes(stored.object_type) ? stored.object_type : null
@@ -231,6 +239,8 @@ export function projectReviewRow(row, { detail = false, mappings = [] } = {}) {
     reason: displayReason(stored.reason), conflictType: REVIEW_CONFLICT_TYPES.has(stored.conflict_type) ? stored.conflict_type : 'other_review_reason',
     status: STATUSES.has(stored.status) ? stored.status : null, recheckOutcome: REVIEW_OUTCOMES.has(stored.recheck_outcome) ? stored.recheck_outcome : null,
     resolutionStatus: RESOLUTION_STATUSES.has(stored.resolution_status) ? stored.resolution_status : null,
+    triageBucket: TRIAGE_BUCKET_VALUES.has(stored.triage_bucket) ? stored.triage_bucket : 'decision',
+    triageDetails: safeTriageDetails(stored.triage_details),
   }
   if (detail) {
     projected.portalId = typeof stored.portal_id === 'string' && /^[1-9]\d{0,99}$/.test(stored.portal_id) ? stored.portal_id : null

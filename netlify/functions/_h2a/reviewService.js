@@ -2,6 +2,7 @@ import { ApiError, isRecord, malformed } from './http.js'
 import { assertReviewClassification, evaluateContactReview, evaluateOrganizationReview,
   selectReviewedOrganizationContext, safeReviewSnapshot, safeReviewCandidates, safeReviewEvidence, safeReviewChanges } from './review.js'
 import { resolveContactType } from './options.js'
+import { refreshReviewTriage } from './triage.js'
 import { H2A_IGNORABLE_CONTACT_FIELDS, sameH2AEmail } from '../../../shared/h2aReviewReasons.js'
 
 export class H2AReviewError extends Error {
@@ -277,7 +278,8 @@ export async function recheckDryRunReview(deps, { companyId, reviewId, actorId, 
     MESSAGES[result.error] ?? 'Unable to recheck this sample review.')
   if (!isRecord(result?.review)) fail(502, 'Unable to recheck this sample review.')
   const { finalizeRecheckedResolution } = await import('./reviewResolutionService.js')
-  await finalizeRecheckedResolution(deps, { companyId, reviewId, actorId }, result.review)
+  const finalized = await finalizeRecheckedResolution(deps, { companyId, reviewId, actorId }, result.review)
+  await refreshReviewTriage(deps.triageRepository, { companyId, row: result.review, resolutionStatus: finalized?.resolution?.status })
   return { review: result.review, sample, config }
 }
 

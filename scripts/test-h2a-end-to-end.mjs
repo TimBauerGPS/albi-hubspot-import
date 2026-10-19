@@ -164,7 +164,7 @@ function makeReviewSelfTestFixture() {
     message: 'fixture-provider-error' }
   const row = { id: reviewId, company_id: companyId, run_id: '00000000-0000-4000-8000-000000000015',
     portal_id: '123', object_type: 'contacts', source_id: '10', reason: 'name_only_candidate', conflict_type: 'contact_match',
-    status: 'needs_review', created_at: stamp, updated_at: stamp,
+    status: 'needs_review', created_at: stamp, updated_at: stamp, review_kind: 'sample', triage_bucket: 'decision', triage_details: {},
     source_snapshot: { id: '10', firstName: 'Fixture', lastName: 'Person', email: 'fixture@example.test', ...injected },
     candidate_snapshots: [{ id: '20', firstName: 'Fixture', lastName: 'Person', ...injected }],
     match_evidence: { evidence: ['name_only', injected.message], ...injected },

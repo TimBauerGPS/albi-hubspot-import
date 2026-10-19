@@ -2,6 +2,7 @@ import { H2AAuthError, requireH2ARequest } from './_h2a/auth.js'
 import { createH2ARepository } from './_h2a/repository.js'
 import { createH2AProviderClients, readOnlyH2ACapabilities } from './_h2a/providerClients.js'
 import { H2AReviewError, createReviewBatchCapabilities, resolveReviewSample, runReviewRecheckBatch } from './_h2a/reviewService.js'
+import { createTriageCapabilities } from './_h2a/triage.js'
 import { createReviewReconciliationCapabilities } from './_h2a/reviewResolutionService.js'
 import { ApiError } from './_h2a/http.js'
 
@@ -92,7 +93,7 @@ async function run({ repository, options, companyId, batchId }) {
   const resolutionRepository = ['getCurrentReviewResolution', 'claimReviewResolution', 'finishReviewResolution', 'getContactOrganizationChoice']
     .every(method => typeof repository[method] === 'function') ? createReviewReconciliationCapabilities(repository) : undefined
   try {
-    const result = await runReviewRecheckBatch({ ...capabilities, resolutionRepository, now: options.now, clockMs: options.clockMs,
+    const result = await runReviewRecheckBatch({ ...capabilities, resolutionRepository, triageRepository: createTriageCapabilities(repository), now: options.now, clockMs: options.clockMs,
       sleep: options.sleep, deadlineMs: options.deadlineMs, batchDeadlineMs: options.batchDeadlineMs,
       getReadClients: readClients(options, repository, companyId) }, { companyId, batchId })
     return reply(200, { status: result.status })

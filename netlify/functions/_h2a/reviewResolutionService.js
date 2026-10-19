@@ -7,6 +7,7 @@ import { buildReviewResolutionPlan, hashResolutionDecision, normalizeResolutionD
   safeResolutionExecutionContext, resolutionCanonicalField, RESOLUTION_EVENT_LIMIT } from './reviewResolution.js'
 import { isResolutionProviderId } from './reviewResolution.js'
 import { safeReviewSnapshot } from './review.js'
+import { refreshReviewTriage } from './triage.js'
 import { decideContactMatch, decideOrganizationMatch, selectAllReviewCandidates } from './match.js'
 import { normalizePhone } from './normalize.js'
 import { H2A_REVIEW_ERROR_CATEGORIES, H2A_REVIEW_ERROR_CODES } from '../../../shared/h2aReviewReasons.js'
@@ -330,9 +331,14 @@ async function runClaim(deps, input, saved, context) {
   if (claimed.lease_owner !== owner || !Number.isFinite(Date.parse(claimed.lease_expires_at)) ||
     Date.parse(claimed.lease_expires_at) <= clock(deps)) fail(409, 'The resolution lease expired. Refresh and try again.')
   const row = context.row
-  const finish = async (status, eventType, code = eventType, details = {}) => ({ resolution: rpc(await caps.finishReviewResolution(
-    input.companyId, claimed.id, owner, { actorId: input.actorId, status, eventType, providerOutcomeCode: code,
-      details: safeResolutionEventDetails({ ...details, code }) })) })
+  const finish = async (status, eventType, code = eventType, details = {}) => {
+    const finished = { resolution: rpc(await caps.finishReviewResolution(
+      input.companyId, claimed.id, owner, { actorId: input.actorId, status, eventType, providerOutcomeCode: code,
+        details: safeResolutionEventDetails({ ...details, code }) })) }
+    await refreshReviewTriage(deps.triageRepository ?? deps.repository, { companyId: input.companyId, row,
+      resolutionStatus: finished.resolution.status ?? status })
+    return finished
+  }
   if (!await stillCurrent(deps, row, context.config) || saved.run_id !== row.run_id) return finish('superseded', 'superseded')
   if (phase !== 'applying' && ['cleared', 'no_longer_in_scope'].includes(row.status)) return finish('completed', 'completed')
   const deadline = Math.min(Date.parse(claimed.lease_expires_at) - 1000,
