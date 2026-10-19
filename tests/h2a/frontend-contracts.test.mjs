@@ -381,3 +381,59 @@ test('H2A endpoint paths are centralized in the authenticated client', async () 
     assert.equal(source.includes('/.netlify/functions/h2a-'), false, `${path} bypasses the centralized H2A client`)
   }
 })
+
+test('review workspace client functions hit the right path and method with allowlisted bodies', async () => {
+  const lib = await import('../../src/lib/hubspotToAlbi.js')
+  const signal = new AbortController().signal
+  const reviewId = '00000000-0000-4000-8000-000000000001'
+  const otherId = '00000000-0000-4000-8000-000000000003'
+  const clientRequestId = '00000000-0000-4000-8000-000000000002'
+  const expectedUpdatedAt = '2026-10-12T12:00:00.000Z'
+  assert.equal(lib.getH2ADryRunReviews, lib.getH2AReviews, 'the old name stays an alias until the workspace replaces it')
+  const calls = await captureRequests(async () => {
+    await lib.getH2AReviews(session, 'company-1', { kind: 'live', bucket: 'quick', status: 'needs_review', objectType: 'contacts',
+      reason: 'no_match', cursor: 'abc', signal, unknown: 'nope', companyId: 'attacker' })
+    await lib.getH2AReviews(session, 'company-1')
+    await lib.startH2ARecheckAll(session, 'company-1')
+    await lib.startH2ARecheckAll(session, 'company-1', { kind: 'live', reviewIds: [reviewId, otherId], signal })
+    await lib.getH2ARecheckAll(session, 'company-1', { kind: 'live', signal })
+    await lib.bulkLinkH2AReviews(session, 'company-1', [{ reviewId, candidateId: '20', expectedUpdatedAt, clientRequestId, extra: 'drop' }], { signal })
+    await lib.createH2AOrganizationThenContact(session, 'company-1', { reviewId, expectedUpdatedAt, clientRequestId, referralSourceId: '5',
+      organizationReviewId: otherId, organizationExpectedUpdatedAt: expectedUpdatedAt, sneaky: 'drop' }, { signal })
+    await lib.skipH2ALiveReview(session, 'company-1', { reviewId, expectedUpdatedAt, clientRequestId }, { signal })
+    await lib.prepareH2ALiveReviews(session, 'company-1', { cursor: 'next', signal })
+  })
+  assert.deepEqual(calls.map(call => [call.url, call.options.method]), [
+    ['/.netlify/functions/h2a-dry-run-reviews?companyId=company-1&limit=100&cursor=abc&status=needs_review&objectType=contacts&reason=no_match&kind=live&bucket=quick', 'GET'],
+    ['/.netlify/functions/h2a-dry-run-reviews?companyId=company-1&limit=100', 'GET'],
+    ['/.netlify/functions/h2a-dry-run-review-recheck-all', 'POST'],
+    ['/.netlify/functions/h2a-dry-run-review-recheck-all', 'POST'],
+    ['/.netlify/functions/h2a-dry-run-review-recheck-all?companyId=company-1&kind=live', 'GET'],
+    ['/.netlify/functions/h2a-dry-run-review-resolutions', 'POST'],
+    ['/.netlify/functions/h2a-dry-run-review-resolutions', 'POST'],
+    ['/.netlify/functions/h2a-dry-run-review-resolutions', 'POST'],
+    ['/.netlify/functions/h2a-conflicts', 'POST'],
+  ])
+  const bodies = calls.map(call => call.options.body === undefined ? undefined : JSON.parse(call.options.body))
+  assert.deepEqual(bodies[2], { kind: 'sample', companyId: 'company-1' })
+  assert.deepEqual(bodies[3], { kind: 'live', reviewIds: [reviewId, otherId], companyId: 'company-1' })
+  assert.deepEqual(bodies[5], { op: 'bulk_link', items: [{ reviewId, candidateId: '20', expectedUpdatedAt, clientRequestId }], companyId: 'company-1' })
+  assert.deepEqual(bodies[6], { op: 'create_with_organization', reviewId, expectedUpdatedAt, clientRequestId, referralSourceId: '5',
+    organizationReviewId: otherId, organizationExpectedUpdatedAt: expectedUpdatedAt, companyId: 'company-1' })
+  assert.deepEqual(bodies[7], { reviewId, expectedUpdatedAt, clientRequestId, action: 'skip_live', companyId: 'company-1' })
+  assert.deepEqual(bodies[8], { op: 'prepare_live_reviews', cursor: 'next', companyId: 'company-1' })
+  for (const call of calls) assert.equal(call.options.headers.Authorization, 'Bearer supabase-session-token')
+  for (const index of [0, 3, 4, 5, 6, 7, 8]) assert.equal(calls[index].options.signal, signal)
+  assert.throws(() => lib.skipH2ALiveReview(session, 'company-1', { reviewId: 'nope', expectedUpdatedAt, clientRequestId }), TypeError)
+})
+
+test('review workspace server copy is allowlisted for display', async () => {
+  const { prepareH2ALiveReviews, resolveH2AConflict } = await import('../../src/lib/hubspotToAlbi.js')
+  const originalFetch = globalThis.fetch
+  try {
+    globalThis.fetch = async () => response({ error: 'Resolve this in the review workspace.' }, { status: 409 })
+    await assert.rejects(() => resolveH2AConflict(session, 'company-1', { conflictId: 'c' }), error => error.message === 'Resolve this in the review workspace.')
+    globalThis.fetch = async () => response({ error: 'Unable to prepare open conflicts for review.' }, { status: 500 })
+    await assert.rejects(() => prepareH2ALiveReviews(session, 'company-1'), error => error.message === 'Unable to prepare open conflicts for review.')
+  } finally { globalThis.fetch = originalFetch }
+})

@@ -101,3 +101,26 @@ test('waiting on Albi wins over a cleared safe recheck', () => {
   assert.deepEqual(computeTriage({ row: cleared('safe_to_link'), ranking: none, resolutionStatus: 'waiting_on_albi' }), { bucket: 'todo', details: {} })
   assert.equal(computeTriage({ row: cleared('safe_to_create'), ranking: none, resolutionStatus: 'waiting_on_albi' }).bucket, 'todo')
 })
+
+// A live row whose resolution completed but whose close did not land is still open: it must stay
+// visible (Decision) so the next detail load, recheck or live batch settles its close.
+test('an open live row with a completed resolution is decision with a pending close, not hidden in done', () => {
+  assert.deepEqual(computeTriage({ row: row({ review_kind: 'live' }), ranking: one, resolutionStatus: 'completed' }),
+    { bucket: 'decision', details: { closePending: true } })
+  assert.equal(computeTriage({ row: row({ review_kind: 'live', status: 'cleared' }), ranking: one, resolutionStatus: 'completed' }).bucket, 'done')
+  assert.equal(computeTriage({ row: row({ review_kind: 'sample' }), ranking: one, resolutionStatus: 'completed' }).bucket, 'done')
+})
+
+test('the pending-close marker survives storage and projection', async () => {
+  const { projectReviewRow } = await import('../../netlify/functions/_h2a/review.js')
+  const { createH2ARepository } = await import('../../netlify/functions/_h2a/repository.js')
+  const written = []
+  const query = { update(value) { written.push(value); return query }, eq() { return query },
+    then: (resolve) => Promise.resolve({ data: null, error: null }).then(resolve) }
+  await createH2ARepository({ from: () => query, rpc: async () => ({ data: null }) }).setReviewTriage('00000000-0000-4000-8000-000000000009', '00000000-0000-4000-8000-000000000001',
+    { bucket: 'decision', details: { closePending: true, other: 'x' } })
+  assert.deepEqual(written[0], { triage_bucket: 'decision', triage_details: { closePending: true } })
+  const projected = projectReviewRow({ id: '00000000-0000-4000-8000-000000000001', object_type: 'contacts', review_kind: 'live',
+    status: 'needs_review', reason: 'name_only_candidate', triage_bucket: 'decision', triage_details: { closePending: true } })
+  assert.deepEqual(projected.triageDetails, { closePending: true })
+})

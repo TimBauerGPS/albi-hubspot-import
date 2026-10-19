@@ -592,3 +592,40 @@ test('live recheck responds with detail and no sample progress', async () => {
   assert.equal(body.item.reviewKind, 'live')
   assert.equal(Object.hasOwn(body, 'progress'), false)
 })
+
+// Live merge following (spec §11): open the survivor's own open live row; never capture one here.
+function liveMergedFixture({ survivorRow = null } = {}) {
+  const f = mergedFixture()
+  const finds = []
+  f.repository.getCurrentReviewSample = async () => null
+  f.repository.getReview = async () => liveRow({ triage_bucket: 'blocked', triage_details: { merged: true } })
+  f.repository.findOpenLiveReviewBySource = async (...args) => { finds.push(args); return survivorRow }
+  f.repository.findDryRunReviewBySource = async () => { throw Error('sample lookup must not run for a live row') }
+  f.repository.recordDryRunReview = async () => { throw Error('live merge following must not capture') }
+  return { ...f, finds }
+}
+const prepareSurvivor = f => f.handler({ httpMethod: 'POST', body: JSON.stringify({ companyId: 'selected', reviewId, expectedUpdatedAt: stamp, prepareMergedSurvivor: true }) })
+
+test('reviewing the surviving record of a live row opens its open live row', async () => {
+  const f = liveMergedFixture({ survivorRow: { id: '00000000-0000-4000-8000-0000000000aa', review_kind: 'live', status: 'needs_review' } })
+  const response = await prepareSurvivor(f)
+  assert.equal(response.statusCode, 200)
+  assert.deepEqual(JSON.parse(response.body).survivor, { sourceId: '77', reviewId: '00000000-0000-4000-8000-0000000000aa' })
+  assert.deepEqual(f.finds[0], ['authorized-company', '123', 'contacts', '77'])
+  const detail = JSON.parse((await f.handler(get({ reviewId }))).body).item
+  assert.deepEqual(detail.mergedInto, { sourceId: '77', reviewId: '00000000-0000-4000-8000-0000000000aa' })
+})
+
+test('a live survivor without an open row is a clear waiting state, not an error', async () => {
+  const f = liveMergedFixture()
+  const response = await prepareSurvivor(f)
+  assert.equal(response.statusCode, 200)
+  assert.deepEqual(JSON.parse(response.body).survivor, { sourceId: '77', reviewId: null,
+    message: 'The surviving record will appear here when the next sync reaches it.' })
+  const detail = JSON.parse((await f.handler(get({ reviewId }))).body).item
+  assert.deepEqual(detail.mergedInto, { sourceId: '77', reviewId: null,
+    message: 'The surviving record will appear here when the next sync reaches it.' })
+  const stale = liveMergedFixture()
+  stale.repository.getReview = async () => liveRow({ updated_at: '2026-10-12T11:00:00.000Z' })
+  assert.equal((await prepareSurvivor(stale)).statusCode, 409)
+})

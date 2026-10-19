@@ -1007,9 +1007,59 @@ test('recheck batch creation expires abandoned batches first, then inserts one q
     finished_at: BATCH_TIME, updated_at: BATCH_TIME })
   assert.deepEqual(calls[0].steps.find(step => step[0] === 'in'), ['in', 'status', ['queued', 'running']])
   assert.deepEqual(calls[0].steps.find(step => step[0] === 'lt'), ['lt', 'heartbeat_at', '2026-10-12T11:40:00.000Z'])
-  assert.deepEqual(equalityFilters(calls[0]), [['company_id', 'company-1']])
+  assert.deepEqual(equalityFilters(calls[0]), [['company_id', 'company-1'], ['review_kind', 'sample']])
   assert.deepEqual(calls[1].steps.find(step => step[0] === 'insert')[1], { company_id: 'company-1', run_id: 'sample-2',
+    review_kind: 'sample', review_ids: null,
     requested_by: ACTOR_ID, status: 'queued', heartbeat_at: BATCH_TIME, created_at: BATCH_TIME, updated_at: BATCH_TIME })
+})
+
+test('a live recheck batch has no run, carries its review ids and only meets live batches', async () => {
+  const reviewIds = ['00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000002']
+  const { repository, calls } = reviewRepositoryFixture([data([]), { data: null, error: { code: '23505' } },
+    data({ ...batchRow, run_id: null, review_kind: 'live', status: 'running' })])
+  const result = await repository.createReviewRecheckBatch('company-1', { kind: 'live', runId: null, reviewIds, actorId: ACTOR_ID,
+    now: BATCH_TIME, staleBefore: BATCH_TIME })
+  assert.equal(result.error, 'active')
+  assert.equal(result.batch.review_kind, 'live')
+  // Expiry, insert and the active lookup are all scoped to the live kind: a running sample batch never blocks it.
+  assert.deepEqual(equalityFilters(calls[0]), [['company_id', 'company-1'], ['review_kind', 'live']])
+  assert.deepEqual(calls[1].steps.find(step => step[0] === 'insert')[1], { company_id: 'company-1', run_id: null,
+    review_kind: 'live', review_ids: reviewIds, requested_by: ACTOR_ID, status: 'queued', heartbeat_at: BATCH_TIME,
+    created_at: BATCH_TIME, updated_at: BATCH_TIME })
+  assert.deepEqual(equalityFilters(calls[2]), [['company_id', 'company-1'], ['review_kind', 'live']])
+  await assert.rejects(repository.createReviewRecheckBatch('company-1', { kind: 'sample', runId: null, actorId: ACTOR_ID,
+    now: BATCH_TIME, staleBefore: BATCH_TIME }), TypeError)
+  await assert.rejects(repository.createReviewRecheckBatch('company-1', { kind: 'live', runId: null, reviewIds: ['nope'], actorId: ACTOR_ID,
+    now: BATCH_TIME, staleBefore: BATCH_TIME }), TypeError)
+  await assert.rejects(repository.createReviewRecheckBatch('company-1', { kind: 'live', runId: null,
+    reviewIds: Array.from({ length: 201 }, () => reviewIds[0]), actorId: ACTOR_ID, now: BATCH_TIME, staleBefore: BATCH_TIME }), TypeError)
+})
+
+test('the latest recheck batch is read per kind', async () => {
+  const { repository, calls } = reviewRepositoryFixture([data(batchRow), data(null)])
+  await repository.getLatestReviewRecheckBatch('company-1')
+  await repository.getLatestReviewRecheckBatch('company-1', 'live')
+  assert.deepEqual(equalityFilters(calls[0]), [['company_id', 'company-1'], ['review_kind', 'sample']])
+  assert.deepEqual(equalityFilters(calls[1]), [['company_id', 'company-1'], ['review_kind', 'live']])
+})
+
+test('open contact and company conflicts are paged oldest first for backfill, and links are looked up by conflict', async () => {
+  const conflictId = '00000000-0000-4000-8000-0000000000c1'
+  const { repository, calls } = reviewRepositoryFixture([data([]), data(null)])
+  const page = await repository.listOpenSourceConflicts('company-1', { limit: 50, after: { createdAt: BATCH_TIME, id: conflictId } })
+  assert.deepEqual(page, { items: [], hasMore: false })
+  assert.equal(calls[0].table, 'h2a_conflicts')
+  assert.deepEqual(equalityFilters(calls[0]), [['company_id', 'company-1'], ['status', 'open']])
+  assert.deepEqual(calls[0].steps.find(step => step[0] === 'in'), ['in', 'object_type', ['contacts', 'companies']])
+  assert.deepEqual(calls[0].steps.filter(step => step[0] === 'order').map(step => [step[1], step[2]]),
+    [['created_at', { ascending: true }], ['id', { ascending: true }]])
+  assert.deepEqual(calls[0].steps.find(step => step[0] === 'limit'), ['limit', 51])
+  assert.deepEqual(calls[0].steps.find(step => step[0] === 'or'),
+    ['or', `created_at.gt.${BATCH_TIME},and(created_at.eq.${BATCH_TIME},id.gt.${conflictId})`])
+  assert.equal(await repository.findLiveReviewConflictLink('company-1', conflictId), null)
+  assert.equal(calls[1].table, 'h2a_live_review_conflicts')
+  assert.deepEqual(equalityFilters(calls[1]), [['company_id', 'company-1'], ['conflict_id', conflictId]])
+  await assert.rejects(repository.listOpenSourceConflicts('company-1', { limit: 101 }), TypeError)
 })
 
 test('a second concurrent batch returns the active one instead of starting another', async () => {

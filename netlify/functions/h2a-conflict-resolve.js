@@ -48,6 +48,12 @@ export function createConflictResolveHandler(options = {}) {
         supabase: options.supabase, getSupabase: options.getSupabase, requireAdmin: true, requestedCompanyId: selectors[0],
       })
       const repository = options.repository ?? createH2ARepository(context.supabase)
+      // Contact and company conflicts held by a live review row resolve only in the review workspace,
+      // where one decision closes every conflict for that record. Activity-only conflicts still resolve here.
+      if (typeof body.conflictId === 'string' && body.conflictId.trim() &&
+        await repository.findLiveReviewConflictLink(context.companyId, body.conflictId)) {
+        throw new H2AConflictError(409, 'Resolve this in the review workspace.')
+      }
       const { company_id: _companyIdAlias, ...resolutionBody } = body
       const result = await resolveConflict({ repository,
         dispatchResume: options.dispatchResume ?? (intent => defaultDispatchResume(intent, options)),

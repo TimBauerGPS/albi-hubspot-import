@@ -15,6 +15,11 @@ export function computeTriage({ row, ranking, createReadiness, resolutionStatus,
     ['safe_to_link', 'safe_to_create'].includes(row?.recheck_outcome)) {
     return { bucket: 'quick', details: { quickKind: row.recheck_outcome === 'safe_to_link' ? 'link' : 'create' } }
   }
+  // A live row whose resolution completed but whose close did not land is still open. It stays in
+  // Decision (not hidden in Done) until a detail load, recheck or live batch settles the close.
+  if (row?.review_kind === 'live' && row?.status === 'needs_review' && resolutionStatus === 'completed') {
+    return { bucket: 'decision', details: { closePending: true } }
+  }
   if (row?.status !== 'needs_review' || resolutionStatus === 'completed') return { bucket: 'done', details: {} }
   if (mergedInto?.sourceId) return { bucket: 'blocked', details: { merged: true } }
   const blockedReason = createReadiness?.blockedReason

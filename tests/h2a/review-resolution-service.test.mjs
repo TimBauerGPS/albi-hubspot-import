@@ -841,6 +841,15 @@ test('a failed close after live completion keeps the resolution and is retried o
   assert.equal(f.calls.filter(call => call === 'mapping').length, 1)
 })
 
+test('a failed close after live completion leaves the row visible in Decision, not hidden in Done', async () => {
+  const f = liveFixture(); f.store.state.failClose = 1
+  const triage = []
+  f.deps.triageRepository = { setReviewTriage: async (_company, reviewId, next) => { triage.push([reviewId, next]) } }
+  const result = await executeReviewResolution(f.deps, linkLive)
+  assert.equal(result.close.error, 'close_failed')
+  assert.deepEqual(triage.at(-1)[1], { bucket: 'decision', details: { closePending: true } })
+})
+
 test('a failed close is also retried by replaying the same request', async () => {
   const f = liveFixture(); f.store.state.failClose = 1
   await executeReviewResolution(f.deps, linkLive)

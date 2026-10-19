@@ -23,6 +23,8 @@ const fail = (status, message) => { throw new H2AReviewError(status, message) }
 const reply = (statusCode, body) => ({ statusCode, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store',
   'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Content-Type, Authorization',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS' }, body: JSON.stringify(body) })
+// Live merge following never captures a row: the survivor's live row appears when a sync reaches it.
+export const LIVE_SURVIVOR_PENDING = 'The surviving record will appear here when the next sync reaches it.'
 const emptyProgress = () => ({ total: 0, needsReview: 0, cleared: 0, noLongerInScope: 0, fullDryRunReady: false })
 const AUTH_MESSAGES = new Set(['Authentication required.', 'Invalid authentication token.', 'Administrator access is required.',
   'You are not authorized to access H2A.', 'You are not authorized to access the requested company.', 'A company must be selected.', 'Company not found.'])
@@ -132,8 +134,7 @@ async function detail(repository, companyId, runId, row, auth, options, config) 
         if (!options.makeClients && (await clients.hubspot.getAccountInfo()).portalId !== config.portal_id) return null
         // HubSpot merges move a record to a new ID; follow it so the survivor's data is shown.
         const survivor = typeof clients.hubspot.getMergedInto === 'function' ? await clients.hubspot.getMergedInto(row.object_type, row.source_id) : null
-        const merge = providerId(survivor) ? { sourceId: survivor,
-          reviewId: (await repository.findDryRunReviewBySource?.(companyId, runId, row.object_type, survivor))?.id ?? null } : null
+        const merge = providerId(survivor) ? await survivorReview(repository, companyId, runId, row, survivor) : null
         if (row.object_type !== 'contacts') return { organizations: null, merge }
         const contactId = merge?.sourceId ?? row.source_id
         const associations = await clients.hubspot.getAssociations({ objectType: 'contacts', objectIds: [contactId], toObjectTypes: ['companies'] })
@@ -163,16 +164,45 @@ async function detail(repository, companyId, runId, row, auth, options, config) 
     resolutionCapability, hubspotOrganizations, orgFirstCreate, ...(mergedInto ? { mergedInto } : {}), ...resolutionOptions }
 }
 
+// The review a merged-away source's survivor is handled in: for a live row, the survivor's one open
+// live row (or a waiting message); for a sample row, its review in the same run.
+async function survivorReview(repository, companyId, runId, row, survivor) {
+  if (row.review_kind === 'live') {
+    const open = await repository.findOpenLiveReviewBySource(companyId, row.portal_id, row.object_type, survivor)
+    return open?.id ? { sourceId: survivor, reviewId: open.id } : { sourceId: survivor, reviewId: null, message: LIVE_SURVIVOR_PENDING }
+  }
+  return { sourceId: survivor, reviewId: (await repository.findDryRunReviewBySource?.(companyId, runId, row.object_type, survivor))?.id ?? null }
+}
+
+async function readClients(options, repository, companyId, config) {
+  const clients = options.makeClients ? await options.makeClients(companyId) : await createH2AProviderClients({
+    companyId, repository, keyring: options.keyring, env: options.env, fetch: options.fetch })
+  if (!options.makeClients && (await clients.hubspot.getAccountInfo()).portalId !== config.portal_id) throw new ApiError('permission')
+  return clients
+}
+
+// "Review the surviving record" for a live row opens the survivor's open live row. There is no live
+// prepare/capture path (live rows are only captured by sync), so without one the reply says so.
+async function followLiveMergedSurvivor({ repository, options, companyId, input, row }) {
+  const config = await repository.getConfig(companyId)
+  if (!config?.portal_id || row.portal_id !== config.portal_id || !['contacts', 'companies'].includes(row.object_type)) fail(404, 'Sample review item not found.')
+  if (row.updated_at !== input.expectedUpdatedAt) fail(409, 'This sample review changed. Refresh it first.')
+  const clients = await readClients(options, repository, companyId, config)
+  const survivor = typeof clients.hubspot.getMergedInto === 'function' ? await clients.hubspot.getMergedInto(row.object_type, row.source_id) : null
+  if (!providerId(survivor)) fail(409, 'HubSpot does not list this record as merged into another one.')
+  return survivorReview(repository, companyId, row.run_id, row, survivor)
+}
+
 // Captures (or finds) a review for the HubSpot record a merged-away source now points to, in the current run.
 async function prepareMergedSurvivorReview({ repository, options, companyId, input }) {
+  const stored = typeof repository.getReview === 'function' ? await repository.getReview(companyId, input.reviewId) : null
+  if (stored?.review_kind === 'live') return followLiveMergedSurvivor({ repository, options, companyId, input, row: stored })
   const { config, sample } = await resolveReviewSample(repository, companyId)
   if (!sample) fail(409, 'Run a new sample to create detailed review data.')
   const row = await repository.getDryRunReview(companyId, sample.id, input.reviewId)
   if (!row) fail(404, 'Sample review item not found.')
   if (row.updated_at !== input.expectedUpdatedAt) fail(409, 'This sample review changed. Refresh it first.')
-  const clients = options.makeClients ? await options.makeClients(companyId) : await createH2AProviderClients({
-    companyId, repository, keyring: options.keyring, env: options.env, fetch: options.fetch })
-  if (!options.makeClients && (await clients.hubspot.getAccountInfo()).portalId !== config.portal_id) throw new ApiError('permission')
+  const clients = await readClients(options, repository, companyId, config)
   const survivor = typeof clients.hubspot.getMergedInto === 'function' ? await clients.hubspot.getMergedInto(row.object_type, row.source_id) : null
   if (!providerId(survivor)) fail(409, 'HubSpot does not list this record as merged into another one.')
   const existing = await repository.findDryRunReviewBySource(companyId, sample.id, row.object_type, survivor)

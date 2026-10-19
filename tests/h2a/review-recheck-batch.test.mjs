@@ -10,9 +10,10 @@ const MUTATIONS = ['createContact', 'createOrganization', 'updateContact', 'upda
   'addContactCompanyAssociation', 'saveMapping', 'saveCursor', 'recordConflict', 'finishRun', 'getCredentials']
 
 // rows: [{ objectType, sourceId, email }]; HubSpot sources are read live per row, Albi lists once per batch.
-function fixture({ rows = [], contacts = [], organizations = [], batch = {}, sampleId = 'current-run' } = {}) {
-  const calls = [], events = [], applied = [], updates = [], finished = []
-  const reviews = rows.map((row, index) => ({ id: id(index + 1), run_id: 'current-run', portal_id: '123',
+function fixture({ rows = [], contacts = [], organizations = [], batch = {}, sampleId = 'current-run', resolutions = {} } = {}) {
+  const calls = [], events = [], applied = [], updates = [], finished = [], closes = []
+  const reviews = rows.map((row, index) => ({ id: id(index + 1), run_id: row.kind === 'live' ? 'live-run' : 'current-run', portal_id: '123',
+    review_kind: row.kind ?? 'sample',
     object_type: row.objectType ?? 'contacts', source_id: row.sourceId ?? String(10 + index),
     reason: 'name_only_candidate', conflict_type: (row.objectType ?? 'contacts') === 'contacts' ? 'contact_match' : 'organization_match',
     status: 'needs_review', updated_at: stamp(index), source_snapshot: {} }))
@@ -25,9 +26,10 @@ function fixture({ rows = [], contacts = [], organizations = [], batch = {}, sam
     getCurrentReviewSample: async () => ({ id: sampleId, review_capture_version: 1 }),
     getLatestCompletedSampleDryRun: async () => ({ id: sampleId, review_capture_version: 1 }),
     getDryRunReview: async (_company, _run, reviewId) => reviews.find(row => row.id === reviewId) ?? null,
+    getReview: async (_company, reviewId) => reviews.find(row => row.id === reviewId) ?? null,
     listDryRunReviews: async (company, runId, filters) => {
       calls.push(['list', company, runId, filters])
-      const open = reviews.filter(row => row.status === 'needs_review')
+      const open = reviews.filter(row => row.status === 'needs_review' && row.review_kind === (filters.kind ?? 'sample'))
       const start = filters.before ? open.findIndex(row => row.id === filters.before.id) + 1 : 0
       const items = open.slice(start, start + filters.limit)
       return { items, hasMore: start + filters.limit < open.length }
@@ -38,6 +40,7 @@ function fixture({ rows = [], contacts = [], organizations = [], batch = {}, sam
       applied.push([company, payload])
       const row = reviews.find(item => item.id === payload.reviewId)
       if (row.updated_at !== payload.expectedUpdatedAt) return { error: 'stale' }
+      row.recheck_outcome = payload.outcome
       return { review: { ...row, status: payload.status, recheck_outcome: payload.outcome } }
     },
   }
@@ -61,9 +64,19 @@ function fixture({ rows = [], contacts = [], organizations = [], batch = {}, sam
     updateReviewRecheckBatch: async (company, updatedId, patch) => { updates.push(patch); return true },
     finishReviewRecheckBatch: async (company, finishedId, patch) => { finished.push(patch); return true },
   }
-  const deps = { repository, batchRepository, now: () => new Date('2026-10-12T12:00:00Z'), sleep: async () => {},
+  // Live rows close through the close RPC (one transaction per row) and read their resolution.
+  const liveCloseRepository = {
+    closeLiveReview: async (company, args) => {
+      closes.push([company, args])
+      const row = reviews.find(item => item.id === args.reviewId)
+      row.status = args.outcome === 'resolved' ? 'cleared' : 'no_longer_in_scope'
+      return { closedConflictIds: [], resumeIds: [], replayed: false }
+    },
+  }
+  const resolutionRepository = { getCurrentReviewResolution: async (_company, reviewId) => resolutions[reviewId] ?? null }
+  const deps = { repository, batchRepository, liveCloseRepository, resolutionRepository, now: () => new Date('2026-10-12T12:00:00Z'), sleep: async () => {},
     getReadClients: async () => { calls.push(['clients']); return { hubspotRead, albiRead } } }
-  return { deps, reviews, calls, events, applied, updates, finished, hubspotRead, albiRead }
+  return { deps, reviews, calls, events, applied, updates, finished, closes, hubspotRead, albiRead }
 }
 
 const input = { companyId: 'tenant-1', batchId }
@@ -209,4 +222,84 @@ test('a batch that loses its row (expired and replaced) stops before rechecking 
   assert.equal(result.status, 'lost')
   assert.equal(f.applied.length, 1)
   assert.equal(f.finished.length, 0)
+})
+
+test('batch with reviewIds rechecks only those rows with one Albi walk', async () => {
+  const f = fixture({ rows: [{}, {}, {}, { objectType: 'companies' }] })
+  const missing = id(99)
+  f.deps.batchRepository.claimReviewRecheckBatch = async () => ({ id: batchId, run_id: 'current-run', review_kind: 'sample',
+    review_ids: [f.reviews[0].id, f.reviews[2].id, missing], requested_by: actorId, status: 'running' })
+  const result = await runReviewRecheckBatch(f.deps, input)
+  assert.equal(result.status, 'completed')
+  assert.deepEqual(f.applied.map(([, payload]) => payload.reviewId), [f.reviews[0].id, f.reviews[2].id])
+  assert.equal(f.calls.filter(call => call[0] === 'albiContacts').length, 1)
+  assert.equal(f.calls.filter(call => call[0] === 'albiOrganizations').length, 1)
+  assert.equal(f.calls.filter(call => call[0] === 'clients').length, 1)
+  assert.equal(f.calls.some(call => call[0] === 'hubspotCompanies'), false, 'untargeted rows are never read')
+  // An id that is no longer open in this queue is reported stale, never rechecked.
+  assert.deepEqual(result.counts, { total: 3, done: 3, cleared: 0, stillNeedsReview: 2, noLongerInScope: 0, stale: 1, failed: 0 })
+})
+
+test('a live batch runs without a sample run and only over live rows', async () => {
+  const f = fixture({ rows: [{}, { kind: 'live', email: 'a@example.com' }, { kind: 'live' }],
+    contacts: [{ id: '20', firstName: 'A', lastName: 'Person1', email: 'a@example.com' }] })
+  f.deps.repository.getCurrentReviewSample = async () => null
+  f.deps.repository.getLatestCompletedSampleDryRun = async () => null
+  f.deps.batchRepository.claimReviewRecheckBatch = async () => ({ id: batchId, run_id: null, review_kind: 'live', review_ids: null,
+    requested_by: actorId, status: 'running' })
+  const result = await runReviewRecheckBatch(f.deps, input)
+  assert.equal(result.status, 'completed')
+  const [, , runId, filters] = f.calls.find(call => call[0] === 'list')
+  assert.deepEqual([runId, filters.kind, filters.status], [null, 'live', 'needs_review'])
+  assert.deepEqual(f.applied.map(([, payload]) => [payload.reviewId, payload.kind]), [[f.reviews[1].id, 'live'], [f.reviews[2].id, 'live']])
+  // The exact match now auto-links: the live row closes as resolved_by_sync; the other stays open.
+  assert.deepEqual(f.closes.map(([, args]) => [args.reviewId, args.outcome]), [[f.reviews[1].id, 'resolved_by_sync']])
+  assert.deepEqual(result.counts, { total: 2, done: 2, cleared: 0, stillNeedsReview: 1, noLongerInScope: 1, stale: 0, failed: 0 })
+})
+
+test('live and sample batches can run at the same time', async () => {
+  const f = fixture({ rows: [{}, {}, { kind: 'live' }, { kind: 'live' }] })
+  const batches = {
+    [id(201)]: { id: id(201), run_id: 'current-run', review_kind: 'sample', review_ids: null, requested_by: actorId, status: 'running' },
+    [id(202)]: { id: id(202), run_id: null, review_kind: 'live', review_ids: null, requested_by: actorId, status: 'running' },
+  }
+  const finishedBy = {}
+  f.deps.batchRepository.claimReviewRecheckBatch = async (_company, claimed) => batches[claimed] ?? null
+  f.deps.batchRepository.finishReviewRecheckBatch = async (_company, finishedId, patch) => { finishedBy[finishedId] = patch; return true }
+  const [sample, live] = await Promise.all([runReviewRecheckBatch(f.deps, { companyId: 'tenant-1', batchId: id(201) }),
+    runReviewRecheckBatch(f.deps, { companyId: 'tenant-1', batchId: id(202) })])
+  assert.equal(sample.status, 'completed')
+  assert.equal(live.status, 'completed')
+  assert.equal(finishedBy[id(201)].counts.total, 2)
+  assert.equal(finishedBy[id(202)].counts.total, 2)
+  assert.deepEqual(f.applied.map(([, payload]) => payload.reviewId).sort(), f.reviews.map(row => row.id).sort())
+  assert.equal(f.applied.filter(([, payload]) => payload.kind === 'live').length, 2)
+})
+
+test('a live batch sweeps a completed resolution whose close failed, even outside the targeted rows', async () => {
+  const f = fixture({ rows: [{ kind: 'live' }, { kind: 'live' }],
+    resolutions: { [id(2)]: { id: id(102), review_id: id(2), action: 'link_existing', status: 'completed', created_by: actorId } } })
+  f.deps.batchRepository.claimReviewRecheckBatch = async () => ({ id: batchId, run_id: null, review_kind: 'live',
+    review_ids: [id(1)], requested_by: actorId, status: 'running' })
+  const result = await runReviewRecheckBatch(f.deps, input)
+  assert.equal(result.status, 'completed')
+  assert.deepEqual(f.applied.map(([, payload]) => payload.reviewId), [id(1)])
+  // The stranded row closes as the reviewer's own link, without any provider read for it.
+  assert.deepEqual(f.closes.map(([, args]) => [args.reviewId, args.outcome, args.resolutionAction]), [[id(2), 'resolved', 'link_existing']])
+  assert.equal(f.calls.filter(call => call[0] === 'hubspotContacts').length, 1)
+  assert.equal(f.reviews[1].status, 'cleared')
+  assert.equal(result.settled, 1)
+  assert.equal(result.counts.total, 1)
+})
+
+test('a full live batch settles a stranded row instead of re-evaluating it', async () => {
+  const f = fixture({ rows: [{ kind: 'live' }],
+    resolutions: { [id(1)]: { id: id(101), review_id: id(1), action: 'create_albi', status: 'completed', created_by: actorId } } })
+  f.deps.batchRepository.claimReviewRecheckBatch = async () => ({ id: batchId, run_id: null, review_kind: 'live',
+    review_ids: null, requested_by: actorId, status: 'running' })
+  const result = await runReviewRecheckBatch(f.deps, input)
+  assert.equal(result.status, 'completed')
+  assert.deepEqual(f.closes.map(([, args]) => [args.reviewId, args.outcome, args.resolutionAction]), [[id(1), 'resolved', 'create_new']])
+  assert.equal(f.applied.length, 0)
+  assert.equal(result.counts.cleared, 1)
 })

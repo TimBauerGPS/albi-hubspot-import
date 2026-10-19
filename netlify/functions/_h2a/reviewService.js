@@ -351,6 +351,7 @@ async function recheckLiveReview(deps, { companyId, reviewId, actorId, expectedU
 }
 
 // Batch rechecks read the open queue and claim, heartbeat and finish their own batch row.
+// Live batches also close live rows (close RPC and resume delivery), exactly like a single live recheck.
 export function createReviewBatchCapabilities(repository) {
   return Object.freeze({
     repository: Object.freeze({ ...createReviewRepositoryCapabilities(repository),
@@ -363,11 +364,13 @@ export function createReviewBatchCapabilities(repository) {
   })
 }
 
-async function openReviews(repository, companyId, runId) {
+// Every open row of one kind: the sample's own rows, or every open live row (no run scope).
+async function openReviews(repository, companyId, runId, kind = 'sample') {
   const rows = []
   let before = null
   for (let page = 0; page < 100; page++) {
-    const result = await repository.listDryRunReviews(companyId, runId, { limit: 100, before, status: 'needs_review', objectType: null, reason: null })
+    const result = await repository.listDryRunReviews(companyId, kind === 'live' ? null : runId,
+      { limit: 100, before, status: 'needs_review', objectType: null, reason: null, kind })
     if (!isRecord(result) || !Array.isArray(result.items)) malformed('review')
     rows.push(...result.items.filter(row => ['contacts', 'companies'].includes(row?.object_type)))
     const last = result.items.at(-1)
@@ -377,27 +380,66 @@ async function openReviews(repository, companyId, runId) {
   throw pagination()
 }
 
-// Rechecks every open review of the current sample against one Albi snapshot. Each row still goes
-// through recheckDryRunReview, so its audit events, stale check and resolution finalization are unchanged.
+// A targeted live batch also sweeps the other open live rows for a completed resolution whose close did
+// not land (the reviewer's link/create/skip is durable, the row is still open) and closes them. That costs
+// one resolution read per row and no provider reads. Untargeted batches settle these rows in recheckLiveReview.
+async function sweepLiveCloses(deps, companyId, rows, actorId, deadline) {
+  const { settleLiveReviewClose } = await import('./reviewResolutionService.js')
+  let settled = 0
+  for (const row of rows) {
+    if (clock(deps) >= deadline) break
+    try {
+      if (row?.review_kind === 'live' && (await settleLiveReviewClose(deps, { companyId, row, actorId }))?.close) settled++
+    } catch { /* The row stays the retry marker for the next detail load, recheck or batch. */ }
+  }
+  return settled
+}
+
+// Rechecks every open review of one kind (the current sample's, or every open live row) against one
+// Albi snapshot, or only the batch's review_ids. Each row still goes through recheckDryRunReview, so its
+// audit events, stale check, resolution finalization and (for live rows) close are unchanged.
 export async function runReviewRecheckBatch(deps, { companyId, batchId }) {
   const { repository, batchRepository } = deps
   const batch = await batchRepository.claimReviewRecheckBatch(companyId, batchId, iso(deps))
   if (!batch) return { status: 'not_claimed' }
   const actorId = batch.requested_by
+  const live = batch.review_kind === 'live'
+  const targeted = Array.isArray(batch.review_ids) ? [...new Set(batch.review_ids)] : null
   const counts = { total: 0, done: 0, cleared: 0, stillNeedsReview: 0, noLongerInScope: 0, stale: 0, failed: 0 }
+  let settled = 0
   const finish = async (status, errorCode = null) => {
     await batchRepository.finishReviewRecheckBatch(companyId, batchId, { status, errorCode, counts: { ...counts } })
-    return { status, errorCode, counts: { ...counts } }
+    return { status, errorCode, counts: { ...counts }, ...(live ? { settled } : {}) }
   }
   const started = clock(deps)
   const deadline = started + Math.min(13 * 60000, Math.max(1, deps.batchDeadlineMs ?? 13 * 60000))
-  let rows, snapshot
+  let rows, snapshot, missing = 0, stranded = []
   try {
-    const { config, sample } = await resolveReviewSample(repository, companyId)
-    if (!sample || sample.id !== batch.run_id) return await finish('failed', 'superseded')
-    rows = await openReviews(repository, companyId, sample.id)
-    counts.total = rows.length
+    let config
+    if (live) config = await repository.getConfig(companyId)
+    else {
+      const current = await resolveReviewSample(repository, companyId)
+      if (!current.sample || current.sample.id !== batch.run_id) return await finish('failed', 'superseded')
+      config = current.config
+    }
+    const open = await openReviews(repository, companyId, batch.run_id, live ? 'live' : 'sample')
+    if (targeted) {
+      const wanted = new Set(targeted)
+      rows = open.filter(row => wanted.has(row.id))
+      // A targeted id no longer open in this queue (closed, gone, or another kind) is reported stale.
+      missing = targeted.length - rows.length
+      if (live) stranded = open.filter(row => !wanted.has(row.id))
+    } else rows = open
+    counts.total = rows.length + missing
     await batchRepository.updateReviewRecheckBatch(companyId, batchId, { counts: { ...counts } })
+    if (stranded.length) settled = await sweepLiveCloses(deps, companyId, stranded, actorId, deadline)
+    if (missing) {
+      counts.stale += missing
+      counts.done += missing
+      if (!await batchRepository.updateReviewRecheckBatch(companyId, batchId, { counts: { ...counts } })) {
+        return { status: 'lost', errorCode: null, counts: { ...counts } }
+      }
+    }
     if (!rows.length) return await finish('completed')
     const controller = new AbortController()
     const abortTimer = setTimeout(() => controller.abort(), Math.max(1, deadline - clock(deps)))

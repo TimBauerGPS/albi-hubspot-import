@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createH2ARepository } from '../../netlify/functions/_h2a/repository.js'
-import { captureLiveReview, closeLiveReview } from '../../netlify/functions/_h2a/liveReview.js'
+import { backfillLiveReviews, captureLiveReview, closeLiveReview } from '../../netlify/functions/_h2a/liveReview.js'
 import { dispatchConflictResumes } from '../../netlify/functions/_h2a/conflicts.js'
 import { liveCloseStore } from './live-close-fixture.mjs'
 
@@ -151,7 +151,7 @@ test('a closed live row in the same run stays closed and is reported as already 
   const first = await captureLiveReview(deps, { ...base, conflictId: 'conflict-a' })
   db.tables.h2a_dry_run_reviews[0].status = 'no_longer_in_scope'
   const second = await captureLiveReview(deps, { ...base, conflictId: 'conflict-b' })
-  assert.deepEqual(second, { reviewId: first.reviewId, inserted: false, closed: true })
+  assert.deepEqual(second, { reviewId: first.reviewId, inserted: false, closed: true, linked: false })
   assert.equal(db.tables.h2a_dry_run_reviews.length, 1)
   assert.equal(db.tables.h2a_dry_run_reviews[0].status, 'no_longer_in_scope', 'a closed row is never reopened')
   assert.deepEqual(db.tables.h2a_live_review_conflicts.map(link => link.conflict_id), ['conflict-a'],
@@ -176,7 +176,7 @@ test('a concurrent capture that wins the live key is refreshed instead of duplic
     return query
   }
   const result = await captureLiveReview(deps, { ...base, conflictId: 'conflict-a' })
-  assert.deepEqual(result, { reviewId: '00000000-0000-4000-8000-0000000000aa', inserted: false })
+  assert.deepEqual(result, { reviewId: '00000000-0000-4000-8000-0000000000aa', inserted: false, linked: true })
   assert.equal(db.tables.h2a_dry_run_reviews.length, 1)
   assert.deepEqual(db.tables.h2a_live_review_conflicts.map(link => link.review_id), ['00000000-0000-4000-8000-0000000000aa'])
 })
@@ -301,4 +301,77 @@ test('repository closeLiveReview calls the close RPC with tenant-scoped paramete
   assert.deepEqual(calls, [['h2a_close_live_review', { p_company_id: 'company-1', p_review_id: liveReviewId, p_actor_id: closeActor,
     p_outcome: 'skipped', p_resolution_action: 'skip' }]])
   await assert.rejects(repository.closeLiveReview('company-1', { reviewId: liveReviewId, actorId: closeActor, outcome: 'merged', resolutionAction: null }), TypeError)
+})
+
+// Backfill: open contact/company conflicts captured with their stored snapshots, in pages.
+const conflictRow = (n, extra = {}) => ({ id: `00000000-0000-4000-8000-0000000000${String(n).padStart(2, '0')}`, company_id: 'company-1',
+  portal_id: '123', object_type: 'contacts', source_id: '10', conflict_type: 'contact_match', reason: 'name_only_candidate',
+  match_evidence: { evidence: ['name'] }, source_snapshot: { id: '10', firstname: 'Ada', lastname: 'Lovelace', email: 'ada@example.com', apiKey: 'secret' },
+  candidate_snapshots: [{ id: '200', firstName: 'Ada', lastName: 'Lovelace', email: 'ada@example.com' }], proposed_changes: {}, status: 'open', run_id: 'run-1',
+  created_at: `2026-10-18T10:00:${String(n).padStart(2, '0')}.000Z`, ...extra })
+
+function backfillFixture(conflicts) {
+  const { db, deps } = fixture()
+  const pages = []
+  const repository = Object.assign(Object.create(Object.getPrototypeOf(deps.repository)), deps.repository, {
+    async listOpenSourceConflicts(companyId, { limit, after = null }) {
+      pages.push([companyId, limit, after])
+      const open = conflicts.filter(row => row.status === 'open' && ['contacts', 'companies'].includes(row.object_type))
+        .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id))
+      const start = after ? open.findIndex(row => row.id === after.id) + 1 : 0
+      return { items: open.slice(start, start + limit), hasMore: start + limit < open.length }
+    },
+    async getMappings() { return { contacts: [], organizations: [], options: [] } },
+  })
+  return { db, pages, deps: { ...deps, repository } }
+}
+
+test('backfill links all open conflicts for a source to one row and is idempotent', async () => {
+  const conflicts = [conflictRow(1), conflictRow(2, { run_id: 'run-2' }), conflictRow(3, { source_id: '11', source_snapshot: { id: '11', firstname: 'Grace' } }),
+    conflictRow(4, { object_type: 'calls', source_id: '900' }), conflictRow(5, { status: 'resolved', source_id: '12' })]
+  const f = backfillFixture(conflicts)
+  const first = await backfillLiveReviews(f.deps, { companyId: 'company-1' })
+  assert.deepEqual([first.captured, first.linked, first.nextCursor], [2, 3, null])
+  const rows = f.db.tables.h2a_dry_run_reviews
+  assert.equal(rows.length, 2)
+  const ada = rows.find(row => row.source_id === '10')
+  assert.deepEqual([ada.review_kind, ada.status, ada.run_id, ada.reason, ada.conflict_type], ['live', 'needs_review', 'run-1', 'name_only_candidate', 'contact_match'])
+  assert.equal(ada.source_snapshot.email, 'ada@example.com')
+  assert.equal(JSON.stringify(rows).includes('secret'), false)
+  // Triage is computed like capture: one same-email candidate is a quick link; readiness is unknown for backfill.
+  assert.equal(ada.triage_bucket, 'quick')
+  assert.deepEqual(f.db.tables.h2a_live_review_conflicts.map(link => [link.review_id === ada.id, link.conflict_id]),
+    [[true, conflicts[0].id], [true, conflicts[1].id], [false, conflicts[2].id]])
+  const before = structuredClone(f.db.tables)
+  const again = await backfillLiveReviews(f.deps, { companyId: 'company-1' })
+  assert.deepEqual([again.captured, again.linked, again.nextCursor], [0, 0, null])
+  assert.deepEqual(f.db.tables, before, 'a second backfill writes nothing')
+})
+
+test('backfill pages by cursor and never overwrites a live row a sync already refreshed', async () => {
+  const conflicts = [conflictRow(1), conflictRow(2, { source_id: '11' }), conflictRow(3, { source_id: '12' })]
+  const f = backfillFixture(conflicts)
+  // A live run already holds source 11 with fresher evidence.
+  const live = await captureLiveReview(f.deps, { ...base, sourceId: '11', runId: 'run-9', reason: 'unique_exact_match',
+    source: { id: '11', properties: { firstname: 'Grace', email: 'grace@new.example.com' } }, conflictId: 'conflict-live' })
+  const page1 = await backfillLiveReviews(f.deps, { companyId: 'company-1', limit: 2 })
+  assert.deepEqual([page1.captured, page1.linked], [1, 2])
+  assert.deepEqual(page1.nextCursor, { createdAt: conflicts[1].created_at, id: conflicts[1].id })
+  const page2 = await backfillLiveReviews(f.deps, { companyId: 'company-1', limit: 2, cursor: page1.nextCursor })
+  assert.deepEqual([page2.captured, page2.linked, page2.nextCursor], [1, 1, null])
+  assert.deepEqual(f.pages.map(([, limit, after]) => [limit, after?.id ?? null]), [[2, null], [2, conflicts[1].id]])
+  const grace = f.db.tables.h2a_dry_run_reviews.find(row => row.id === live.reviewId)
+  assert.equal(grace.reason, 'unique_exact_match')
+  assert.equal(grace.source_snapshot.email, 'grace@new.example.com')
+  assert.deepEqual(f.db.tables.h2a_live_review_conflicts.filter(link => link.review_id === live.reviewId).map(link => link.conflict_id),
+    ['conflict-live', conflicts[1].id])
+})
+
+test('backfill skips conflicts it cannot classify or that lack a run, and bounds its page', async () => {
+  const f = backfillFixture([conflictRow(1, { reason: 'not_a_review_reason' }), conflictRow(2, { run_id: null, source_id: '11' })])
+  const result = await backfillLiveReviews(f.deps, { companyId: 'company-1', limit: 500 })
+  assert.deepEqual([result.captured, result.linked, result.skipped], [0, 0, 2])
+  assert.equal(f.pages[0][1], 100)
+  assert.equal(f.db.tables.h2a_dry_run_reviews.length, 0)
+  await assert.rejects(() => backfillLiveReviews(f.deps, { companyId: 'company-1', cursor: { createdAt: 'x', id: 'y', extra: 1 } }), TypeError)
 })

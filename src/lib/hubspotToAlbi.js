@@ -46,6 +46,14 @@ const SAFE_SERVER_MESSAGES = Object.freeze({
   'Invalid sample review cursor.': 'Invalid sample review cursor.',
   'Invalid sample review request.': 'Invalid sample review request.',
   'Unable to start rechecking all reviews.': 'Unable to start rechecking all reviews.',
+  'Invalid recheck request.': 'Invalid recheck request.',
+  'Resolve this in the review workspace.': 'Resolve this in the review workspace.',
+  'Unable to prepare open conflicts for review.': 'Unable to prepare open conflicts for review.',
+  'Review item not found.': 'Review item not found.',
+  'This review changed. Refresh it before rechecking.': 'This review changed. Refresh it before rechecking.',
+  'Unable to recheck this review.': 'Unable to recheck this review.',
+  'Skip is only available for live reviews.': 'Skip is only available for live reviews.',
+  'Creating with the organization is not available for this record.': 'Creating with the organization is not available for this record.',
   'Unable to load recheck progress.': 'Unable to load recheck progress.',
   'Invalid sync mode.': 'Invalid sync mode.',
   'Linking requires an explicit target ID.': 'Linking requires an explicit target ID.',
@@ -215,13 +223,18 @@ export function getH2AConflict(session, companyId, conflictId, { signal } = {}) 
   return request(session, 'h2a-conflicts', { companyId, query: { conflictId }, signal })
 }
 
-const SAMPLE_REVIEW_FILTERS = new Set(['limit', 'cursor', 'status', 'objectType', 'reason'])
+// Query order is stable so cached URLs and tests stay comparable; unknown keys never serialize.
+const REVIEW_FILTERS = Object.freeze(['limit', 'cursor', 'status', 'objectType', 'reason', 'kind', 'bucket'])
 
-export function getH2ADryRunReviews(session, companyId, filters = {}) {
-  const { signal, ...values } = filters ?? {}
-  const query = Object.fromEntries(Object.entries(values).filter(([key]) => SAMPLE_REVIEW_FILTERS.has(key)))
+// The review list for either queue: kind 'sample' (default on the server) or 'live', filtered by bucket.
+export function getH2AReviews(session, companyId, { signal, limit = 100, ...values } = {}) {
+  const filters = { ...values, limit }
+  const query = Object.fromEntries(REVIEW_FILTERS.filter(key => Object.hasOwn(filters, key)).map(key => [key, filters[key]]))
   return request(session, 'h2a-dry-run-reviews', { companyId, query, signal })
 }
+
+// Old name, kept until the review workspace replaces the Sample review page.
+export const getH2ADryRunReviews = getH2AReviews
 
 export function getH2ADryRunReview(session, companyId, reviewId, { signal } = {}) {
   return request(session, 'h2a-dry-run-reviews', { companyId, query: { reviewId }, signal })
@@ -234,13 +247,15 @@ export function recheckH2ADryRunReview(session, companyId, input = {}, { signal 
   })
 }
 
-// Queues one background recheck of every open review in the current sample; poll getH2ARecheckAll for progress.
-export function startH2ARecheckAll(session, companyId, { signal } = {}) {
-  return request(session, 'h2a-dry-run-review-recheck-all', { method: 'POST', companyId, body: {}, signal })
+// Queues one background recheck of every open review of a kind (the current sample, or the open live
+// rows), or only up to 200 reviewIds; poll getH2ARecheckAll with the same kind for progress.
+export function startH2ARecheckAll(session, companyId, { kind = 'sample', reviewIds, signal } = {}) {
+  return request(session, 'h2a-dry-run-review-recheck-all', { method: 'POST', companyId,
+    body: { kind, ...(Array.isArray(reviewIds) ? { reviewIds: [...reviewIds] } : {}) }, signal })
 }
 
-export function getH2ARecheckAll(session, companyId, { signal } = {}) {
-  return request(session, 'h2a-dry-run-review-recheck-all', { companyId, signal })
+export function getH2ARecheckAll(session, companyId, { kind, signal } = {}) {
+  return request(session, 'h2a-dry-run-review-recheck-all', { companyId, query: { kind }, signal })
 }
 
 // Captures (or finds) the one associated organization's own review so it can be created before the contact.
@@ -276,6 +291,33 @@ export function getH2ADryRunReviewResolution(session, companyId, reviewId, { sig
 export function resolveH2ADryRunReview(session, companyId, input, { signal } = {}) {
   return request(session, 'h2a-dry-run-review-resolutions', { method: 'POST', companyId: resolutionCompany(companyId),
     body: buildResolutionRequest(input), signal })
+}
+
+const pick = (input, keys) => Object.fromEntries(keys.filter(key => input?.[key] !== undefined).map(key => [key, input[key]]))
+
+// Links up to 25 exact-match rows, each with its own version and request ID; the server reports each row.
+export function bulkLinkH2AReviews(session, companyId, items, { signal } = {}) {
+  const clean = (Array.isArray(items) ? items : []).map(item => pick(item, ['reviewId', 'candidateId', 'expectedUpdatedAt', 'clientRequestId']))
+  return request(session, 'h2a-dry-run-review-resolutions', { method: 'POST', companyId: resolutionCompany(companyId),
+    body: { op: 'bulk_link', items: clean }, signal })
+}
+
+// "Create organization and contact": one referral source for both records. The response's contact.error
+// reports a contact step that failed after the organization was created.
+export function createH2AOrganizationThenContact(session, companyId, input, { signal } = {}) {
+  return request(session, 'h2a-dry-run-review-resolutions', { method: 'POST', companyId: resolutionCompany(companyId),
+    body: { op: 'create_with_organization', ...pick(input, ['reviewId', 'expectedUpdatedAt', 'clientRequestId', 'referralSourceId',
+      'organizationReviewId', 'organizationExpectedUpdatedAt']) }, signal })
+}
+
+// Skip on a live row: an audited resolution that marks every linked conflict skipped.
+export function skipH2ALiveReview(session, companyId, { reviewId, expectedUpdatedAt, clientRequestId } = {}, { signal } = {}) {
+  return resolveH2ADryRunReview(session, companyId, { reviewId, expectedUpdatedAt, clientRequestId, action: 'skip_live' }, { signal })
+}
+
+// "Prepare open conflicts for review": one backfill page; repeat with nextCursor until it is null.
+export function prepareH2ALiveReviews(session, companyId, { cursor, signal } = {}) {
+  return request(session, 'h2a-conflicts', { method: 'POST', companyId, body: { op: 'prepare_live_reviews', cursor }, signal })
 }
 
 export function resolveH2AConflict(session, companyId, resolution, { signal } = {}) {

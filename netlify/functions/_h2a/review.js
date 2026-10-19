@@ -228,6 +228,7 @@ function safeTriageDetails(value) {
   if (typeof details.blockedReason === 'string') safe.blockedReason = details.blockedReason.slice(0, 80)
   if (details.merged === true) safe.merged = true
   if (['link', 'create'].includes(details.quickKind)) safe.quickKind = details.quickKind
+  if (details.closePending === true) safe.closePending = true
   return safe
 }
 

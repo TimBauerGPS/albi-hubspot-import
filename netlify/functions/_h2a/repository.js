@@ -79,9 +79,10 @@ function requireReviewValue(value, allowed, label) {
 }
 
 const RECHECK_BATCH_TABLE = 'h2a_review_recheck_batches'
-const RECHECK_BATCH_COLUMNS = 'id,company_id,run_id,requested_by,status,total,done,cleared,still_needs_review,no_longer_in_scope,stale,failed,error_code,heartbeat_at,started_at,finished_at,created_at,updated_at'
+const RECHECK_BATCH_COLUMNS = 'id,company_id,run_id,review_kind,review_ids,requested_by,status,total,done,cleared,still_needs_review,no_longer_in_scope,stale,failed,error_code,heartbeat_at,started_at,finished_at,created_at,updated_at'
 const RECHECK_BATCH_ERRORS = new Set(['superseded', 'timeout', 'expired', 'dispatch_failed', 'operation_failed',
   'pagination_loop', 'malformed_response', 'application_error', 'unsupported_contract', 'network'])
+const MAX_RECHECK_BATCH_IDS = 200
 
 function recheckBatchCounts(counts) {
   const fields = { total: 'total', done: 'done', cleared: 'cleared', stillNeedsReview: 'still_needs_review',
@@ -229,6 +230,7 @@ function safeTriageDetails(details) {
   if (typeof details.blockedReason === 'string') safe.blockedReason = details.blockedReason.slice(0, 80)
   if (details.merged === true) safe.merged = true
   if (['link', 'create'].includes(details.quickKind)) safe.quickKind = details.quickKind
+  if (details.closePending === true) safe.closePending = true
   return safe
 }
 
@@ -514,6 +516,27 @@ export function createH2ARepository(supabase) {
       return checked(await supabase.rpc('h2a_close_live_review', { p_company_id: companyId, p_review_id: reviewId,
         p_actor_id: actorId, p_outcome: outcome, p_resolution_action: resolutionAction }))
     },
+    // The live review row a conflict is attached to, if any (unique per conflict).
+    async findLiveReviewConflictLink(companyId, conflictId) {
+      for (const value of [companyId, conflictId]) requireReviewIdentity(value)
+      return checked(await supabase.from('h2a_live_review_conflicts').select('company_id,review_id,conflict_id')
+        .eq('company_id', companyId).eq('conflict_id', conflictId).maybeSingle()) ?? null
+    },
+    // Open contact/company conflicts, oldest first, for the on-demand live review backfill.
+    async listOpenSourceConflicts(companyId, { limit = 50, after = null } = {}) {
+      requireReviewIdentity(companyId)
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new TypeError('Invalid conflict page size')
+      if (after !== null) {
+        requireReviewTimestamp(after?.createdAt)
+        if (typeof after.id !== 'string' || !UUID_SHAPE.test(after.id)) throw new TypeError('Invalid conflict cursor')
+      }
+      let query = supabase.from('h2a_conflicts').select('*').eq('company_id', companyId).eq('status', 'open')
+        .in('object_type', ['contacts', 'companies'])
+      if (after !== null) query = query.or(`created_at.gt.${after.createdAt},and(created_at.eq.${after.createdAt},id.gt.${after.id})`)
+      const rows = checked(await query.order('created_at', { ascending: true }).order('id', { ascending: true }).limit(limit + 1))
+      if (!Array.isArray(rows)) throw new Error('Invalid conflict page')
+      return { items: rows.slice(0, limit), hasMore: rows.length > limit }
+    },
     async linkLiveReviewConflict(companyId, reviewId, conflictId) {
       for (const value of [companyId, reviewId, conflictId]) requireReviewIdentity(value)
       const result = await supabase.from('h2a_live_review_conflicts')
@@ -565,28 +588,35 @@ export function createH2ARepository(supabase) {
       }
       return { review: result.review }
     },
-    // One queued/running recheck batch per company (partial unique index); abandoned batches expire by heartbeat.
-    async createReviewRecheckBatch(companyId, { runId, requestedBy, now = new Date().toISOString(), staleBefore }) {
+    // One queued/running recheck batch per company and kind (partial unique index); abandoned batches
+    // expire by heartbeat. Live batches have no single sample run; reviewIds narrows a batch to those rows.
+    async createReviewRecheckBatch(companyId, { kind = 'sample', runId = null, reviewIds = null, actorId, requestedBy = actorId,
+      now = new Date().toISOString(), staleBefore }) {
       requireReviewIdentity(companyId)
-      requireReviewIdentity(runId)
+      requireReviewValue(kind, REVIEW_KINDS, 'kind')
+      if (kind === 'sample' || runId !== null) requireReviewIdentity(runId)
+      if (reviewIds !== null && (!Array.isArray(reviewIds) || reviewIds.length < 1 || reviewIds.length > MAX_RECHECK_BATCH_IDS ||
+        reviewIds.some(value => typeof value !== 'string' || !UUID_SHAPE.test(value)))) throw new TypeError('Invalid recheck batch reviews')
       requireReviewIdentity(requestedBy)
       requireReviewTimestamp(now)
       requireReviewTimestamp(staleBefore)
       checked(await supabase.from(RECHECK_BATCH_TABLE).update({ status: 'failed', error_code: 'expired', finished_at: now, updated_at: now })
-        .eq('company_id', companyId).in('status', ['queued', 'running']).lt('heartbeat_at', staleBefore).select('id'))
-      const inserted = await supabase.from(RECHECK_BATCH_TABLE).insert({ company_id: companyId, run_id: runId, requested_by: requestedBy,
+        .eq('company_id', companyId).eq('review_kind', kind).in('status', ['queued', 'running']).lt('heartbeat_at', staleBefore).select('id'))
+      const inserted = await supabase.from(RECHECK_BATCH_TABLE).insert({ company_id: companyId, run_id: runId, review_kind: kind,
+        review_ids: reviewIds === null ? null : [...new Set(reviewIds)], requested_by: requestedBy,
         status: 'queued', heartbeat_at: now, created_at: now, updated_at: now }).select(RECHECK_BATCH_COLUMNS).single()
       if (inserted?.error?.code === '23505') {
         const active = checked(await supabase.from(RECHECK_BATCH_TABLE).select(RECHECK_BATCH_COLUMNS).eq('company_id', companyId)
-          .in('status', ['queued', 'running']).order('created_at', { ascending: false }).limit(1).maybeSingle())
+          .eq('review_kind', kind).in('status', ['queued', 'running']).order('created_at', { ascending: false }).limit(1).maybeSingle())
         return { error: 'active', batch: active ?? null }
       }
       return { batch: checked(inserted) }
     },
-    async getLatestReviewRecheckBatch(companyId) {
+    async getLatestReviewRecheckBatch(companyId, kind = 'sample') {
       requireReviewIdentity(companyId)
+      requireReviewValue(kind, REVIEW_KINDS, 'kind')
       return checked(await supabase.from(RECHECK_BATCH_TABLE).select(RECHECK_BATCH_COLUMNS).eq('company_id', companyId)
-        .order('created_at', { ascending: false }).order('id', { ascending: false }).limit(1).maybeSingle())
+        .eq('review_kind', kind).order('created_at', { ascending: false }).order('id', { ascending: false }).limit(1).maybeSingle())
     },
     async claimReviewRecheckBatch(companyId, batchId, now = new Date().toISOString()) {
       requireReviewIdentity(companyId)

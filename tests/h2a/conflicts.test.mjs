@@ -186,7 +186,7 @@ test('members may list conflicts while resolution endpoint requests admin author
   assert.equal(calls[1].requireAdmin, false)
   const resolveHandler = createConflictResolveHandler({
     requireRequest: async (_event, options) => { calls.push(options); return { companyId: 'company-1', userId: 'user-1', supabase: {} } },
-    repository: { resolveConflict: async () => ({ error: 'stale' }) },
+    repository: { resolveConflict: async () => ({ error: 'stale' }), findLiveReviewConflictLink: async () => null },
   })
   const response = await resolveHandler({ httpMethod: 'POST', body: JSON.stringify({ conflictId: 'conflict-1',
     expectedUpdatedAt: updatedAt, action: 'skip_item' }) })
@@ -206,4 +206,77 @@ test('resume intent carries only the resolved tenant and exact blocked source/ac
   await resolveConflict(deps, { companyId: 'company-1', actorId: 'user-1', conflictId: 'conflict-1', expectedUpdatedAt: updatedAt,
     action: 'link_existing', targetId: 'albi-8' })
   assert.deepEqual(calls.dispatched[0], { id: 'resume-1', company_id: 'company-1', status: 'pending' })
+})
+
+const resolveBody = extra => ({ httpMethod: 'POST', body: JSON.stringify({ conflictId: 'conflict-1', expectedUpdatedAt: updatedAt,
+  action: 'link_existing', targetId: 'albi-8', ...extra }) })
+
+test('legacy conflict resolve is refused for conflicts with a live review', async () => {
+  const lookups = []
+  const handler = createConflictResolveHandler({
+    requireRequest: async () => ({ companyId: 'company-1', userId: 'user-1', supabase: {} }),
+    repository: {
+      findLiveReviewConflictLink: async (companyId, conflictId) => { lookups.push([companyId, conflictId]); return { review_id: 'review-1', conflict_id: conflictId } },
+      resolveConflict: async () => { throw Error('legacy resolve must not run') },
+    },
+    dispatchResume: async () => { throw Error('no resume') },
+  })
+  const response = await handler(resolveBody())
+  assert.equal(response.statusCode, 409)
+  assert.deepEqual(JSON.parse(response.body), { error: 'Resolve this in the review workspace.' })
+  assert.deepEqual(lookups, [['company-1', 'conflict-1']])
+})
+
+test('activity-only conflicts still resolve through the legacy endpoint', async () => {
+  const { deps, calls } = serviceDeps()
+  const handler = createConflictResolveHandler({
+    requireRequest: async () => ({ companyId: 'company-1', userId: 'user-1', supabase: {} }),
+    repository: { ...deps.repository, findLiveReviewConflictLink: async () => null },
+    dispatchResume: deps.dispatchResume, now: deps.now,
+  })
+  const response = await handler(resolveBody({ conflictId: 'activity-conflict', action: 'skip_item', targetId: undefined }))
+  assert.equal(response.statusCode, 200)
+  assert.equal(calls.resolved.length, 1)
+  assert.equal(calls.resolved[0][1].conflictId, 'activity-conflict')
+})
+
+test('a failed live-link lookup fails closed and never resolves', async () => {
+  const handler = createConflictResolveHandler({
+    requireRequest: async () => ({ companyId: 'company-1', userId: 'user-1', supabase: {} }),
+    repository: { findLiveReviewConflictLink: async () => { throw Error('db secret') }, resolveConflict: async () => { throw Error('must not run') } },
+  })
+  const response = await handler(resolveBody())
+  assert.equal(response.statusCode, 500)
+  assert.equal(response.body.includes('secret'), false)
+})
+
+test('prepare_live_reviews is admin-only and runs one backfill page with an opaque cursor', async () => {
+  const auths = [], runs = []
+  const options = {
+    requireRequest: async (_event, auth) => { auths.push(auth); return { companyId: 'company-1', userId: 'user-1', supabase: {} } },
+    repository: {},
+    backfillLiveReviews: async (deps, input) => { runs.push(input); return { captured: 2, linked: 3, skipped: 0, failed: 0,
+      nextCursor: { createdAt: updatedAt, id: '00000000-0000-4000-8000-0000000000c1' } } },
+  }
+  const handler = createConflictListHandler(options)
+  const first = await handler({ httpMethod: 'POST', body: JSON.stringify({ companyId: 'selected', op: 'prepare_live_reviews' }) })
+  assert.equal(first.statusCode, 200)
+  assert.equal(auths[0].requireAdmin, true)
+  assert.equal(auths[0].requestedCompanyId, 'selected')
+  const body = JSON.parse(first.body)
+  assert.deepEqual([body.captured, body.linked, body.skipped, body.failed], [2, 3, 0, 0])
+  assert.equal(typeof body.nextCursor, 'string')
+  assert.deepEqual(runs[0], { companyId: 'company-1', limit: 50, cursor: null })
+  const second = await handler({ httpMethod: 'POST', body: JSON.stringify({ op: 'prepare_live_reviews', cursor: body.nextCursor }) })
+  assert.equal(second.statusCode, 200)
+  assert.deepEqual(runs[1].cursor, { createdAt: updatedAt, id: '00000000-0000-4000-8000-0000000000c1' })
+  for (const bad of [{ op: 'other' }, { op: 'prepare_live_reviews', cursor: '%%' }, { op: 'prepare_live_reviews', extra: 1 }]) {
+    const refused = await handler({ httpMethod: 'POST', body: JSON.stringify(bad) })
+    assert.equal(refused.statusCode, 400, JSON.stringify(bad))
+  }
+  assert.equal(runs.length, 2)
+  const denied = createConflictListHandler({ ...options,
+    requireRequest: async (_event, auth) => { assert.equal(auth.requireAdmin, true); throw new H2AAuthError(403, 'Administrator access is required.') } })
+  assert.equal((await denied({ httpMethod: 'POST', body: JSON.stringify({ op: 'prepare_live_reviews' }) })).statusCode, 403)
+  assert.equal(runs.length, 2)
 })
