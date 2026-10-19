@@ -19,6 +19,7 @@ test('todo when waiting on Albi', () => {
 test('merged record is blocked even with a strong candidate', () => {
   const result = computeTriage({ row: row(), ranking: one, mergedInto: { sourceId: '99' } })
   assert.equal(result.bucket, 'blocked')
+  assert.deepEqual(result.details, { merged: true })
 })
 test('blocked with copy-backed reason and no candidates', () => {
   const result = computeTriage({ row: row(), ranking: none, createReadiness: { ready: false, blockedReason: 'referrer_type_missing' } })
@@ -74,4 +75,25 @@ test('refreshReviewTriage keeps known readiness when not re-read and never throw
   assert.equal(writes[0][2].bucket, 'todo')
   assert.equal(await refreshReviewTriage({ setReviewTriage: async () => { throw new Error('db') } }, { companyId: 'c', row: storedRow(), resolutionStatus: 'completed' }), null)
   assert.equal(await refreshReviewTriage(undefined, { companyId: 'c', row: storedRow() }), null)
+})
+
+const cleared = outcome => row({ status: 'cleared', recheck_outcome: outcome })
+test('cleared safe_to_link without completed resolution is quick link', () => {
+  assert.deepEqual(computeTriage({ row: cleared('safe_to_link'), ranking: none }), { bucket: 'quick', details: { quickKind: 'link' } })
+})
+test('cleared safe_to_create without completed resolution is quick create', () => {
+  assert.deepEqual(computeTriage({ row: cleared('safe_to_create'), ranking: none }), { bucket: 'quick', details: { quickKind: 'create' } })
+})
+test('cleared safe_to_create with completed resolution is done', () => {
+  assert.equal(computeTriage({ row: cleared('safe_to_create'), ranking: none, resolutionStatus: 'completed' }).bucket, 'done')
+  assert.equal(computeTriage({ row: row({ status: 'no_longer_in_scope', recheck_outcome: 'source_missing' }), ranking: none }).bucket, 'done')
+})
+test('merge block carries over when mergedInto is unknown and clears when null', async () => {
+  const writes = []
+  const repository = { setReviewTriage: async (...args) => { writes.push(args) } }
+  const blocked = storedRow({ triage_bucket: 'blocked', triage_details: { merged: true } })
+  await refreshReviewTriage(repository, { companyId: 'c', row: blocked })
+  assert.equal(writes.length, 0)
+  await refreshReviewTriage(repository, { companyId: 'c', row: blocked, mergedInto: null })
+  assert.equal(writes[0][2].bucket, 'decision')
 })

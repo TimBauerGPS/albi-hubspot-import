@@ -226,6 +226,7 @@ const TRIAGE_BUCKET_VALUES = new Set(['quick', 'todo', 'decision', 'blocked', 'd
 function safeTriageDetails(value) {
   const details = object(value), safe = {}
   if (typeof details.blockedReason === 'string') safe.blockedReason = details.blockedReason.slice(0, 80)
+  if (details.merged === true) safe.merged = true
   if (['link', 'create'].includes(details.quickKind)) safe.quickKind = details.quickKind
   return safe
 }

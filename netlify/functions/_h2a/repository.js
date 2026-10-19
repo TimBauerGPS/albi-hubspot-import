@@ -356,6 +356,7 @@ export function createH2ARepository(supabase) {
       if (!details || typeof details !== 'object' || Array.isArray(details)) throw new TypeError('Invalid triage details')
       const safe = {}
       if (typeof details.blockedReason === 'string') safe.blockedReason = details.blockedReason.slice(0, 80)
+      if (details.merged === true) safe.merged = true
       if (['link', 'create'].includes(details.quickKind)) safe.quickKind = details.quickKind
       checked(await supabase.from('h2a_dry_run_reviews').update({ triage_bucket: bucket, triage_details: safe })
         .eq('company_id', companyId).eq('id', reviewId))

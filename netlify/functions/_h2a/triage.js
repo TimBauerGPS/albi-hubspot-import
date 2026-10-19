@@ -9,9 +9,13 @@ export const TRIAGE_BUCKETS = Object.freeze(['quick', 'todo', 'decision', 'block
 // mergedInto is optional because merge state is read live from HubSpot, not stored.
 export function computeTriage({ row, ranking, createReadiness, resolutionStatus, mergedInto } = {}) {
   const candidates = Array.isArray(ranking?.candidates) ? ranking.candidates : []
+  if (row?.status === 'cleared' && resolutionStatus !== 'completed' &&
+    ['safe_to_link', 'safe_to_create'].includes(row?.recheck_outcome)) {
+    return { bucket: 'quick', details: { quickKind: row.recheck_outcome === 'safe_to_link' ? 'link' : 'create' } }
+  }
   if (row?.status !== 'needs_review' || resolutionStatus === 'completed') return { bucket: 'done', details: {} }
   if (resolutionStatus === 'waiting_on_albi') return { bucket: 'todo', details: {} }
-  if (mergedInto?.sourceId) return { bucket: 'blocked', details: {} }
+  if (mergedInto?.sourceId) return { bucket: 'blocked', details: { merged: true } }
   const blockedReason = createReadiness?.blockedReason
   if (candidates.length === 0 && blockedReasonCopy(blockedReason)) return { bucket: 'blocked', details: { blockedReason } }
   const category = H2A_REVIEW_REASON_CATALOG[row?.reason]?.category
@@ -49,13 +53,15 @@ export async function refreshReviewTriage(repository, { companyId, row, resoluti
       ? await repository.getMappings(companyId).catch(() => null) : null
     const mappings = Array.isArray(all) ? all : all?.[objectType === 'companies' ? 'organizations' : 'contacts'] ?? []
     const ranking = rankReviewCandidates({ objectType, source, candidates, mappings, portalId: row.portal_id, sourceId: row.source_id })
+    // Merge state is live-only: carry a stored merge block forward unless the caller says (null) it is not merged.
+    const merged = mergedInto === undefined && row.triage_details?.merged ? { sourceId: 'stored' } : mergedInto
     let readiness = createReadiness
     if (readiness === undefined) {
       const stored = row.triage_details ?? {}
       if (stored.blockedReason) readiness = { ready: false, blockedReason: stored.blockedReason }
       else if (row.triage_bucket === 'quick' && stored.quickKind === 'create') readiness = { ready: true }
     }
-    const next = computeTriage({ row, ranking, createReadiness: readiness, resolutionStatus: status, mergedInto })
+    const next = computeTriage({ row, ranking, createReadiness: readiness, resolutionStatus: status, mergedInto: merged })
     if (sameTriage(row, next)) return next
     await repository.setReviewTriage(companyId, row.id, next)
     return next
