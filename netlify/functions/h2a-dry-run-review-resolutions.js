@@ -2,6 +2,7 @@ import { H2AAuthError, requireH2ARequest } from './_h2a/auth.js'
 import { createH2ARepository } from './_h2a/repository.js'
 import { createH2AProviderClients, reviewResolutionProviderCapabilities } from './_h2a/providerClients.js'
 import { H2AReviewError, resolveReviewSample } from './_h2a/reviewService.js'
+import { executeBulkLink } from './_h2a/bulkLink.js'
 import { executeReviewResolution, executeOrganizationThenContactCreate } from './_h2a/reviewResolutionService.js'
 import { normalizeResolutionDecision, projectReviewResolution } from './_h2a/reviewResolution.js'
 import { canResolve, resolutionMode, hubspotWriteReadiness, projectResolutionCapability, WRITE_AUTH_REJECTION_MESSAGE } from './_h2a/resolutionCapability.js'
@@ -36,6 +37,20 @@ function request(event) {
   } else if (Object.keys(query).some(key => !['companyId', 'reviewId'].includes(key))) fail(400, 'Unsupported query parameters.')
   const selectors = [query.companyId, body.companyId].filter(value => value !== undefined)
   if (selectors.some(value => typeof value !== 'string' || !value.trim() || value.length > 200) || new Set(selectors).size > 1) fail(400, 'A single company selector is required.')
+  if (event.httpMethod === 'POST' && body.op === 'bulk_link') {
+    const { companyId, op, items, ...extra } = body
+    if (Object.keys(extra).length || !Array.isArray(items) || items.length < 1 || items.length > 25) fail(400, 'Invalid resolution request.')
+    const clean = items.map(item => {
+      if (!isRecord(item)) fail(400, 'Invalid resolution request.')
+      const { reviewId, candidateId, expectedUpdatedAt, clientRequestId, ...rest } = item
+      if (Object.keys(rest).length) fail(400, 'Unsupported request fields.')
+      if (typeof reviewId !== 'string' || !UUID.test(reviewId) || typeof clientRequestId !== 'string' || !UUID.test(clientRequestId) ||
+        !validTime(expectedUpdatedAt)) fail(400, 'Invalid resolution request.')
+      try { normalizeResolutionDecision({ action: 'link_existing', candidateId, approveManyToOne: false }) } catch { fail(400, 'Invalid resolution request.') }
+      return { reviewId, candidateId, expectedUpdatedAt, clientRequestId }
+    })
+    return { companyId: selectors[0], bulkLink: clean }
+  }
   const input = event.httpMethod === 'POST' ? body : query
   if (typeof input.reviewId !== 'string' || !UUID.test(input.reviewId)) fail(400, 'Invalid resolution request.')
   if (event.httpMethod === 'GET') return { companyId: selectors[0], reviewId: input.reviewId }
@@ -91,6 +106,10 @@ export function createReviewResolutionHandler(options = {}) {
             if ((await clients.hubspot.getAccountInfo()).portalId !== config.portal_id) throw new ApiError('permission', { code: 'authorization_rejected' })
             return reviewResolutionProviderCapabilities(clients)
           } })
+      if (isWrite && input.bulkLink) {
+        const result = await (options.executeBulkLink ?? executeBulkLink)(resolutionDeps(), { companyId, actorId: auth.userId, items: input.bulkLink })
+        return reply(200, { results: result.results.map(({ reviewId, status, reason }) => ({ reviewId, status, ...(reason ? { reason } : {}) })) })
+      }
       if (isWrite && input.orgFirst) {
         let { organizationReviewId, organizationExpectedUpdatedAt } = input.orgFirst
         if (!organizationReviewId) {

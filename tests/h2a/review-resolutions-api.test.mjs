@@ -348,3 +348,24 @@ test('create_with_organization surfaces a contact error beside the organization 
   assert.equal(body.contact.status, 409)
   assert.equal(result.body.includes('secret'), false)
 })
+
+const bulkItem = (extra = {}) => ({ reviewId, candidateId: '77', expectedUpdatedAt: stamp, clientRequestId, ...extra })
+const bulk = (items = [bulkItem()]) => ({ companyId: 'company-a', op: 'bulk_link', items })
+
+test('bulk_link runs the bulk service for admins and returns only per-item outcomes', async () => {
+  const f = fixture(); let received
+  f.options.executeBulkLink = async (_deps, args) => { received = args; return { results: [{ reviewId, status: 'skipped', reason: 'changed', secret: 'x' }] } }
+  const result = await f.request(bulk())
+  assert.equal(result.statusCode, 200)
+  assert.deepEqual(received, { companyId: 'company-a', actorId, items: [bulkItem()] })
+  assert.deepEqual(JSON.parse(result.body), { results: [{ reviewId, status: 'skipped', reason: 'changed' }] })
+})
+
+test('bulk_link validates items, allowlists fields, and is admin-only', async () => {
+  const f = () => { const x = fixture(); x.options.executeBulkLink = async () => { throw Error('must not run') }; return x }
+  const bad = [bulk([]), bulk(Array.from({ length: 26 }, () => bulkItem())), bulk([bulkItem({ reviewId: 'nope' })]),
+    bulk([bulkItem({ clientRequestId: 'nope' })]), bulk([bulkItem({ expectedUpdatedAt: 'nope' })]), bulk([bulkItem({ candidateId: 'a b' })]),
+    bulk([bulkItem({ approveManyToOne: true })]), { ...bulk(), extra: 1 }, { ...bulk(), items: 'x' }]
+  for (const body of bad) assert.equal((await f().request(body)).statusCode, 400, JSON.stringify(body).slice(0, 80))
+  assert.equal((await fixture({ role: 'member' }).request(bulk())).statusCode, 403)
+})
