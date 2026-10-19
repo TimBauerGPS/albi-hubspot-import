@@ -16,15 +16,13 @@ test('blank on both sides is hidden', () => {
   const r = rows({ email: 'a@b.com', city: '  ' }, { email: 'a@b.com' })
   assert.equal(r.some(x => x.key === 'city'), false)
 })
-test('differs sorts before one_side before same', () => {
-  const r = rows({ email: 'a@b.com', city: 'Reno', state: 'NV', lastName: 'Lee' }, { email: 'a@b.com', city: 'Sparks', lastName: '' })
-  assert.deepEqual(r.map(x => x.kind), ['differs', 'one_side', 'hubspot_only', 'same'].filter(k => r.some(x => x.kind === k)).flatMap(k => r.filter(x => x.kind === k).map(() => k)))
-  assert.equal(r[0].kind, 'differs')
-  assert.equal(r.at(-1).kind, 'same')
-  assert.equal(r.find(x => x.key === 'state').kind, 'hubspot_only')
+test('differs sorts before one_side before same, with a candidate', () => {
+  const r = rows({ email: 'a@b.com', city: 'Reno', state: 'NV', lastName: 'Lee', jobTitle: 'Boss' }, { email: 'a@b.com', city: 'Sparks', lastName: '', country: 'US' })
+  assert.deepEqual(r.map(x => [x.key, x.kind]), [['city', 'differs'], ['lastName', 'one_side'], ['jobTitle', 'one_side'], ['state', 'one_side'], ['country', 'one_side'], ['email', 'same']])
 })
-test('one_side means only Albi has a value', () => {
-  assert.equal(rows({}, { city: 'Reno' }).find(x => x.key === 'city').kind, 'one_side')
+test('without a candidate every non-blank row is hubspot_only', () => {
+  const r = rows({ email: 'a@b.com', city: 'Reno', state: ' ' }, null)
+  assert.deepEqual(r.map(x => [x.key, x.kind]), [['email', 'hubspot_only'], ['city', 'hubspot_only']])
 })
 test('contact rows omit name; organizations omit first/last', () => {
   const c = rows({ name: 'X', firstName: 'A' }, { name: 'Y', firstName: 'A' })
@@ -62,7 +60,7 @@ const item = (id, extra = {}) => ({ id, recordId: 'r' + id, label: id, payload: 
 
 test('sends once after the delay', async () => {
   const { f, sent, q, changes } = setup(); q.enqueue(item('1'))
-  assert.equal(q.pending().length, 1); f.fire(); await Promise.resolve()
+  assert.equal(q.pending().length, 1); f.fire(); await new Promise(r => setImmediate(r))
   assert.deepEqual(sent, ['1']); assert.equal(q.pending().length, 0); assert.ok(changes.length >= 2)
 })
 test('undo before the delay sends nothing', () => {
@@ -121,4 +119,21 @@ test('dialog mode only confirms or cancels', () => {
   assert.equal(shortcutFor(ev('Escape'), o), 'dialogCancel')
   assert.equal(shortcutFor(ev('j'), o), null)
   assert.equal(shortcutFor(ev('1'), o), null)
+})
+
+test('flushAll awaits an in-flight timer send', async () => {
+  let release; const gate = new Promise(r => { release = r })
+  const { f, q } = setup(() => gate); q.enqueue(item('1')); f.fire()
+  assert.equal(q.pending().length, 1); assert.equal(q.pending()[0].sending, true)
+  let done = false; const flushed = q.flushAll().then(() => { done = true })
+  await new Promise(r => setImmediate(r)); assert.equal(done, false)
+  release(); await flushed; assert.equal(done, true); assert.equal(q.pending().length, 0)
+})
+test('a throwing onError still notifies and leaves no unhandled rejection', async () => {
+  const unhandled = []; const h = e => unhandled.push(e); process.on('unhandledRejection', h)
+  const { f, q, changes } = setup(() => { throw new Error('x') })
+  q.enqueue(item('1', { onError: () => { throw new Error('bad handler') } }))
+  const before = changes.length; f.fire(); await new Promise(r => setImmediate(r)); await new Promise(r => setImmediate(r))
+  process.off('unhandledRejection', h)
+  assert.deepEqual(unhandled, []); assert.ok(changes.length > before); assert.equal(q.pending().length, 0)
 })

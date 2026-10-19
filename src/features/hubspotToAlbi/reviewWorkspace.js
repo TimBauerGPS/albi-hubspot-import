@@ -33,8 +33,8 @@ export function fieldDiffRows({ objectType, source, candidate }) {
     const albiValue = trimmed(albi[key])
     if (!hubspot && !albiValue) continue
     let kind
-    if (hubspot && !albiValue) kind = 'hubspot_only'
-    else if (!hubspot) kind = 'one_side'
+    if (candidate == null) kind = 'hubspot_only'
+    else if (!hubspot || !albiValue) kind = 'one_side'
     else kind = normalize(key, hubspot) === normalize(key, albiValue) ? 'same' : 'differs'
     out.push({ key, label, hubspot, albi: albiValue, kind })
   }
@@ -55,11 +55,13 @@ export function nextRecordId(order, currentId, excluded) {
 
 export function createDeferredQueue({ delayMs = 5000, send, onChange, setTimer = setTimeout, clearTimer = clearTimeout }) {
   const entries = new Map()
-  const notify = extra => { if (onChange) onChange([...entries.values()].map(entry => entry.item), extra) }
+  const inflight = new Map()
+  const snapshot = () => [...entries.values()].map(entry => entry.item).concat([...inflight.values()].map(entry => ({ ...entry.item, sending: true })))
+  const notify = extra => { try { if (onChange) onChange(snapshot(), extra) } catch { /* a faulty listener must not break the queue */ } }
 
   async function dispatch(entry) {
     try { await send(entry.item) } catch (error) {
-      if (typeof entry.item.onError === 'function') entry.item.onError(error)
+      try { if (typeof entry.item.onError === 'function') entry.item.onError(error) } catch { /* surfaced via onChange below */ }
       notify({ error, item: entry.item })
     }
   }
@@ -72,15 +74,17 @@ export function createDeferredQueue({ delayMs = 5000, send, onChange, setTimer =
   }
   async function sendNow(id) {
     const entry = take(id)
-    if (!entry) return
+    if (!entry) return inflight.get(id)?.promise
+    entry.promise = dispatch(entry).finally(() => { inflight.delete(id); notify() })
+    inflight.set(id, entry)
     notify()
-    await dispatch(entry)
+    return entry.promise
   }
   return {
     enqueue(item) {
       if (entries.has(item.id)) take(item.id)
       const entry = { item, timer: null }
-      entry.timer = setTimer(() => { sendNow(item.id) }, delayMs)
+      entry.timer = setTimer(() => { sendNow(item.id).catch(() => {}) }, delayMs)
       entries.set(item.id, entry)
       notify()
     },
@@ -92,8 +96,11 @@ export function createDeferredQueue({ delayMs = 5000, send, onChange, setTimer =
       return entry.item
     },
     sendNow,
-    async flushAll() { await Promise.all([...entries.keys()].map(sendNow)) },
-    pending: () => [...entries.values()].map(entry => entry.item),
+    async flushAll() {
+      await Promise.all([...entries.keys()].map(sendNow))
+      await Promise.all([...inflight.values()].map(entry => entry.promise))
+    },
+    pending: snapshot,
   }
 }
 
