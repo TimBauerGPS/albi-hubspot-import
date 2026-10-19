@@ -137,3 +137,16 @@ test('a throwing onError still notifies and leaves no unhandled rejection', asyn
   process.off('unhandledRejection', h)
   assert.deepEqual(unhandled, []); assert.ok(changes.length > before); assert.equal(q.pending().length, 0)
 })
+
+test('re-enqueue during flight does not send twice', async () => {
+  let release; const gate = new Promise(r => { release = r })
+  const { f, sent, q } = setup(() => gate); q.enqueue(item('1')); f.fire()
+  assert.equal(q.enqueue(item('1')), false); assert.equal(q.enqueue(item('1')), false)
+  f.fire(); release(); await q.flushAll(); assert.deepEqual(sent, ['1']); assert.equal(q.pending().length, 0)
+})
+test('undo of an in-flight id signals sending, not nothing', async () => {
+  let release; const gate = new Promise(r => { release = r })
+  const { f, q } = setup(() => gate); q.enqueue(item('1')); f.fire()
+  assert.equal(q.undo('1').sending, true); assert.equal(q.undo('missing'), null)
+  release(); await q.flushAll()
+})

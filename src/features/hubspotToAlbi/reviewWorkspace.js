@@ -61,7 +61,7 @@ export function createDeferredQueue({ delayMs = 5000, send, onChange, setTimer =
 
   async function dispatch(entry) {
     try { await send(entry.item) } catch (error) {
-      try { if (typeof entry.item.onError === 'function') entry.item.onError(error) } catch { /* surfaced via onChange below */ }
+      try { if (typeof entry.item.onError === 'function') entry.item.onError(error) } catch { /* a throwing handler must not stop the error being reported through onChange below */ }
       notify({ error, item: entry.item })
     }
   }
@@ -75,20 +75,23 @@ export function createDeferredQueue({ delayMs = 5000, send, onChange, setTimer =
   async function sendNow(id) {
     const entry = take(id)
     if (!entry) return inflight.get(id)?.promise
-    entry.promise = dispatch(entry).finally(() => { inflight.delete(id); notify() })
+    entry.promise = dispatch(entry).finally(() => { if (inflight.get(id) === entry) inflight.delete(id); notify() })
     inflight.set(id, entry)
     notify()
     return entry.promise
   }
   return {
     enqueue(item) {
-      if (entries.has(item.id)) take(item.id)
+      if (entries.has(item.id) || inflight.has(item.id)) return false
       const entry = { item, timer: null }
       entry.timer = setTimer(() => { sendNow(item.id).catch(() => {}) }, delayMs)
       entries.set(item.id, entry)
       notify()
+      return true
     },
+    // Returns the removed item; null if unknown; `{ ...item, sending: true }` if already in flight (too late to undo; the write is happening).
     undo(id) {
+      if (id !== undefined && !entries.has(id) && inflight.has(id)) return { ...inflight.get(id).item, sending: true }
       const target = id ?? [...entries.keys()].at(-1)
       const entry = target === undefined ? null : take(target)
       if (!entry) return null
