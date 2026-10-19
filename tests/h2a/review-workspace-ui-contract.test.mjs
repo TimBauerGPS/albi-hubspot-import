@@ -5,6 +5,11 @@ import vm from 'node:vm'
 import { build } from 'esbuild'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
+import * as workspaceHelpers from '../../src/features/hubspotToAlbi/reviewWorkspace.js'
+import * as sampleReview from '../../src/features/hubspotToAlbi/sampleReview.js'
+import { buildResolutionConfirmation } from '../../src/features/hubspotToAlbi/sampleReviewResolution.js'
+import { blockedReasonCopy } from '../../shared/h2aBlockedReasons.js'
+import { mountComponent, stub, textOf } from './workspace-harness.mjs'
 
 const require = createRequire(import.meta.url)
 let currentMock = null
@@ -282,4 +287,249 @@ test('org-first create is enabled once a source from orgFirstCreate is chosen', 
   const blank = await html(item)
   assert.match(blank, /Real Estate/); assert.match(blank, /<button[^>]*disabled=""[^>]*>Create organization and contact/)
   assert.doesNotMatch(await html(item, { referralSourceId: '5' }), /<button[^>]*disabled=""[^>]*>Create organization and contact/)
+})
+
+// ---- Task 14: workspace, queue, Albi to-do, bulk and pages ----
+
+const CLIENTS = ['getH2AReviews', 'getH2ADryRunReview', 'recheckH2ADryRunReview', 'resolveH2ADryRunReview', 'bulkLinkH2AReviews',
+  'createH2AOrganizationThenContact', 'skipH2ALiveReview', 'startH2ARecheckAll', 'getH2ARecheckAll', 'prepareH2AOrganizationReview',
+  'prepareH2AMergedSurvivorReview', 'getH2AConflicts', 'getH2AOverview', 'prepareH2ALiveReviews']
+function clients(overrides, calls, defaults) {
+  return Object.fromEntries(CLIENTS.map(name => [name, (...args) => {
+    calls.push({ name, args })
+    return overrides[name] ? overrides[name](...args) : Promise.resolve(defaults(name, ...args))
+  }]))
+}
+const listRow = (id, name, extra = {}) => ({ id, objectType: 'contacts', sourceId: '123', reason: 'duplicate_candidates', status: 'needs_review',
+  displayName: name, identity: { email: `${id}@x.com`, organizationName: 'Lakeside' }, updatedAt: '2026-10-12T12:00:00.000Z',
+  triageBucket: 'quick', triageDetails: { quickKind: 'link' }, ...extra })
+const detailOf = (id, extra = {}) => ({ ...base, id, updatedAt: `2026-10-12T12:00:0${id.length % 10}.000Z`,
+  sourceSnapshot: { ...base.sourceSnapshot, fullName: `Name ${id}` }, triageBucket: 'quick', triageDetails: { quickKind: 'link' }, ...extra })
+
+async function mountWorkspace({ rows, ...overrides } = {}, props = {}) {
+  const calls = []
+  const bound = clients(overrides, calls, (name, _s, _c, arg) => name === 'getH2AReviews'
+    ? { items: rows ?? [listRow('review-1', 'Jane Doe'), listRow('review-2', 'Marcus Lee')], nextCursor: null,
+      bucketCounts: { quick: 2, todo: 0, decision: 1, blocked: 0, done: 0 } }
+    : name === 'getH2ADryRunReview' ? { item: detailOf(arg) } : name === 'getH2ARecheckAll' ? { batch: null } : {})
+  const ui = await mountComponent('ReviewWorkspace.jsx', {
+    bindings: { ...bound, ...workspaceHelpers, ...sampleReview, buildResolutionConfirmation, blockedReasonCopy,
+      ReviewRecord: stub('ReviewRecord'), ReviewQueue: stub('ReviewQueue'), AlbiTodo: stub('AlbiTodo'), ShortcutHelp: stub('ShortcutHelp') },
+    props: { kind: 'sample', session: { access_token: 'token' }, companyId: 'company-1', tenantRevision: 0, completeTenantTransition() {}, isAdmin: true, ...props } })
+  return { ...ui, calls, record: () => ui.find('ReviewRecord'), queue: () => ui.find('ReviewQueue') }
+}
+const candidate = { id: '456', name: 'Jane Doe', strength: 'Strong', matchReasons: ['same_email'], warnings: [], linkedElsewhere: 0 }
+
+test('quick wins tab shows bulk link and no bulk create', async () => {
+  const items = [listRow('a', 'Jane Doe'), listRow('b', 'Marcus Lee'), listRow('c', 'New Person', { triageDetails: { quickKind: 'create' } })]
+  const props = { items, bucket: 'quick', selectedId: 'a', pendingIds: new Set(), errors: {}, checked: new Set(['a']), bulkLinkCount: 2,
+    onSelect() {}, onToggle() {}, onSelectAll() {}, onBulkLink() {}, onRecheckSelected() {} }
+  const out = await rendered('ReviewQueue.jsx', props)
+  assert.match(out, /Link all exact matches \(2\)/)
+  assert.match(out, /Select all in bucket/)
+  assert.match(out, /Recheck selected \(1\)/)
+  assert.equal((out.match(/type="checkbox"/g) ?? []).length, 3)
+  assert.match(out, /Jane Doe/); assert.match(out, /Lakeside/)
+  assert.doesNotMatch(out, /Create all|Bulk create|Create \d|Create selected/i)
+  const decision = await rendered('ReviewQueue.jsx', { ...props, bucket: 'decision' })
+  assert.doesNotMatch(decision, /Link all exact matches|Select all in bucket|type="checkbox"/)
+  // The workspace counts only quick link rows that are not pending, and never offers a bulk create.
+  const ui = await mountWorkspace({ rows: items })
+  assert.equal(ui.queue().props.bulkLinkCount, 2)
+  assert.equal(ui.queue().props.bucket, 'quick')
+  assert.doesNotMatch(ui.text(), /Create all|Bulk create/i)
+  assert.match(ui.text(), /Quick wins/); assert.match(ui.text(), /Needs decision/); assert.match(ui.text(), /Albi to-do/)
+  const list = ui.calls.find(call => call.name === 'getH2AReviews')
+  assert.equal(list.args[2].kind, 'sample'); assert.equal(list.args[2].bucket, 'quick'); assert.equal(list.args[2].limit, 100)
+  ui.unmount()
+})
+
+test('bulk dialog lists names and the skip-never-force sentence', async () => {
+  const rows = Array.from({ length: 8 }, (_, i) => listRow(`r${i + 1}`, `Person ${i + 1}`))
+  const ui = await mountWorkspace({ rows, bulkLinkH2AReviews: (_s, _c, items) => Promise.resolve({ results: items.map((item, i) =>
+    ({ reviewId: item.reviewId, ...(i === 6 ? { status: 'skipped', reason: 'linked_elsewhere' } : i === 7 ? { status: 'failed', reason: 'error' } : { status: 'done' }) })) }) })
+  assert.equal(ui.queue().props.bulkLinkCount, 8)
+  ui.queue().props.onBulkLink(); await ui.flush()
+  const dialog = ui.find('div', 'Each record is rechecked')
+  assert.ok(dialog, 'bulk confirmation dialog opens')
+  const text = textOf(ui.nodes().find(node => node.props?.role === 'dialog'))
+  for (let i = 1; i <= 6; i++) assert.match(text, new RegExp(`Person ${i}`))
+  assert.doesNotMatch(text, /Person 7|Person 8/)
+  assert.match(text, /…and 2 more/)
+  assert.match(text, /Each record is rechecked on the server first\. Any that changed are skipped, never forced\./)
+  assert.equal(ui.calls.filter(call => call.name === 'bulkLinkH2AReviews').length, 0)
+  ui.find('button', 'Link 8').props.onClick(); await ui.flush(); await ui.flush()
+  const sent = ui.calls.filter(call => call.name === 'bulkLinkH2AReviews')
+  assert.equal(sent.length, 1)
+  assert.equal(sent[0].args[2].length, 8)
+  for (const item of sent[0].args[2]) {
+    assert.deepEqual(Object.keys(item).sort(), ['candidateId', 'clientRequestId', 'expectedUpdatedAt', 'reviewId'])
+    assert.equal(item.candidateId, '456')
+  }
+  assert.match(ui.text(), /6 linked/); assert.match(ui.text(), /1 skipped/); assert.match(ui.text(), /Person 7: linked elsewhere/); assert.match(ui.text(), /1 failed/)
+  ui.unmount()
+})
+
+test('bulk link sends chunks of 25 and recheck selected queues one batch for those ids', async () => {
+  const rows = Array.from({ length: 30 }, (_, i) => listRow(`r${i + 1}`, `Person ${i + 1}`))
+  const ui = await mountWorkspace({ rows, bulkLinkH2AReviews: (_s, _c, items) => Promise.resolve({ results: items.map(item => ({ reviewId: item.reviewId, status: 'done' })) }) })
+  ui.queue().props.onBulkLink(); await ui.flush()
+  ui.find('button', 'Link 30').props.onClick()
+  for (let n = 0; n < 6; n++) await ui.flush()
+  assert.deepEqual(ui.calls.filter(call => call.name === 'bulkLinkH2AReviews').map(call => call.args[2].length), [25, 5])
+  assert.match(ui.text(), /30 linked/)
+  ui.unmount()
+  const again = await mountWorkspace({ rows: rows.slice(0, 3) })
+  again.queue().props.onToggle('r1'); again.queue().props.onToggle('r3'); await again.flush()
+  assert.equal(again.queue().props.bulkLinkCount, 2)
+  again.queue().props.onRecheckSelected(); await again.flush()
+  assert.equal(again.calls.filter(call => call.name === 'startH2ARecheckAll').length, 0)
+  again.find('button', 'Recheck 2').props.onClick(); await again.flush()
+  const start = again.calls.filter(call => call.name === 'startH2ARecheckAll')
+  assert.equal(start.length, 1); assert.deepEqual(j(start[0].args[2]), { kind: 'sample', reviewIds: ['r1', 'r3'] })
+  again.unmount()
+})
+
+test('409 on deferred send returns the record with the changed message', async () => {
+  const ui = await mountWorkspace({ resolveH2ADryRunReview: () => Promise.reject(Object.assign(new Error('Changed'), { status: 409 })) })
+  assert.equal(ui.record().props.item.id, 'review-1')
+  ui.record().props.onAccept(candidate, { emailMatch: true }); await ui.flush()
+  assert.equal(ui.calls.filter(call => call.name === 'resolveH2ADryRunReview').length, 0, 'nothing is sent inside the undo window')
+  assert.match(ui.text(), /Linking Name review-1 → Albi Jane Doe/); assert.match(ui.text(), /Undo/); assert.match(ui.text(), /Send now/)
+  assert.equal(ui.record().props.item.id, 'review-2', 'auto-advances to the next record')
+  assert.ok(ui.queue().props.pendingIds.has('review-1'))
+  // A second accept of the same pending record is refused by the queue: no second toast and no advance.
+  ui.queue().props.onSelect('review-1'); await ui.flush()
+  ui.record().props.onAccept(candidate, { emailMatch: true }); await ui.flush()
+  assert.equal((ui.text().match(/Linking Name review-1/g) ?? []).length, 1)
+  assert.equal(ui.record().props.item.id, 'review-1')
+  assert.equal(ui.record().props.pending, true)
+  await ui.tick(); await ui.flush()
+  const sent = ui.calls.filter(call => call.name === 'resolveH2ADryRunReview')
+  assert.equal(sent.length, 1)
+  assert.deepEqual({ ...sent[0].args[2] }, { reviewId: 'review-1', expectedUpdatedAt: detailOf('review-1').updatedAt,
+    clientRequestId: sent[0].args[2].clientRequestId, action: 'link_existing', candidateId: '456', approveManyToOne: false, ignoreContactDifferences: true })
+  assert.equal(ui.queue().props.errors['review-1'], 'This record changed; review it again.')
+  assert.ok(ui.queue().props.items.some(item => item.id === 'review-1'), 'the record stays in its bucket')
+  assert.equal(ui.queue().props.pendingIds.has('review-1'), false)
+  ui.queue().props.onSelect('review-1'); await ui.flush()
+  assert.match(ui.text(), /This record changed; review it again\./)
+  ui.unmount()
+})
+
+test('undo cancels a deferred action before anything is written; unmount flushes the rest', async () => {
+  const ui = await mountWorkspace()
+  ui.record().props.onAccept(candidate, { emailMatch: false }); await ui.flush()
+  ui.find('button', 'Undo').props.onClick(); await ui.flush()
+  assert.match(ui.text(), /Nothing was written/)
+  assert.equal(ui.record().props.item.id, 'review-1')
+  await ui.tick()
+  assert.equal(ui.calls.filter(call => call.name === 'resolveH2ADryRunReview').length, 0)
+  ui.record().props.onCreate({ referralSourceId: '9' }); await ui.flush()
+  assert.ok(ui.listeners.beforeunload?.size, 'beforeunload guard while pending')
+  ui.unmount(); await ui.flush()
+  const sent = ui.calls.filter(call => call.name === 'resolveH2ADryRunReview')
+  assert.equal(sent.length, 1); assert.equal(sent[0].args[2].action, 'create_albi'); assert.equal(sent[0].args[2].referralSourceId, '9')
+})
+
+test('risky actions open a dialog and send immediately on confirm', async () => {
+  const ui = await mountWorkspace()
+  ui.record().props.onForceCreate({ referralSourceId: '9', ignoredCandidateIds: ['456'] }); await ui.flush()
+  assert.ok(ui.nodes().find(node => node.props?.role === 'dialog'))
+  assert.match(ui.text(), /may create a duplicate/)
+  ui.find('button', 'Create separate record').props.onClick(); await ui.flush()
+  const sent = ui.calls.filter(call => call.name === 'resolveH2ADryRunReview')
+  assert.equal(sent.length, 1); assert.equal(sent[0].args[2].action, 'force_create_albi')
+  assert.doesNotMatch(ui.text(), /Send now/)
+  // The many-to-one dialog inside the record already confirmed; the link is sent at once with approval.
+  ui.record().props.onLink(candidate, { approveManyToOne: true }); await ui.flush()
+  const link = ui.calls.filter(call => call.name === 'resolveH2ADryRunReview').at(-1).args[2]
+  assert.equal(link.action, 'link_existing'); assert.equal(link.approveManyToOne, true)
+  ui.unmount()
+})
+
+test('org-first contact error is shown on the record beside a created organization, never as success', async () => {
+  const ui = await mountWorkspace({ getH2ADryRunReview: (_s, _c, id) => Promise.resolve({ item: detailOf(id, id === 'review-1'
+    ? { orgFirstCreate: { eligible: true, organizationReviewId: 'org-review', organizationName: 'Acme' } } : {}) }),
+  createH2AOrganizationThenContact: () => Promise.resolve({ organization: { resolution: { status: 'completed' } }, contact: { error: 'Albi rejected the contact.', status: 409 } }) })
+  ui.record().props.onCreateWithOrganization({ referralSourceId: '9' }); await ui.flush()
+  assert.match(ui.text(), /Creating organization Acme, then Name review-1/)
+  await ui.tick(); await ui.flush(); await ui.flush()
+  const sent = ui.calls.find(call => call.name === 'createH2AOrganizationThenContact').args[2]
+  assert.equal(sent.referralSourceId, '9'); assert.equal(sent.organizationReviewId, 'org-review'); assert.ok(sent.organizationExpectedUpdatedAt)
+  assert.match(ui.queue().props.errors['review-1'], /organization was created/i)
+  assert.match(ui.queue().props.errors['review-1'], /Albi rejected the contact\./)
+  ui.unmount()
+})
+
+test('albi to-do groups tasks with copy buttons and a recheck-done count', async () => {
+  const calls = []
+  const task = (targetId, fields, objectType = 'contacts') => ({ provider: 'albi', objectType, targetId, fields })
+  const waiting = (id, tasks) => ({ ...base, id, reviewKind: id === 'b' || id === 'c' ? 'live' : 'sample', resolution: { id: `aaaaaaaa-0000-4000-8000-00000000000${{ a: 1, b: 2, c: 3 }[id]}`, status: 'waiting_on_albi', action: 'resolve_fields', objectType: 'contacts',
+    events: [{ id: `bbbbbbbb-0000-4000-8000-00000000000${{ a: 1, b: 2, c: 3 }[id]}`, eventType: 'waiting_on_albi', details: { manualTasks: tasks } }] } })
+  const details = {
+    a: waiting('a', [task('456', [{ field: 'phoneNumber', value: '612-555-0101' }])]),
+    b: waiting('b', [task('456', [{ field: 'city', value: 'Minneapolis' }])]),
+    c: waiting('c', [task('777', [{ field: 'name', value: 'Acme Inc' }, { field: 'domain', value: 'acme.com' }], 'companies')]),
+  }
+  const bound = clients({}, calls, (name, _s, _c, arg) => name === 'getH2AReviews'
+    ? { items: arg.kind === 'live' ? [listRow('b', 'Bea'), listRow('c', 'Acme')] : [listRow('a', 'Ann')], nextCursor: null }
+    : name === 'getH2ADryRunReview' ? { item: details[arg] } : name === 'getH2ARecheckAll' ? { batch: { id: 'x', status: 'completed' } } : { batch: { id: 'x', status: 'queued' } })
+  const ui = await mountComponent('AlbiTodo.jsx', { bindings: { ...bound, ...sampleReview },
+    props: { session: { access_token: 'token' }, companyId: 'company-1', tenantKey: 'company-1:0' },
+    storage: { 'h2a.albiTodo.company-1': JSON.stringify(['gone-resolution:abc']) } })
+  await ui.flush()
+  const lists = calls.filter(call => call.name === 'getH2AReviews').map(call => [call.args[2].kind, call.args[2].bucket])
+  assert.deepEqual(lists.sort(), [['live', 'todo'], ['sample', 'todo']])
+  const albiLinks = ui.all('a').filter(node => textOf(node).includes('Open in Albi'))
+  assert.equal(albiLinks.length, 2, 'one group per Albi record')
+  assert.match(albiLinks.map(node => node.props.href).join(' '), /Contact\/456/)
+  assert.equal(ui.all('button').filter(node => textOf(node) === 'Copy').length, 4)
+  assert.match(ui.text(), /612-555-0101/); assert.match(ui.text(), /Minneapolis/); assert.match(ui.text(), /acme\.com/)
+  assert.doesNotMatch(ui.storage.get('h2a.albiTodo.company-1') ?? '[]', /gone-resolution/, 'stale ticks are dropped')
+  const recheck = () => ui.all('button').find(node => textOf(node).startsWith('Recheck done'))
+  assert.match(textOf(recheck()), /Recheck done \(0\)/); assert.equal(recheck().props.disabled, true)
+  const boxes = () => ui.all('input').filter(node => node.props.type === 'checkbox')
+  assert.equal(boxes().length, 3)
+  ui.all('button').filter(node => textOf(node) === 'Copy')[0].props.onClick()
+  assert.equal(ui.clipboard.length, 1)
+  boxes()[0].props.onChange({ target: { checked: true } }); await ui.flush()
+  boxes()[2].props.onChange({ target: { checked: true } }); await ui.flush()
+  assert.match(textOf(recheck()), /Recheck done \(2\)/)
+  assert.match(ui.storage.get('h2a.albiTodo.company-1'), /aaaaaaaa-0000-4000-8000-000000000001:/)
+  recheck().props.onClick(); await ui.flush()
+  const started = calls.filter(call => call.name === 'startH2ARecheckAll').map(call => ({ ...call.args[2], reviewIds: [...call.args[2].reviewIds] }))
+  assert.equal(started.length, 2, 'one batch per kind')
+  assert.deepEqual(started.sort((x, y) => x.kind.localeCompare(y.kind)), [{ kind: 'live', reviewIds: ['c'] }, { kind: 'sample', reviewIds: ['a'] }])
+  await ui.tick(); await ui.flush()
+  assert.ok(calls.filter(call => call.name === 'getH2AReviews').length >= 4, 'reloads after the batches finish')
+  ui.unmount()
+})
+
+test('conflicts page renders the same workspace with kind live', async () => {
+  const calls = []
+  let prepared = 0
+  const bound = clients({ prepareH2ALiveReviews: () => Promise.resolve(++prepared < 3 ? { captured: 2, linked: 0, nextCursor: `c${prepared}` } : { captured: 1, linked: 1, nextCursor: null }) },
+    calls, name => name === 'getH2AConflicts'
+      ? { items: [{ id: 'k1', object_type: 'activities', conflict_type: 'activity_delivery', reason: 'held_activity', status: 'open', source_snapshot: { name: 'Call log' }, created_at: '2026-10-12T12:00:00.000Z' },
+        { id: 'k2', object_type: 'contacts', conflict_type: 'contact_match', reason: 'duplicate_candidates', status: 'open', source_snapshot: { name: 'Hidden Contact' }, created_at: '2026-10-12T12:00:00.000Z' }], nextCursor: null }
+      : name === 'getH2AOverview' ? { summary: { unresolvedConflictCount: 4 } } : {})
+  const ui = await mountComponent('ConflictsPage.jsx', { bindings: { ...bound, conflictEvidenceSummary: () => 'Evidence', ReviewWorkspace: stub('ReviewWorkspace') },
+    context: { session: { access_token: 'token' }, companyId: 'company-1', companyName: 'Allied', isAdmin: true, tenantRevision: 0, completeTenantTransition() {} } })
+  const workspace = ui.find('ReviewWorkspace')
+  assert.equal(workspace.props.kind, 'live'); assert.equal(workspace.props.companyId, 'company-1')
+  assert.match(ui.text(), /4 unresolved/)
+  assert.match(ui.text(), /Call log/); assert.doesNotMatch(ui.text(), /Hidden Contact/)
+  assert.doesNotMatch(ui.json(), /ConflictDetail/)
+  const reloadBefore = workspace.props.reloadToken
+  ui.find('button', 'Prepare open conflicts for review').props.onClick()
+  for (let n = 0; n < 4; n++) await ui.flush()
+  assert.deepEqual(calls.filter(call => call.name === 'prepareH2ALiveReviews').map(call => call.args[2].cursor), [undefined, 'c1', 'c2'])
+  assert.notEqual(ui.find('ReviewWorkspace').props.reloadToken, reloadBefore)
+  assert.match(ui.text(), /5 captured/)
+  ui.unmount()
+  const member = await mountComponent('ConflictsPage.jsx', { bindings: { ...bound, conflictEvidenceSummary: () => '', ReviewWorkspace: stub('ReviewWorkspace') },
+    context: { session: { access_token: 'token' }, companyId: 'company-1', isAdmin: false, tenantRevision: 0, completeTenantTransition() {} } })
+  assert.equal(member.find('button', 'Prepare open conflicts for review'), undefined)
+  member.unmount()
 })

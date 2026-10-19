@@ -368,21 +368,18 @@ test('older refresh cannot overwrite current sample metadata from newer paginati
   ui.unmount()
 })
 
-test('conflict queue exposes count, focused refresh, pagination, and member read-only mode', async () => {
+test('conflict page runs the live review workspace, the prepare backfill and a read-only activity list', async () => {
   const page = await source('ConflictsPage.jsx')
+  assert.match(page, /<ReviewWorkspace[\s\S]*kind="live"/)
+  assert.match(page, /prepareH2ALiveReviews/)
+  assert.match(page, /Prepare open conflicts for review/)
+  assert.match(page, /nextCursor/)
   assert.match(page, /getH2AConflicts/)
-  assert.match(page, /getH2AConflict/)
   assert.match(page, /getH2AOverview/)
   assert.match(page, /unresolvedConflictCount/)
   assert.match(page, /Load more/)
   assert.match(page, /read-only/i)
-  assert.match(page, /replaceConflict/)
-  assert.match(page, /cause\?\.status === 409/)
-  assert.match(page, /many-to-one/i)
-  assert.match(page, /noticeKind/)
-  assert.match(page, /staleRefreshRequired/)
-  assert.match(page, /Refresh selected item/)
-  assert.match(page, /could not be refreshed/i)
+  assert.doesNotMatch(page, /ConflictDetail|resolveH2AConflict/)
   assert.doesNotMatch(page, /dangerouslySetInnerHTML/)
 })
 

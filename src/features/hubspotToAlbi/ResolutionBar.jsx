@@ -17,9 +17,9 @@ export default function ResolutionBar({
       <button type="button" className={btn} disabled={disabled} onClick={onAllAlbi}>All Albi</button>
       <button type="button" className={primary} disabled={disabled || applyDisabled} onClick={onApplyFields}>Apply field choices</button>
     </>}
-    {suggestion && <button type="button" className={primary} disabled={disabled} onClick={onAccept}>
+    {suggestion && <button type="button" data-shortcut="accept" className={primary} disabled={disabled} onClick={onAccept}>
       Accept suggestion{suggestion.emailMatch ? ' (emails match)' : ''}<Kbd>Enter</Kbd></button>}
-    {selectedLink && <button type="button" className={suggestion ? btn : primary} disabled={disabled} onClick={onLinkSelected}>
+    {selectedLink && <button type="button" data-shortcut="link" className={suggestion ? btn : primary} disabled={disabled} onClick={onLinkSelected}>
       Link selected{selectedLink.name ? `: ${selectedLink.name}` : ''}<Kbd>l</Kbd></button>}
     {create && <span className="flex flex-wrap items-center gap-2">
       <select ref={referralRef} value={referralSourceId} disabled={disabled} aria-label="Referral source"
@@ -28,10 +28,10 @@ export default function ResolutionBar({
         <option value="">Referral source…</option>
         {referralSources.map(source => <option key={source.id} value={source.id}>{source.label}</option>)}
       </select>
-      <button type="button" className={hasOther || fieldMode ? btn : primary} disabled={disabled || !referralSourceId} onClick={onCreate}>
+      <button type="button" data-shortcut="create" className={hasOther || fieldMode ? btn : primary} disabled={disabled || !referralSourceId} onClick={onCreate}>
         {create.label}<Kbd>n</Kbd></button>
     </span>}
-    {showSkip && <button type="button" className={btn} disabled={disabled} onClick={onSkip}>Skip<Kbd>s</Kbd></button>}
+    {showSkip && <button type="button" data-shortcut="skip" className={btn} disabled={disabled} onClick={onSkip}>Skip<Kbd>s</Kbd></button>}
     {showRecheck && <button type="button" className={`${btn} ml-auto`} onClick={onRecheck}>Recheck<Kbd>r</Kbd></button>}
   </footer>
 }
