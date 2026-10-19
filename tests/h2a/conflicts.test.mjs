@@ -208,7 +208,8 @@ test('resume intent carries only the resolved tenant and exact blocked source/ac
   assert.deepEqual(calls.dispatched[0], { id: 'resume-1', company_id: 'company-1', status: 'pending' })
 })
 
-const resolveBody = extra => ({ httpMethod: 'POST', body: JSON.stringify({ conflictId: 'conflict-1', expectedUpdatedAt: updatedAt,
+const linkedConflictId = '00000000-0000-4000-8000-0000000000c9'
+const resolveBody = extra => ({ httpMethod: 'POST', body: JSON.stringify({ conflictId: linkedConflictId, expectedUpdatedAt: updatedAt,
   action: 'link_existing', targetId: 'albi-8', ...extra }) })
 
 test('legacy conflict resolve is refused for conflicts with a live review', async () => {
@@ -224,7 +225,7 @@ test('legacy conflict resolve is refused for conflicts with a live review', asyn
   const response = await handler(resolveBody())
   assert.equal(response.statusCode, 409)
   assert.deepEqual(JSON.parse(response.body), { error: 'Resolve this in the review workspace.' })
-  assert.deepEqual(lookups, [['company-1', 'conflict-1']])
+  assert.deepEqual(lookups, [['company-1', linkedConflictId]])
 })
 
 test('activity-only conflicts still resolve through the legacy endpoint', async () => {
@@ -279,4 +280,52 @@ test('prepare_live_reviews is admin-only and runs one backfill page with an opaq
     requireRequest: async (_event, auth) => { assert.equal(auth.requireAdmin, true); throw new H2AAuthError(403, 'Administrator access is required.') } })
   assert.equal((await denied({ httpMethod: 'POST', body: JSON.stringify({ op: 'prepare_live_reviews' }) })).statusCode, 403)
   assert.equal(runs.length, 2)
+})
+
+test('a malformed conflict id is a 400 before any live-link lookup', async () => {
+  const lookups = []
+  const handler = createConflictResolveHandler({
+    requireRequest: async () => ({ companyId: 'company-1', userId: 'user-1', supabase: {} }),
+    repository: { findLiveReviewConflictLink: async (...args) => { lookups.push(args); throw Error('uuid parse error') },
+      resolveConflict: async () => { throw Error('must not run') } },
+  })
+  for (const conflictId of [7, '', '   ', 'x'.repeat(201)]) {
+    const response = await handler(resolveBody({ conflictId }))
+    assert.equal(response.statusCode, 400, JSON.stringify(conflictId).slice(0, 20))
+    assert.equal(JSON.parse(response.body).error, 'A conflict ID is required.')
+  }
+  // A non-UUID id cannot be in the uuid link table: no lookup, the legacy path validates it as before.
+  const legacy = await handler(resolveBody({ conflictId: 'conflict-1' }))
+  assert.notEqual(legacy.statusCode, 409)
+  assert.equal(lookups.length, 0)
+})
+
+test('prepare_live_reviews rejects a cursor with a malformed timestamp or id', async () => {
+  const runs = []
+  const handler = createConflictListHandler({ requireRequest: async () => ({ companyId: 'company-1', userId: 'user-1', supabase: {} }),
+    repository: {}, backfillLiveReviews: async (_deps, input) => { runs.push(input); return { captured: 0, linked: 0, nextCursor: null } } })
+  const encode = value => Buffer.from(JSON.stringify(value)).toString('base64url')
+  for (const cursor of [{ createdAt: 'yesterday', id: '00000000-0000-4000-8000-0000000000c1' }, { createdAt: updatedAt, id: 'not-a-uuid' }]) {
+    const response = await handler({ httpMethod: 'POST', body: JSON.stringify({ op: 'prepare_live_reviews', cursor: encode(cursor) }) })
+    assert.equal(response.statusCode, 400)
+    assert.equal(JSON.parse(response.body).error, 'Invalid conflict cursor.')
+  }
+  assert.equal(runs.length, 0)
+})
+
+test('prepare_live_reviews hands the backfill portal-checked read clients for create readiness', async () => {
+  const received = []
+  const hubspot = { getContacts: async () => [], getCompanies: async () => [], getAssociations: async () => [], getOwnerId: async () => null }
+  const albi = { listContacts: async () => ({}), listOrganizations: async () => ({}), listCreateOptions: async () => ({}), listReferralSources: async () => [] }
+  const options = { requireRequest: async () => ({ companyId: 'company-1', userId: 'user-1', supabase: {} }),
+    repository: { getConfig: async () => ({ portal_id: '123' }) }, makeClients: async () => ({ hubspot, albi }),
+    backfillLiveReviews: async deps => { received.push(deps); return { captured: 0, linked: 0, nextCursor: null } } }
+  assert.equal((await createConflictListHandler(options)({ httpMethod: 'POST', body: JSON.stringify({ op: 'prepare_live_reviews' }) })).statusCode, 200)
+  assert.equal(typeof received[0].reads.albiRead.listCreateOptions, 'function')
+  assert.equal(typeof received[0].reads.hubspotRead.getOwnerId, 'function')
+  assert.equal(Object.hasOwn(received[0].reads.hubspotRead, 'updateContact'), false)
+  // Unreadable clients still run the backfill, with readiness unknown.
+  const unread = { ...options, makeClients: async () => { throw Error('no credentials') } }
+  assert.equal((await createConflictListHandler(unread)({ httpMethod: 'POST', body: JSON.stringify({ op: 'prepare_live_reviews' }) })).statusCode, 200)
+  assert.equal(received[1].reads, undefined)
 })

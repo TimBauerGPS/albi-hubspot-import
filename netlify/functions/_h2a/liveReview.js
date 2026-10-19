@@ -3,6 +3,7 @@ import { safeReviewCandidates, safeReviewChanges, safeReviewEvidence, safeReview
 import { carriedMerge, carriedReadiness, computeTriage } from './triage.js'
 import { dispatchConflictResumes } from './conflicts.js'
 import { REVIEW_CONFLICT_TYPES, REVIEW_REASONS } from './review.js'
+import { computeCaptureReadiness } from './createDefaults.js'
 
 const identity = value => typeof value === 'string' && value.trim() !== ''
 
@@ -57,9 +58,11 @@ function backfillCursor(cursor) {
 // - A conflict already linked to a review is left alone.
 // - A source that already has an open live row only gets the conflict linked: the row's evidence,
 //   refreshed by a live run, is never replaced by the conflict's older stored snapshot.
-// - Otherwise the row is captured from the conflict's stored snapshots with triage computed like
-//   capture. Create readiness is not read here (no provider calls), so it is undefined and a new
-//   record lands in Decision until its detail is opened or it is rechecked.
+// - Otherwise the row is captured from the conflict's stored snapshots with triage computed like capture.
+// - A new record (new_record_needs_review, zero candidates) gets create readiness from the same helper
+//   live capture uses, when deps.reads ({ albiRead, hubspotRead }) is given: Albi create options are read
+//   once per call, a contact's single HubSpot organization feeds the org gate. Without reads, or when a
+//   read fails, readiness stays undefined and the row lands in Decision until opened or rechecked.
 // Conflicts with a classification the review catalog does not know, or without a run, are skipped.
 export async function backfillLiveReviews(deps, { companyId, limit = 50, cursor } = {}) {
   const repository = deps?.repository
@@ -73,6 +76,23 @@ export async function backfillLiveReviews(deps, { companyId, limit = 50, cursor 
   if (!page || !Array.isArray(page.items)) throw new Error('Invalid conflict page')
   const counts = { captured: 0, linked: 0, skipped: 0, failed: 0 }
   let mappings = null
+  const readinessCache = { owners: new Map() }
+  const readinessFor = async (conflict, candidates, organizationMappings) => {
+    const reads = deps.reads
+    if (conflict.reason !== 'new_record_needs_review' || candidates.length || !reads?.albiRead || !reads?.hubspotRead) return undefined
+    try {
+      let organization = null
+      if (conflict.object_type === 'contacts') {
+        const rows = await reads.hubspotRead.getAssociations({ objectType: 'contacts', objectIds: [conflict.source_id], toObjectTypes: ['companies'] })
+        const row = Array.isArray(rows) && rows.length === 1 && rows[0]?.fromId === conflict.source_id ? rows[0] : null
+        const ids = Array.isArray(row?.toIds) ? [...new Set(row.toIds.map(String))] : null
+        if (!ids || ids.length > 1) return undefined
+        organization = ids.length ? { id: ids[0] } : null
+      }
+      return await computeCaptureReadiness({ albi: reads.albiRead, hubspot: reads.hubspotRead }, readinessCache, {
+        objectType: conflict.object_type, sourceId: conflict.source_id, organization, portalId: conflict.portal_id, organizationMappings })
+    } catch { return undefined }
+  }
   for (const conflict of page.items) {
     if (!['contacts', 'companies'].includes(conflict?.object_type) || conflict.status !== 'open' || !identity(conflict.id)) { counts.skipped++; continue }
     if (!REVIEW_REASONS.has(conflict.reason) || !REVIEW_CONFLICT_TYPES.has(conflict.conflict_type) ||
@@ -87,11 +107,12 @@ export async function backfillLiveReviews(deps, { companyId, limit = 50, cursor 
       if (mappings === null) mappings = typeof repository.getMappings === 'function' ? await repository.getMappings(companyId) : {}
       const stored = conflict.source_snapshot && typeof conflict.source_snapshot === 'object' &&
         Object.keys(conflict.source_snapshot).some(key => key !== 'id') ? conflict.source_snapshot : null
+      const candidates = Array.isArray(conflict.candidate_snapshots) ? conflict.candidate_snapshots : []
+      const createReadiness = await readinessFor(conflict, candidates, mappings?.organizations ?? [])
       const result = await captureLiveReview(deps, { companyId, runId: conflict.run_id, portalId: conflict.portal_id,
         objectType: conflict.object_type, sourceId: conflict.source_id, reason: conflict.reason, conflictType: conflict.conflict_type,
-        source: stored, candidates: Array.isArray(conflict.candidate_snapshots) ? conflict.candidate_snapshots : [],
-        evidence: conflict.match_evidence, proposedChanges: conflict.proposed_changes, conflictId: conflict.id,
-        mappings: mappings?.[conflict.object_type === 'companies' ? 'organizations' : 'contacts'] ?? [], createReadiness: undefined })
+        source: stored, candidates, evidence: conflict.match_evidence, proposedChanges: conflict.proposed_changes, conflictId: conflict.id,
+        mappings: mappings?.[conflict.object_type === 'companies' ? 'organizations' : 'contacts'] ?? [], createReadiness })
       if (result.inserted) counts.captured++
       if (result.linked) counts.linked++
     } catch { counts.failed++ }
@@ -100,11 +121,13 @@ export async function backfillLiveReviews(deps, { companyId, limit = 50, cursor 
   return { ...counts, nextCursor: page.hasMore && last ? { createdAt: last.created_at, id: last.id } : null }
 }
 
-// Close capability for callers that otherwise hold only reads (recheck): the close RPC and resume delivery.
+// Close capability for callers that otherwise hold only reads (recheck): the close RPC, resume delivery,
+// and the reads that find merged-away rows to close with their survivor.
 export function createLiveCloseCapabilities(repository) {
   const bind = name => typeof repository?.[name] === 'function' ? repository[name].bind(repository) : undefined
   return Object.freeze({ closeLiveReview: bind('closeLiveReview'), getConflictResume: bind('getConflictResume'),
-    claimConflictResume: bind('claimConflictResume'), finishConflictResume: bind('finishConflictResume') })
+    claimConflictResume: bind('claimConflictResume'), finishConflictResume: bind('finishConflictResume'),
+    getReview: bind('getReview'), listMergedAwayLiveReviews: bind('listMergedAwayLiveReviews') })
 }
 
 // Which close a completed reviewer resolution on a live row stands for.
@@ -115,13 +138,8 @@ export const LIVE_CLOSE_FOR_ACTION = Object.freeze({
   skip_live: Object.freeze({ outcome: 'skipped', resolutionAction: 'skip' }),
 })
 
-// Closes a live row and all its linked conflicts in one RPC transaction, then delivers each resume
-// it returned. Replays are safe: the RPC returns replayed with no new rows, and delivered resumes are
-// not sent again. A delivery failure never undoes the close; those resumes stay pending for retry.
-export async function closeLiveReview(deps, { companyId, reviewId, actorId, outcome, resolutionAction = null } = {}) {
-  const repository = deps?.repository
-  if (typeof repository?.closeLiveReview !== 'function') throw new TypeError('A live review close capability is required')
-  const result = await repository.closeLiveReview(companyId, { reviewId, actorId, outcome, resolutionAction })
+async function closeOne(deps, { companyId, reviewId, actorId, outcome, resolutionAction }) {
+  const result = await deps.repository.closeLiveReview(companyId, { reviewId, actorId, outcome, resolutionAction })
   if (!result || result.error || !Array.isArray(result.closedConflictIds) || !Array.isArray(result.resumeIds)) {
     throw Object.assign(new Error('Unable to close this live review.'), { closeError: result?.error ?? 'invalid_response' })
   }
@@ -133,4 +151,41 @@ export async function closeLiveReview(deps, { companyId, reviewId, actorId, outc
   }
   return { closedConflictIds: result.closedConflictIds, resumeIds: result.resumeIds, replayed: result.replayed === true,
     dispatched: deliveries.filter(item => item.accepted).length, pending: deliveries.filter(item => item.pending).length }
+}
+
+// Spec §1: resolving a survivor's row closes the rows of HubSpot sources merged into it "the same way":
+// outcome resolved with the survivor's action (a sync clear counts as a link), so their conflicts
+// resolve and resume. One level only. Best effort and idempotent: closed rows are no longer listed, and
+// a failure never undoes the survivor's close (the merged-away row stays open and blocked).
+async function closeMergedAway(deps, { companyId, reviewId, actorId, outcome, resolutionAction }) {
+  const repository = deps.repository
+  const report = { mergedClosed: [], mergedFailed: 0 }
+  if (!['resolved', 'resolved_by_sync'].includes(outcome) || typeof repository.getReview !== 'function' ||
+    typeof repository.listMergedAwayLiveReviews !== 'function') return report
+  let rows
+  try {
+    const survivor = await repository.getReview(companyId, reviewId)
+    if (survivor?.review_kind !== 'live' || !identity(survivor.source_id)) return report
+    rows = await repository.listMergedAwayLiveReviews(companyId, survivor.portal_id, survivor.object_type, survivor.source_id)
+  } catch { report.mergedFailed++; return report }
+  const action = outcome === 'resolved' ? resolutionAction : 'link_existing'
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (!identity(row?.id) || row.id === reviewId || row.review_kind !== 'live' || row.status !== 'needs_review') continue
+    try {
+      const closed = await closeOne(deps, { companyId, reviewId: row.id, actorId, outcome: 'resolved', resolutionAction: action })
+      if (!closed.replayed) report.mergedClosed.push(row.id)
+    } catch { report.mergedFailed++ }
+  }
+  return report
+}
+
+// Closes a live row and all its linked conflicts in one RPC transaction, then delivers each resume
+// it returned. Replays are safe: the RPC returns replayed with no new rows, and delivered resumes are
+// not sent again. A delivery failure never undoes the close; those resumes stay pending for retry.
+// A resolved row then closes the live rows of sources merged into it.
+export async function closeLiveReview(deps, { companyId, reviewId, actorId, outcome, resolutionAction = null } = {}) {
+  const repository = deps?.repository
+  if (typeof repository?.closeLiveReview !== 'function') throw new TypeError('A live review close capability is required')
+  const closed = await closeOne(deps, { companyId, reviewId, actorId, outcome, resolutionAction })
+  return { ...closed, ...await closeMergedAway(deps, { companyId, reviewId, actorId, outcome, resolutionAction }) }
 }

@@ -231,6 +231,7 @@ function safeTriageDetails(details) {
   if (details.merged === true) safe.merged = true
   if (['link', 'create'].includes(details.quickKind)) safe.quickKind = details.quickKind
   if (details.closePending === true) safe.closePending = true
+  if (typeof details.mergedIntoSourceId === 'string' && /^[1-9]\d{0,99}$/.test(details.mergedIntoSourceId)) safe.mergedIntoSourceId = details.mergedIntoSourceId
   return safe
 }
 
@@ -515,6 +516,17 @@ export function createH2ARepository(supabase) {
       if (resolutionAction !== null) requireReviewValue(resolutionAction, LIVE_CLOSE_ACTIONS, 'close action')
       return checked(await supabase.rpc('h2a_close_live_review', { p_company_id: companyId, p_review_id: reviewId,
         p_actor_id: actorId, p_outcome: outcome, p_resolution_action: resolutionAction }))
+    },
+    // Open live rows whose HubSpot source was merged into survivorSourceId (recorded in triage details).
+    async listMergedAwayLiveReviews(companyId, portalId, objectType, survivorSourceId) {
+      for (const value of [companyId, portalId]) requireReviewIdentity(value)
+      requireReviewValue(objectType, REVIEW_OBJECT_TYPES, 'object type')
+      if (typeof survivorSourceId !== 'string' || !/^[1-9]\d{0,99}$/.test(survivorSourceId)) throw new TypeError('Invalid survivor source')
+      const rows = checked(await supabase.from('h2a_dry_run_reviews').select(REVIEW_COLUMNS).eq('company_id', companyId)
+        .eq('portal_id', portalId).eq('object_type', objectType).eq('review_kind', 'live').eq('status', 'needs_review')
+        .eq('triage_details->>mergedIntoSourceId', survivorSourceId).order('created_at', { ascending: true }).limit(100))
+      if (!Array.isArray(rows)) throw new Error('Invalid review page')
+      return rows
     },
     // The live review row a conflict is attached to, if any (unique per conflict).
     async findLiveReviewConflictLink(companyId, conflictId) {

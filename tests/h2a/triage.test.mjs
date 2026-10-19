@@ -19,7 +19,7 @@ test('todo when waiting on Albi', () => {
 test('merged record is blocked even with a strong candidate', () => {
   const result = computeTriage({ row: row(), ranking: one, mergedInto: { sourceId: '99' } })
   assert.equal(result.bucket, 'blocked')
-  assert.deepEqual(result.details, { merged: true })
+  assert.deepEqual(result.details, { merged: true, mergedIntoSourceId: '99' })
 })
 test('blocked with copy-backed reason and no candidates', () => {
   const result = computeTriage({ row: row(), ranking: none, createReadiness: { ready: false, blockedReason: 'referrer_type_missing' } })
@@ -123,4 +123,17 @@ test('the pending-close marker survives storage and projection', async () => {
   const projected = projectReviewRow({ id: '00000000-0000-4000-8000-000000000001', object_type: 'contacts', review_kind: 'live',
     status: 'needs_review', reason: 'name_only_candidate', triage_bucket: 'decision', triage_details: { closePending: true } })
   assert.deepEqual(projected.triageDetails, { closePending: true })
+})
+
+test('a stored survivor id is carried with the merge block and an unknown survivor is not invented', async () => {
+  const { refreshReviewTriage } = await import('../../netlify/functions/_h2a/triage.js')
+  const writes = []
+  const repository = { setReviewTriage: async (_c, _id, next) => { writes.push(next) }, getCurrentReviewResolution: async () => null }
+  const stored = { id: 'r', object_type: 'contacts', status: 'needs_review', reason: 'name_only_candidate', source_snapshot: {}, candidate_snapshots: [],
+    triage_bucket: 'decision', triage_details: {} }
+  await refreshReviewTriage(repository, { companyId: 'c', row: { ...stored, triage_details: { merged: true, mergedIntoSourceId: '77' } }, mergedInto: undefined })
+  await refreshReviewTriage(repository, { companyId: 'c', row: { ...stored, triage_bucket: 'blocked', triage_details: { merged: true } } })
+  assert.deepEqual(writes[0], { bucket: 'blocked', details: { merged: true, mergedIntoSourceId: '77' } })
+  assert.equal(writes.length, 1, 'a legacy merge block without a survivor id is unchanged')
+  assert.deepEqual(computeTriage({ row: row(), ranking: one, mergedInto: { sourceId: 'not-an-id' } }).details, { merged: true })
 })

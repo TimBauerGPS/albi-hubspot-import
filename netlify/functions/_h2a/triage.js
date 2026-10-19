@@ -3,6 +3,7 @@ import { blockedReasonCopy } from '../../../shared/h2aBlockedReasons.js'
 import { rankReviewCandidates } from './ranking.js'
 import { safeReviewCandidates, safeReviewSnapshot } from './review.js'
 
+const SURVIVOR_ID = /^[1-9]\d{0,99}$/
 export const TRIAGE_BUCKETS = Object.freeze(['quick', 'todo', 'decision', 'blocked', 'done'])
 
 // Pure bucket decision. createReadiness undefined means "not known yet"; only the link rule can yield quick then.
@@ -21,7 +22,9 @@ export function computeTriage({ row, ranking, createReadiness, resolutionStatus,
     return { bucket: 'decision', details: { closePending: true } }
   }
   if (row?.status !== 'needs_review' || resolutionStatus === 'completed') return { bucket: 'done', details: {} }
-  if (mergedInto?.sourceId) return { bucket: 'blocked', details: { merged: true } }
+  // The survivor's HubSpot ID is kept so resolving the survivor's own row can close this one.
+  if (mergedInto?.sourceId) return { bucket: 'blocked', details: { merged: true,
+    ...(SURVIVOR_ID.test(String(mergedInto.sourceId)) ? { mergedIntoSourceId: String(mergedInto.sourceId) } : {}) } }
   const blockedReason = createReadiness?.blockedReason
   if (candidates.length === 0 && blockedReasonCopy(blockedReason)) return { bucket: 'blocked', details: { blockedReason } }
   const category = H2A_REVIEW_REASON_CATALOG[row?.reason]?.category
@@ -41,7 +44,8 @@ export function createTriageCapabilities(repository) {
 
 // Merge state is live-only: carry a stored merge block forward unless the caller says (null) it is not merged.
 export function carriedMerge(stored, mergedInto) {
-  return mergedInto === undefined && stored?.triage_details?.merged ? { sourceId: 'stored' } : mergedInto
+  return mergedInto === undefined && stored?.triage_details?.merged
+    ? { sourceId: stored.triage_details.mergedIntoSourceId ?? 'stored' } : mergedInto
 }
 
 // Readiness the caller did not read is carried over from the stored triage rather than guessed.

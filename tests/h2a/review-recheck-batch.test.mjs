@@ -11,7 +11,7 @@ const MUTATIONS = ['createContact', 'createOrganization', 'updateContact', 'upda
 
 // rows: [{ objectType, sourceId, email }]; HubSpot sources are read live per row, Albi lists once per batch.
 function fixture({ rows = [], contacts = [], organizations = [], batch = {}, sampleId = 'current-run', resolutions = {} } = {}) {
-  const calls = [], events = [], applied = [], updates = [], finished = [], closes = []
+  const calls = [], events = [], applied = [], updates = [], finished = [], closes = [], order = []
   const reviews = rows.map((row, index) => ({ id: id(index + 1), run_id: row.kind === 'live' ? 'live-run' : 'current-run', portal_id: '123',
     review_kind: row.kind ?? 'sample',
     object_type: row.objectType ?? 'contacts', source_id: row.sourceId ?? String(10 + index),
@@ -37,7 +37,7 @@ function fixture({ rows = [], contacts = [], organizations = [], batch = {}, sam
     appendDryRunReviewEvent: async (...args) => { events.push([args[2], args[3].eventType, args[3].actorId]); return { id: 'event' } },
     getMappings: async () => ({ contacts: [], organizations: [], options: [] }),
     applyDryRunRecheck: async (company, payload) => {
-      applied.push([company, payload])
+      applied.push([company, payload]); order.push(['apply', payload.reviewId])
       const row = reviews.find(item => item.id === payload.reviewId)
       if (row.updated_at !== payload.expectedUpdatedAt) return { error: 'stale' }
       row.recheck_outcome = payload.outcome
@@ -67,7 +67,7 @@ function fixture({ rows = [], contacts = [], organizations = [], batch = {}, sam
   // Live rows close through the close RPC (one transaction per row) and read their resolution.
   const liveCloseRepository = {
     closeLiveReview: async (company, args) => {
-      closes.push([company, args])
+      closes.push([company, args]); order.push(['close', args.reviewId])
       const row = reviews.find(item => item.id === args.reviewId)
       row.status = args.outcome === 'resolved' ? 'cleared' : 'no_longer_in_scope'
       return { closedConflictIds: [], resumeIds: [], replayed: false }
@@ -76,7 +76,7 @@ function fixture({ rows = [], contacts = [], organizations = [], batch = {}, sam
   const resolutionRepository = { getCurrentReviewResolution: async (_company, reviewId) => resolutions[reviewId] ?? null }
   const deps = { repository, batchRepository, liveCloseRepository, resolutionRepository, now: () => new Date('2026-10-12T12:00:00Z'), sleep: async () => {},
     getReadClients: async () => { calls.push(['clients']); return { hubspotRead, albiRead } } }
-  return { deps, reviews, calls, events, applied, updates, finished, closes, hubspotRead, albiRead }
+  return { deps, reviews, calls, events, applied, updates, finished, closes, order, hubspotRead, albiRead }
 }
 
 const input = { companyId: 'tenant-1', batchId }
@@ -290,6 +290,24 @@ test('a live batch sweeps a completed resolution whose close failed, even outsid
   assert.equal(f.reviews[1].status, 'cleared')
   assert.equal(result.settled, 1)
   assert.equal(result.counts.total, 1)
+  // The sweep runs after the targeted rechecks, so it can never use up their deadline.
+  assert.deepEqual(f.order, [['apply', id(1)], ['close', id(2)]])
+})
+
+test('a targeted live batch that runs out of time skips the sweep', async () => {
+  const f = fixture({ rows: [{ kind: 'live' }, { kind: 'live' }],
+    resolutions: { [id(2)]: { id: id(102), review_id: id(2), action: 'link_existing', status: 'completed', created_by: actorId } } })
+  let now = 0
+  f.deps.clockMs = () => now
+  f.deps.batchDeadlineMs = 1000
+  f.deps.batchRepository.claimReviewRecheckBatch = async () => ({ id: batchId, run_id: null, review_kind: 'live',
+    review_ids: [id(1)], requested_by: actorId, status: 'running' })
+  const original = f.deps.repository.applyDryRunRecheck
+  f.deps.repository.applyDryRunRecheck = async (...args) => { now += 2000; return original(...args) }
+  const result = await runReviewRecheckBatch(f.deps, input)
+  assert.equal(result.counts.done, 1)
+  assert.equal(f.closes.length, 0)
+  assert.equal(result.settled, 0)
 })
 
 test('a full live batch settles a stranded row instead of re-evaluating it', async () => {

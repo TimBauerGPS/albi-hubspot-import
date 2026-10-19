@@ -375,3 +375,102 @@ test('backfill skips conflicts it cannot classify or that lack a run, and bounds
   assert.equal(f.db.tables.h2a_dry_run_reviews.length, 0)
   await assert.rejects(() => backfillLiveReviews(f.deps, { companyId: 'company-1', cursor: { createdAt: 'x', id: 'y', extra: 1 } }), TypeError)
 })
+
+// Spec §1: "Resolving the survivor's row closes this one the same way."
+function mergeCascadeFixture({ mergedAway = [], failMergedClose = false } = {}) {
+  const rows = new Map([['survivor', { id: 'survivor', review_kind: 'live', status: 'needs_review', portal_id: '123', object_type: 'contacts', source_id: '77' }],
+    ...mergedAway.map(row => [row.id, { review_kind: 'live', status: 'needs_review', portal_id: '123', object_type: 'contacts', ...row }])])
+  const closes = [], lists = [], dispatched = []
+  const repository = {
+    async closeLiveReview(companyId, args) {
+      closes.push([companyId, args])
+      const row = rows.get(args.reviewId)
+      if (args.reviewId !== 'survivor' && failMergedClose) throw Error('storage down')
+      const replayed = row.status !== 'needs_review'
+      row.status = args.outcome === 'resolved' ? 'cleared' : 'no_longer_in_scope'
+      return { closedConflictIds: replayed ? [] : [`${args.reviewId}-conflict`], resumeIds: replayed ? [] : [`${args.reviewId}-resume`], replayed }
+    },
+    async getReview(_companyId, reviewId) { return structuredClone(rows.get(reviewId) ?? null) },
+    async listMergedAwayLiveReviews(companyId, portalId, objectType, survivorSourceId) {
+      lists.push([companyId, portalId, objectType, survivorSourceId])
+      return [...rows.values()].filter(row => row.status === 'needs_review' && row.triage_details?.mergedIntoSourceId === survivorSourceId &&
+        row.portal_id === portalId && row.object_type === objectType).map(row => structuredClone(row))
+    },
+    async getConflictResume(_companyId, resumeId) { return { id: resumeId, status: 'pending' } },
+    async claimConflictResume(_companyId, resumeId) { return { id: resumeId, status: 'pending' } },
+    async finishConflictResume() { return true },
+  }
+  return { rows, closes, lists, dispatched, deps: { repository, dispatchResume: async intent => { dispatched.push(intent.id); return true } } }
+}
+
+test('resolving the survivor closes the merged-away live row and resumes its conflicts', async () => {
+  const f = mergeCascadeFixture({ mergedAway: [{ id: 'merged-a', source_id: '10', triage_details: { merged: true, mergedIntoSourceId: '77' } },
+    { id: 'other', source_id: '11', triage_details: { merged: true, mergedIntoSourceId: '78' } }] })
+  const result = await closeLiveReview(f.deps, { companyId: 'company-1', reviewId: 'survivor', actorId: 'actor-1',
+    outcome: 'resolved', resolutionAction: 'create_new' })
+  assert.deepEqual(f.closes.map(([company, args]) => [company, args.reviewId, args.outcome, args.resolutionAction, args.actorId]),
+    [['company-1', 'survivor', 'resolved', 'create_new', 'actor-1'], ['company-1', 'merged-a', 'resolved', 'create_new', 'actor-1']])
+  assert.deepEqual(f.lists, [['company-1', '123', 'contacts', '77']])
+  assert.deepEqual(f.dispatched, ['survivor-resume', 'merged-a-resume'])
+  assert.deepEqual(result.mergedClosed, ['merged-a'])
+  assert.equal(f.rows.get('merged-a').status, 'cleared')
+  assert.equal(f.rows.get('other').status, 'needs_review')
+  // A sync clear of the survivor closes merged-away rows as a link; replays do nothing new.
+  const sync = mergeCascadeFixture({ mergedAway: [{ id: 'merged-b', source_id: '12', triage_details: { merged: true, mergedIntoSourceId: '77' } }] })
+  await closeLiveReview(sync.deps, { companyId: 'company-1', reviewId: 'survivor', actorId: 'actor-1', outcome: 'resolved_by_sync' })
+  assert.deepEqual(sync.closes.map(([, args]) => [args.reviewId, args.outcome, args.resolutionAction]),
+    [['survivor', 'resolved_by_sync', null], ['merged-b', 'resolved', 'link_existing']])
+  const again = await closeLiveReview(sync.deps, { companyId: 'company-1', reviewId: 'survivor', actorId: 'actor-1', outcome: 'resolved_by_sync' })
+  assert.deepEqual(again.mergedClosed, [])
+  assert.equal(sync.closes.length, 3)
+})
+
+test('no merged-away rows is a no-op', async () => {
+  const f = mergeCascadeFixture()
+  const result = await closeLiveReview(f.deps, { companyId: 'company-1', reviewId: 'survivor', actorId: 'actor-1',
+    outcome: 'resolved', resolutionAction: 'link_existing' })
+  assert.equal(f.closes.length, 1)
+  assert.deepEqual(result.mergedClosed, [])
+  // Skips and deletions never cascade.
+  const skip = mergeCascadeFixture({ mergedAway: [{ id: 'merged-a', source_id: '10', triage_details: { merged: true, mergedIntoSourceId: '77' } }] })
+  await closeLiveReview(skip.deps, { companyId: 'company-1', reviewId: 'survivor', actorId: 'actor-1', outcome: 'skipped', resolutionAction: 'skip' })
+  assert.equal(skip.lists.length, 0)
+  assert.equal(skip.rows.get('merged-a').status, 'needs_review')
+  // A merged-away close that fails never undoes or fails the survivor's close.
+  const failing = mergeCascadeFixture({ failMergedClose: true, mergedAway: [{ id: 'merged-a', source_id: '10', triage_details: { merged: true, mergedIntoSourceId: '77' } }] })
+  const partial = await closeLiveReview(failing.deps, { companyId: 'company-1', reviewId: 'survivor', actorId: 'actor-1', outcome: 'resolved', resolutionAction: 'link_existing' })
+  assert.deepEqual([partial.mergedClosed, partial.mergedFailed], [[], 1])
+  assert.equal(failing.rows.get('survivor').status, 'cleared')
+})
+
+test('backfill computes create readiness for a new record with the shared capture helper, reading Albi options once', async () => {
+  const conflicts = [conflictRow(1, { reason: 'new_record_needs_review', conflict_type: 'identity', candidate_snapshots: [] }),
+    conflictRow(2, { reason: 'new_record_needs_review', conflict_type: 'identity', candidate_snapshots: [], source_id: '11' }),
+    conflictRow(3, { reason: 'new_record_needs_review', conflict_type: 'identity', candidate_snapshots: [], source_id: '12' })]
+  const f = backfillFixture(conflicts)
+  const reads = { albiOptions: 0, referral: 0, owners: 0 }
+  f.deps.reads = {
+    albiRead: {
+      listCreateOptions: async () => { reads.albiOptions++; return { relationshipTypes: [{ id: '12', label: 'Referrer' }],
+        relationshipStatuses: [{ id: '2', label: 'Active' }], salespeople: [] } },
+      listReferralSources: async () => { reads.referral++; return [{ id: '5', label: 'Network' }] },
+    },
+    hubspotRead: {
+      getOwnerId: async () => null,
+      listOwners: async () => { reads.owners++; return [] },
+      getAssociations: async ({ objectIds }) => [{ fromId: objectIds[0], toObjectType: 'companies', toIds: objectIds[0] === '12' ? ['30'] : [] }],
+    },
+  }
+  f.deps.repository.getMappings = async () => ({ contacts: [], organizations: [], options: [] })
+  // Source 11's owner read fails: its row is still captured, readiness unknown.
+  const getOwnerId = f.deps.reads.hubspotRead.getOwnerId
+  f.deps.reads.hubspotRead.getOwnerId = async (type, id) => { if (id === '11') throw Error('hubspot down'); return getOwnerId(type, id) }
+  const result = await backfillLiveReviews(f.deps, { companyId: 'company-1' })
+  assert.equal(result.captured, 3)
+  const bySource = Object.fromEntries(f.db.tables.h2a_dry_run_reviews.map(row => [row.source_id, row]))
+  assert.deepEqual([bySource['10'].triage_bucket, bySource['10'].triage_details], ['quick', { quickKind: 'create' }])
+  assert.deepEqual([bySource['11'].triage_bucket, bySource['11'].triage_details], ['decision', {}])
+  // An associated HubSpot organization that is not synced yet blocks the contact behind it.
+  assert.deepEqual([bySource['12'].triage_bucket, bySource['12'].triage_details], ['blocked', { blockedReason: 'organization_not_synced' }])
+  assert.deepEqual([reads.albiOptions, reads.referral], [1, 1])
+})

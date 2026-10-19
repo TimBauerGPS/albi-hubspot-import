@@ -2,6 +2,7 @@ import { H2AAuthError, requireH2ARequest } from './_h2a/auth.js'
 import { createH2ARepository } from './_h2a/repository.js'
 import { getConflict, H2AConflictError, listConflicts } from './_h2a/conflicts.js'
 import { backfillLiveReviews } from './_h2a/liveReview.js'
+import { createH2AProviderClients, readOnlyH2ACapabilities } from './_h2a/providerClients.js'
 
 const response = (statusCode, body) => ({ statusCode, headers: {
   'Content-Type': 'application/json', 'Cache-Control': 'no-store',
@@ -29,6 +30,8 @@ function encodeCursor(cursor) {
   return cursor ? Buffer.from(JSON.stringify(cursor)).toString('base64url') : null
 }
 
+const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const AUTH_MESSAGES = new Set(['Authentication required.', 'Invalid authentication token.', 'Administrator access is required.',
   'You are not authorized to access H2A.', 'You are not authorized to access the requested company.', 'A company must be selected.', 'Company not found.'])
 
@@ -44,7 +47,24 @@ function prepareBody(event) {
   if (selectors.some(value => typeof value !== 'string' || !value.trim()) || new Set(selectors).size > 1) {
     throw new H2AConflictError(400, 'A single company selector is required.')
   }
-  return { companyId: selectors[0], cursor: decodeCursor(body.cursor) }
+  const cursor = decodeCursor(body.cursor)
+  if (cursor && (!TIMESTAMP.test(cursor.createdAt) || !Number.isFinite(Date.parse(cursor.createdAt)) || !UUID.test(cursor.id))) {
+    throw new H2AConflictError(400, 'Invalid conflict cursor.')
+  }
+  return { companyId: selectors[0], cursor }
+}
+
+// Read-only provider clients for create readiness, verified against the configured portal. Advisory:
+// without them the backfill still captures, with readiness unknown.
+async function backfillReads(options, repository, companyId) {
+  try {
+    const config = await repository.getConfig(companyId)
+    if (!config?.portal_id) return undefined
+    const clients = options.makeClients ? await options.makeClients(companyId) : await createH2AProviderClients({
+      companyId, repository, keyring: options.keyring, env: options.env, fetch: options.fetch })
+    if (!options.makeClients && (await clients.hubspot.getAccountInfo()).portalId !== config.portal_id) return undefined
+    return readOnlyH2ACapabilities(clients)
+  } catch { return undefined }
 }
 
 // "Prepare open conflicts for review": one admin-only backfill page of open contact/company conflicts
@@ -55,7 +75,8 @@ async function prepareLiveReviews(event, options) {
     supabase: options.supabase, getSupabase: options.getSupabase, requireAdmin: true, requestedCompanyId: input.companyId,
   })
   const repository = options.repository ?? createH2ARepository(context.supabase)
-  const result = await (options.backfillLiveReviews ?? backfillLiveReviews)({ repository },
+  const reads = await backfillReads(options, repository, context.companyId)
+  const result = await (options.backfillLiveReviews ?? backfillLiveReviews)({ repository, ...(reads ? { reads } : {}) },
     { companyId: context.companyId, limit: 50, cursor: input.cursor })
   return response(200, { captured: result.captured, linked: result.linked, skipped: result.skipped ?? 0, failed: result.failed ?? 0,
     nextCursor: encodeCursor(result.nextCursor) })

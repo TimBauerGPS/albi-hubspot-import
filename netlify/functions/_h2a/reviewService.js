@@ -414,6 +414,11 @@ export async function runReviewRecheckBatch(deps, { companyId, batchId }) {
   const started = clock(deps)
   const deadline = started + Math.min(13 * 60000, Math.max(1, deps.batchDeadlineMs ?? 13 * 60000))
   let rows, snapshot, missing = 0, stranded = []
+  // The sweep runs only after the targeted rechecks, with whatever deadline they left.
+  const sweepThenFinish = async () => {
+    if (stranded.length) settled = await sweepLiveCloses(deps, companyId, stranded, actorId, deadline)
+    return finish('completed')
+  }
   try {
     let config
     if (live) config = await repository.getConfig(companyId)
@@ -432,7 +437,6 @@ export async function runReviewRecheckBatch(deps, { companyId, batchId }) {
     } else rows = open
     counts.total = rows.length + missing
     await batchRepository.updateReviewRecheckBatch(companyId, batchId, { counts: { ...counts } })
-    if (stranded.length) settled = await sweepLiveCloses(deps, companyId, stranded, actorId, deadline)
     if (missing) {
       counts.stale += missing
       counts.done += missing
@@ -440,7 +444,7 @@ export async function runReviewRecheckBatch(deps, { companyId, batchId }) {
         return { status: 'lost', errorCode: null, counts: { ...counts } }
       }
     }
-    if (!rows.length) return await finish('completed')
+    if (!rows.length) return await sweepThenFinish()
     const controller = new AbortController()
     const abortTimer = setTimeout(() => controller.abort(), Math.max(1, deadline - clock(deps)))
     try {
@@ -474,5 +478,5 @@ export async function runReviewRecheckBatch(deps, { companyId, batchId }) {
     // A false heartbeat means the batch row expired or finished elsewhere; another batch may now own the queue.
     if (!await batchRepository.updateReviewRecheckBatch(companyId, batchId, { counts: { ...counts } })) return { status: 'lost', errorCode: null, counts: { ...counts } }
   }
-  return finish('completed')
+  return sweepThenFinish()
 }

@@ -229,6 +229,7 @@ function safeTriageDetails(value) {
   if (details.merged === true) safe.merged = true
   if (['link', 'create'].includes(details.quickKind)) safe.quickKind = details.quickKind
   if (details.closePending === true) safe.closePending = true
+  if (typeof details.mergedIntoSourceId === 'string' && /^[1-9]\d{0,99}$/.test(details.mergedIntoSourceId)) safe.mergedIntoSourceId = details.mergedIntoSourceId
   return safe
 }
 

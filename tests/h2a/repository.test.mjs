@@ -1124,3 +1124,12 @@ test('setReviewTriage writes bucket and details scoped to the company', async ()
   assert.deepEqual(equalityFilters(calls[0]), [['company_id', 'company-1'], ['id', REVIEW_ID]])
   await assert.rejects(() => repository.setReviewTriage('company-1', REVIEW_ID, { bucket: 'x', details: {} }), TypeError)
 })
+
+test('merged-away live rows are found by the survivor id stored in triage details, tenant-scoped', async () => {
+  const { repository, calls } = reviewRepositoryFixture([data([])])
+  assert.deepEqual(await repository.listMergedAwayLiveReviews('company-1', '123', 'contacts', '77'), [])
+  assert.equal(calls[0].table, 'h2a_dry_run_reviews')
+  assert.deepEqual(equalityFilters(calls[0]), [['company_id', 'company-1'], ['portal_id', '123'], ['object_type', 'contacts'],
+    ['review_kind', 'live'], ['status', 'needs_review'], ['triage_details->>mergedIntoSourceId', '77']])
+  await assert.rejects(repository.listMergedAwayLiveReviews('company-1', '123', 'contacts', 'x'), TypeError)
+})

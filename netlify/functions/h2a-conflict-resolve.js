@@ -2,6 +2,7 @@ import { H2AAuthError, requireH2ARequest } from './_h2a/auth.js'
 import { createH2ARepository } from './_h2a/repository.js'
 import { H2AConflictError, conflictResumePayload, resolveConflict } from './_h2a/conflicts.js'
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const response = (statusCode, body) => ({ statusCode, headers: {
   'Content-Type': 'application/json', 'Cache-Control': 'no-store',
   'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Content-Type, Authorization',
@@ -50,8 +51,12 @@ export function createConflictResolveHandler(options = {}) {
       const repository = options.repository ?? createH2ARepository(context.supabase)
       // Contact and company conflicts held by a live review row resolve only in the review workspace,
       // where one decision closes every conflict for that record. Activity-only conflicts still resolve here.
-      if (typeof body.conflictId === 'string' && body.conflictId.trim() &&
-        await repository.findLiveReviewConflictLink(context.companyId, body.conflictId)) {
+      // Validate like resolveConflict first, so malformed input stays a 400. Link rows hold uuid conflict IDs,
+      // so a non-UUID ID cannot be linked and goes straight to the legacy path.
+      if (typeof body.conflictId !== 'string' || !body.conflictId.trim() || body.conflictId.length > 200) {
+        throw new H2AConflictError(400, 'A conflict ID is required.')
+      }
+      if (UUID.test(body.conflictId) && await repository.findLiveReviewConflictLink(context.companyId, body.conflictId)) {
         throw new H2AConflictError(409, 'Resolve this in the review workspace.')
       }
       const { company_id: _companyIdAlias, ...resolutionBody } = body

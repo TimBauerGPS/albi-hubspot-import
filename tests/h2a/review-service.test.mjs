@@ -526,7 +526,7 @@ test('deleted HubSpot source closes as source_missing; merged source stays open'
   assert.deepEqual(merged.store.state.closeCalls, [])
   assert.equal(open.review.status, 'needs_review')
   assert.deepEqual(merged.store.state.conflicts.map(conflict => conflict.status), ['open', 'open'])
-  assert.deepEqual(merged.triage.at(-1), [reviewId, { bucket: 'blocked', details: { merged: true } }])
+  assert.deepEqual(merged.triage.at(-1), [reviewId, { bucket: 'blocked', details: { merged: true, mergedIntoSourceId: '77' } }])
 })
 
 test('a live recheck that is only safe to create stays open for a reviewer', async () => {

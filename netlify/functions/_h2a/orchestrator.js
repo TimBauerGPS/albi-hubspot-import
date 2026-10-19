@@ -8,7 +8,7 @@ import { resolveActivityTargets, buildAlbiActivity } from './activity.js'
 import { resolveActivityType, resolveContactType } from './options.js'
 import { reserveDelivery, completeDelivery } from './deliveries.js'
 import { captureLiveReview } from './liveReview.js'
-import { buildCreateReadiness, resolveCreateDefaults, safeReferralSources } from './createDefaults.js'
+import { computeCaptureReadiness } from './createDefaults.js'
 
 const text = value => value == null ? '' : String(value).trim()
 const sourceFields = record => record?.properties ?? record ?? {}
@@ -148,28 +148,10 @@ async function conflict(deps, ctx, data) {
       ...(ctx.mode === 'dry_run' ? { proposedAction: 'review_conflict' } : {}) } })
 }
 
-// Create readiness for a new record at live capture, built like the review detail projection:
-// Albi create options and referral sources once per run, the record's HubSpot owner, and the org gate.
-// Any read failure leaves readiness unknown so the record is still captured (triage refreshes later).
-async function captureCreateReadiness(deps, ctx, { objectType, sourceId, organization = null }) {
-  try {
-    const organizationBlock = objectType === 'contacts' && organization?.id &&
-      !mappingFor(ctx.mappings.organizations, ctx.portalId, text(organization.id)) ? { sourceId: text(organization.id), reviewId: null } : null
-    if (organizationBlock) return buildCreateReadiness({ baseReady: false, organizationBlock })
-    ctx.createOptions ??= Promise.resolve().then(async () => ({ options: await deps.albi.listCreateOptions(),
-      referralSources: safeReferralSources(await deps.albi.listReferralSources()) }))
-    const { options, referralSources } = await ctx.createOptions
-    let defaults = null
-    if (referralSources.length > 0) {
-      const ownerId = await deps.hubspot.getOwnerId(objectType, sourceId)
-      if (ownerId && !ctx.owners.has(String(ownerId))) {
-        ctx.createOwners ??= Promise.resolve().then(() => deps.hubspot.listOwners())
-        for (const owner of await ctx.createOwners) ctx.owners.set(String(owner.id), owner)
-      }
-      defaults = resolveCreateDefaults({ ...options, ownerId, owners: [...ctx.owners.values()] })
-    }
-    return buildCreateReadiness({ baseReady: true, referralSources, defaults })
-  } catch { return undefined }
+// Create readiness for a new record at live capture: the shared helper with this run's cache (ctx).
+function captureCreateReadiness(deps, ctx, { objectType, sourceId, organization = null }) {
+  return computeCaptureReadiness({ albi: deps.albi, hubspot: deps.hubspot }, ctx, { objectType, sourceId, organization,
+    portalId: ctx.portalId, organizationMappings: ctx.mappings?.organizations })
 }
 
 async function resolveOrganization(deps, ctx, source) {
