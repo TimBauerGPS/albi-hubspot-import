@@ -5,7 +5,7 @@ import { RESOLUTION_FIELDS, resolutionDisplayValue, presentReviewResolution, pre
 export const SAMPLE_REVIEW_GUIDANCE = H2A_REVIEW_GUIDANCE
 export const SAMPLE_REVIEW_REASON_OPTIONS = listH2AReviewReasonOptions()
 
-const SOURCE_FIELDS = Object.freeze([
+export const SOURCE_FIELDS = Object.freeze([
   ['id', 'ID'], ['fullName', 'Full name'], ['firstName', 'First name'], ['lastName', 'Last name'], ['name', 'Name'],
   ['email', 'Email'], ['phoneNumber', 'Phone'], ['mobileNumber', 'Mobile'], ['organizationId', 'Organization ID'],
   ['organizationName', 'Organization'], ['domain', 'Domain'], ['jobTitle', 'Job title'], ['address1', 'Address'], ['address2', 'Address line 2'],
