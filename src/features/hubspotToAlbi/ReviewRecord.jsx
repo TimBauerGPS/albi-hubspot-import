@@ -1,0 +1,204 @@
+import { useEffect, useState } from 'react'
+import { blockedReasonCopy } from '../../../shared/h2aBlockedReasons.js'
+import { presentSampleReviewItem } from './sampleReview.js'
+import { fieldDiffRows } from './reviewWorkspace.js'
+import CandidateList from './CandidateList.jsx'
+import FieldDiff from './FieldDiff.jsx'
+import ManyToOneDialog from './ManyToOneDialog.jsx'
+import ResolutionBar, { btn } from './ResolutionBar.jsx'
+
+const idPattern = /^[1-9]\d{0,99}$/
+const text = value => typeof value === 'string' && value.trim() !== '' ? value.trim() : ''
+const display = value => value === null || value === undefined || value === '' ? 'Blank' : value
+const when = value => { try { return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)) } catch { return '' } }
+
+function Link({ url, children }) {
+  return url ? <a href={url} target="_blank" rel="noreferrer" className="font-semibold text-brand-700 underline underline-offset-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500">{children}</a> : null
+}
+function CopyButton({ value }) {
+  return <button type="button" onClick={() => { try { navigator.clipboard?.writeText(String(value ?? '')) } catch { /* clipboard unavailable */ } }}
+    className="rounded border border-gray-300 px-1.5 py-0.5 text-xs font-medium text-gray-700 hover:bg-gray-50">Copy</button>
+}
+
+function candidateView(ranked, snapshot) {
+  const s = snapshot ?? {}
+  const name = text(s.fullName) || [s.firstName, s.lastName].filter(Boolean).join(' ') || text(s.name)
+  return { id: ranked.id, snapshot: s, name, details: [s.email, s.phoneNumber ?? s.mobileNumber, s.organizationName ?? s.domain].filter(Boolean).join(' · '),
+    matchReasons: Array.isArray(ranked.matchReasons) ? ranked.matchReasons : [], warnings: Array.isArray(ranked.warnings) ? ranked.warnings : [],
+    strength: ['Strong', 'Likely', 'Weak'].includes(ranked.strength) ? ranked.strength : 'Weak',
+    linkedElsewhere: Number.isSafeInteger(ranked.linkedElsewhere) && ranked.linkedElsewhere > 0 ? ranked.linkedElsewhere : 0 }
+}
+
+export default function ReviewRecord({
+  item, kind = 'sample', candidateIndex = 0, onPickCandidate, referralSourceId = '', onReferral, referralRef,
+  pending = false, busy = false,
+  onAccept, onLink, onCreate, onForceCreate, onCreateWithOrganization, onApplyFields, onChooseOrganization,
+  onSkip, onRecheck, onOpenOrganization, onOpenMergedSurvivor,
+}) {
+  const review = presentSampleReviewItem(item)
+  const capability = review.resolutionCapability
+  const resolution = review.resolution
+  const [showMatching, setShowMatching] = useState(false)
+  const [fieldChoices, setFieldChoices] = useState({})
+  const [manyToOne, setManyToOne] = useState(null)
+  const [organizationSourceId, setOrganizationSourceId] = useState('')
+  const [approveAssociation, setApproveAssociation] = useState(false)
+  useEffect(() => {
+    setShowMatching(false); setFieldChoices({}); setManyToOne(null); setOrganizationSourceId(''); setApproveAssociation(false)
+  }, [review.id, review.updatedAt])
+
+  const objectLabel = review.objectType === 'contacts' ? 'contact' : 'organization'
+  const snapshots = new Map(review.candidates.map(candidate => [candidate.id, candidate.snapshot]))
+  const rankedInput = Array.isArray(item?.rankedCandidates) ? item.rankedCandidates
+    : review.candidates.map(candidate => ({ id: candidate.id, matchReasons: [], warnings: [], strength: 'Weak', linkedElsewhere: 0 }))
+  const candidates = rankedInput.filter(ranked => idPattern.test(ranked?.id)).map(ranked => candidateView(ranked, snapshots.get(ranked.id)))
+  const selected = candidates[candidateIndex] ?? null
+  const suggested = candidates.find(candidate => candidate.id === item?.suggestedCandidateId) ?? null
+
+  const canAct = capability.canResolve && review.actions.length > 0 && (review.status === 'needs_review' ||
+    review.status === 'cleared' && ['safe_to_create', 'safe_to_link'].includes(item?.recheckOutcome))
+  const disabled = pending || busy
+  const merged = idPattern.test(item?.mergedInto?.sourceId) ? item.mergedInto : null
+  const orgFirst = item?.orgFirstCreate?.eligible === true && review.objectType === 'contacts' && candidates.length === 0
+  const readiness = candidates.length === 0 ? item?.createReadiness : item?.forceCreateReadiness
+  // The org-first create is blocked on the contact's own readiness, so its sources may ride on orgFirstCreate.
+  const sourceList = orgFirst ? item?.orgFirstCreate?.referralSources ?? readiness?.referralSources : readiness?.referralSources
+  const referralSources = (Array.isArray(sourceList) ? sourceList : []).filter(source => idPattern.test(source?.id) && typeof source?.label === 'string' && source.label.trim() !== '').slice(0, 100)
+  const blockedCopy = blockedReasonCopy(readiness?.blockedReason)
+  const unsyncedOrganization = readiness?.blockedReason === 'organization_not_synced' && idPattern.test(readiness?.organization?.sourceId)
+    ? { sourceId: readiness.organization.sourceId, reviewId: typeof readiness.organization.reviewId === 'string' && readiness.organization.reviewId ? readiness.organization.reviewId : null } : null
+
+  const fieldMode = canAct && !merged && review.actions.includes('resolve_fields') && review.resolutionFields.length > 0 && candidates.length === 1
+  const identityActions = canAct && !merged && !fieldMode
+  const canCreateNew = identityActions && (orgFirst ? review.actions.includes('create_albi') && referralSources.length > 0
+    : candidates.length === 0 ? review.actions.includes('create_albi') && readiness?.ready === true && referralSources.length > 0
+      : review.actions.includes('force_create_albi') && readiness?.ready === true && referralSources.length > 0)
+  const create = canCreateNew ? { kind: orgFirst ? 'org' : candidates.length ? 'force' : 'create',
+    label: orgFirst ? 'Create organization and contact' : candidates.length ? 'Add new in Albi instead' : 'Create in Albi' } : null
+  const canLink = identityActions && review.actions.includes('link_existing')
+  const suggestion = canLink && suggested ? { candidate: suggested, emailMatch: suggested.matchReasons.includes('same_email') && !suggested.warnings.includes('different_email') } : null
+  const selectedLink = canLink && selected && (!suggested || selected.id !== suggested.id) ? selected : null
+
+  const organizationOptions = Array.isArray(item?.organizationOptions) ? item.organizationOptions.filter(option =>
+    idPattern.test(option?.sourceId) && idPattern.test(option?.targetId) && typeof option.associated === 'boolean' &&
+    idPattern.test(option?.contactTargetId) && idPattern.test(option?.currentOrganizationTargetId ?? option.targetId)) : []
+  const showOrganizationChoice = canAct && !merged && review.objectType === 'contacts' && review.actions.includes('choose_organization')
+  const organizationGate = organizationOptions.length === 0 && idPattern.test(item?.organizationGate?.sourceId)
+    ? { sourceId: item.organizationGate.sourceId, reviewId: typeof item.organizationGate.reviewId === 'string' && item.organizationGate.reviewId ? item.organizationGate.reviewId : null } : null
+  const chosenOrganization = organizationOptions.find(option => option.sourceId === organizationSourceId)
+
+  // Diff rows. In field mode every field the resolution can write is choosable, even one the normalized diff hides.
+  let rows = fieldDiffRows({ objectType: review.objectType === 'companies' ? 'organization' : 'contact', source: review.source, candidate: selected?.snapshot ?? null })
+  if (fieldMode) {
+    const keys = new Set(review.resolutionFields.map(field => field.key))
+    rows = rows.map(row => keys.has(row.key) ? { ...row, kind: 'differs', choosable: true } : row)
+    for (const field of review.resolutionFields) if (!rows.some(row => row.key === field.key))
+      rows.push({ key: field.key, label: field.label, hubspot: field.hubspot ?? '', albi: field.albi ?? '', kind: 'differs', choosable: true })
+  }
+  const allChosen = fieldMode && review.resolutionFields.every(field => fieldChoices[field.key] === 'hubspot' || fieldChoices[field.key] === 'albi')
+  const setAll = value => setFieldChoices(Object.fromEntries(review.resolutionFields.map(field => [field.key, value])))
+
+  function requestLink(candidate) {
+    if (candidate.linkedElsewhere > 0) setManyToOne(candidate.id)
+    else onLink?.(candidate, { approveManyToOne: false })
+  }
+  function onCreateClick() {
+    if (!referralSourceId) return
+    if (create?.kind === 'org') onCreateWithOrganization?.({ referralSourceId })
+    else if (create?.kind === 'force') onForceCreate?.({ referralSourceId, ignoredCandidateIds: candidates.map(candidate => candidate.id) })
+    else onCreate?.({ referralSourceId })
+  }
+
+  const organizationFirstCard = gate => <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+    <p className="text-sm font-semibold text-amber-950">Create the organization first</p>
+    <p className="mt-1 text-xs leading-5 text-amber-900">This contact’s HubSpot organization is not in Albi yet. Create it on its own review, then return here to create the contact linked to it.</p>
+    <button type="button" className={`${btn} mt-2`} disabled={disabled || !onOpenOrganization} onClick={() => onOpenOrganization?.(gate)}>
+      {gate?.reviewId ? 'Open organization review' : 'Prepare organization review'}</button></div>
+
+  const events = resolution?.events ?? []
+  const manualTasks = resolution?.status === 'waiting_on_albi' ? [...events].reverse().find(event => event.manualTasks?.length)?.manualTasks ?? [] : []
+  const hubspotOrgs = review.objectType === 'contacts' && item?.hubspotOrganizations !== undefined
+    ? Array.isArray(item.hubspotOrganizations)
+      ? item.hubspotOrganizations.filter(organization => idPattern.test(organization?.sourceId) && typeof organization?.name === 'string').map(organization => organization.name).join(', ') || 'No organization is associated in HubSpot.'
+      : 'The HubSpot association could not be read right now.' : null
+  const albiUrl = selected ? review.candidateLinks.find(link => link.id === selected.id)?.url : null
+  const orgGate = !orgFirst && unsyncedOrganization && canAct && !merged
+
+  return <section className="min-w-0 overflow-hidden rounded-xl border border-gray-200 bg-white" aria-label={`Review ${review.displayName}`}>
+    <header className="flex flex-wrap items-start justify-between gap-3 border-b border-gray-200 px-5 py-3">
+      <div className="min-w-0">
+        <h2 className="truncate text-lg font-semibold text-gray-900">{review.displayName}</h2>
+        <p className="text-sm text-gray-700">{review.reasonLabel}{hubspotOrgs ? <> · <span className="text-gray-500">HubSpot organization:</span> {hubspotOrgs}</> : null}</p>
+      </div>
+      <div className="text-right text-xs text-gray-500">
+        <Link url={review.hubspotUrl}>Open in HubSpot</Link>{albiUrl ? <> · <Link url={albiUrl}>Open in Albi</Link></> : null}
+        <p className="mt-1">HubSpot ID {review.sourceId} · {review.lastRecheckedAt ? `last recheck ${when(review.lastRecheckedAt)}` : 'not rechecked yet'}</p>
+      </div>
+    </header>
+
+    <div className="space-y-4 px-5 py-4">
+      {!capability.canResolve && <p className="text-xs leading-5 text-gray-600" role="status">Resolution is {capability.enabled ? 'read-only for your role.' : 'unavailable in the current mode.'} {capability.hubspotWrites === 'rejected' ? 'Recent HubSpot write authorization was rejected.' : ''}</p>}
+      {merged && <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm">
+        <p className="font-semibold text-amber-950">Merged in HubSpot into {objectLabel} {merged.sourceId}</p>
+        <p className="mt-1 text-xs text-amber-900">This record is out of date. Review the surviving record instead.</p>
+        <button type="button" className={`${btn} mt-2`} disabled={disabled || !onOpenMergedSurvivor}
+          onClick={() => onOpenMergedSurvivor?.({ sourceId: merged.sourceId, reviewId: typeof merged.reviewId === 'string' && merged.reviewId ? merged.reviewId : null })}>Review the surviving record</button></div>}
+      {!merged && blockedCopy && !orgFirst && canAct && <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-900" role="status">
+        <p className="font-semibold">Can’t create yet</p><p className="mt-1 text-xs">{blockedCopy}</p></div>}
+      {orgGate && organizationFirstCard(unsyncedOrganization)}
+      {orgFirst && canAct && <p className="rounded-lg border border-brand-200 bg-brand-50 px-3 py-2 text-sm text-gray-800">
+        {item.orgFirstCreate.organizationName ? `${item.orgFirstCreate.organizationName} is not in Albi yet. ` : 'This contact’s HubSpot organization is not in Albi yet. '}
+        Choose a referral source to create the organization and the contact together.</p>}
+      {resolution?.status === 'waiting_on_albi' && <div className="rounded-lg border-2 border-amber-400 bg-amber-50 p-3 text-sm">
+        <p className="font-semibold text-amber-950">Update this {objectLabel} in Albi</p>
+        {manualTasks.length === 0 && <p className="mt-1 text-xs text-amber-900">Albi needs a manual change. Make it in Albi, then recheck this record.</p>}
+        {manualTasks.map((task, index) => <div key={`${task.targetId}-${index}`} className="mt-2">
+          <ul className="space-y-1 text-amber-900">{task.fields.map(field => <li key={field.field} className="flex flex-wrap items-center gap-2">
+            <span>{field.label}: {display(field.value)}</span><CopyButton value={field.value} /></li>)}</ul>
+          <div className="mt-2 flex flex-wrap gap-3 text-sm"><Link url={task.url}>Open {task.objectType === 'contacts' ? 'contact' : 'organization'} in Albi</Link><Link url={task.organizationUrl}>Open organization in Albi</Link></div></div>)}
+        <p className="mt-2 text-xs text-amber-900">Opening Albi does not complete this task. Make the change there, then recheck this record. Also listed in Albi to-do (t).</p></div>}
+
+      <CandidateList candidates={candidates} selectedIndex={candidateIndex} suggestedId={suggested?.id ?? null} onPick={onPickCandidate} objectLabel={objectLabel} />
+      <FieldDiff rows={rows} hasCandidate={Boolean(selected)} candidateId={selected?.id ?? ''} showMatching={showMatching}
+        onToggleMatching={() => setShowMatching(value => !value)} choices={fieldMode ? fieldChoices : null}
+        onChoose={(key, value) => setFieldChoices(current => ({ ...current, [key]: value }))} disabled={disabled} />
+
+      {showOrganizationChoice && <section className="rounded-lg border border-gray-200 p-4" aria-label="Organization context">
+        <h3 className="text-sm font-semibold text-gray-900">Organization context</h3>
+        <p className="mt-1 text-xs leading-5 text-gray-700">Existing HubSpot associations will not be removed. The selected organization becomes the saved context; an Albi relationship may need a manual update.</p>
+        {organizationOptions.length > 0 ? <>
+          <label className="mt-3 block text-xs font-medium text-gray-700">Organization
+            <select value={organizationSourceId} disabled={disabled} onChange={event => { setOrganizationSourceId(event.target.value); setApproveAssociation(false) }}
+              className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:ring-2 focus:ring-brand-500">
+              <option value="">Choose organization</option>
+              {organizationOptions.map(option => <option key={option.sourceId} value={option.sourceId}>HubSpot {option.sourceId} → Albi {option.targetId}{option.associated ? ' · currently associated' : ' · add association'}</option>)}
+            </select></label>
+          {chosenOrganization && !chosenOrganization.associated && <label className="mt-3 flex items-start gap-2 text-xs text-gray-700">
+            <input type="checkbox" checked={approveAssociation} disabled={disabled} onChange={event => setApproveAssociation(event.target.checked)} className="mt-0.5 text-brand-600 focus:ring-brand-500" />
+            Add this organization as a HubSpot association. Existing HubSpot associations will not be removed.</label>}
+          <button type="button" className={`${btn} mt-3`} disabled={disabled || !chosenOrganization || !chosenOrganization.associated && !approveAssociation}
+            onClick={() => onChooseOrganization?.({ organizationSourceId, addHubSpotAssociation: !chosenOrganization.associated })}>Choose organization</button></>
+          : organizationGate ? <div className="mt-3">{organizationFirstCard(organizationGate)}</div>
+            : <p className="mt-2 text-xs text-amber-800">Fresh server association evidence is unavailable. Recheck or reload this record before choosing an organization.</p>}
+      </section>}
+
+      {events.length > 0 && <details className="text-xs text-gray-700">
+        <summary className="cursor-pointer font-semibold text-gray-800">History</summary>
+        <p className="mt-1 font-medium text-gray-800">{resolution.statusLabel}</p>
+        <ol className="mt-1 divide-y divide-gray-100">{events.map((event, index) => <li key={event.id ?? index} className="py-1.5"><span className="font-medium">{event.label}</span>{event.createdAt && <span className="ml-2">{when(event.createdAt)}</span>}</li>)}</ol>
+      </details>}
+    </div>
+
+    {capability.canResolve && <ResolutionBar disabled={disabled} fieldMode={fieldMode} applyDisabled={!allChosen}
+      onAllHubSpot={() => setAll('hubspot')} onAllAlbi={() => setAll('albi')}
+      onApplyFields={() => onApplyFields?.(Object.fromEntries(review.resolutionFields.map(field => [field.key, fieldChoices[field.key]])))}
+      suggestion={suggestion} onAccept={() => suggestion && onAccept?.(suggestion.candidate, { emailMatch: suggestion.emailMatch })}
+      selectedLink={selectedLink} onLinkSelected={() => selectedLink && requestLink(selectedLink)}
+      create={create} referralSources={referralSources} referralSourceId={referralSourceId} onReferral={onReferral} referralRef={referralRef} onCreate={onCreateClick}
+      showSkip={kind === 'live'} onSkip={onSkip} showRecheck onRecheck={onRecheck} />}
+
+    <ManyToOneDialog candidate={candidates.find(candidate => candidate.id === manyToOne) ?? null} objectLabel={objectLabel} busy={disabled}
+      onCancel={() => setManyToOne(null)}
+      onConfirm={candidate => { setManyToOne(null); onLink?.(candidate, { approveManyToOne: true }) }} />
+  </section>
+}
