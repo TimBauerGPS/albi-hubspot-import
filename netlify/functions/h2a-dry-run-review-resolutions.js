@@ -113,6 +113,10 @@ export function createReviewResolutionHandler(options = {}) {
         const credentials = typeof repository.getCredentials === 'function' ? await repository.getCredentials(companyId) : null
         const project = async step => {
           if (!step) return null
+          // The organization already exists; the contact error is reported beside it so a retry resumes the contact.
+          if (step.error) return { error: SAFE_MESSAGES.has(step.error.message) ? step.error.message
+            : 'The contact could not be created. Retry to continue with the organization already created.',
+          status: [400, 403, 404, 409].includes(step.error.statusCode) ? step.error.statusCode : 500 }
           if (!isRecord(step.resolution) || step.resolution.company_id !== companyId) throw Error('Invalid resolution result')
           const events = await repository.listReviewResolutionEvents(companyId, step.resolution.id)
           if (!Array.isArray(events)) throw Error('Invalid resolution events')

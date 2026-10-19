@@ -997,3 +997,61 @@ test('ineligible when the organization has candidates', async () => {
   await assert.rejects(executeOrganizationThenContactCreate(unblocked.deps, unblocked.input), error => error.statusCode === 409)
   assert.equal(unblocked.calls.length, 0)
 })
+
+test('stale contact version makes zero create calls', async () => {
+  const f = orgFirstFixture(); f.input.contactExpectedUpdatedAt = '2026-10-13T11:00:00Z'
+  await assert.rejects(executeOrganizationThenContactCreate(f.deps, f.input), error => error.statusCode === 409)
+  assert.equal(f.calls.length, 0)
+})
+
+test('stale organization version makes zero create calls', async () => {
+  const f = orgFirstFixture(); f.input.organizationExpectedUpdatedAt = '2026-10-13T11:00:00Z'
+  await assert.rejects(executeOrganizationThenContactCreate(f.deps, f.input), error => error.statusCode === 409)
+  assert.equal(f.calls.length, 0)
+})
+
+test('a contact failure after the organization succeeded returns both results', async () => {
+  const f = orgFirstFixture(), run = f.deps.executeResolution
+  f.deps.executeResolution = async (deps, args) => {
+    if (args.reviewId === orgFirstIds.contact) throw new H2AReviewErrorForTest(409)
+    return run(deps, args)
+  }
+  const result = await executeOrganizationThenContactCreate(f.deps, f.input)
+  assert.equal(result.organization.resolution.review_id, orgFirstIds.organization)
+  assert.equal(result.contact.error.statusCode, 409)
+})
+
+test('the real engine creates the organization, then the contact against its new Albi id', async () => {
+  const f = fixture(), g = fixture(), orgReviewId = '00000000-0000-4000-8000-000000000005'
+  asCreate(f)
+  f.createdTarget.organizationId = '60'
+  f.associations = ['42']
+  g.mappings.organizations = f.mappings.organizations
+  Object.assign(g.row, { id: orgReviewId, object_type: 'companies', reason: 'no_match', conflict_type: 'organization_match',
+    source_snapshot: { id: '42', name: 'Acme' }, candidate_snapshots: [], proposed_changes: { conflicts: {}, updates: {} } })
+  g.source.properties = { name: 'Acme' }
+  g.deps.hubspotRead.getCompanies = async () => [structuredClone(g.source)]
+  g.mappings.options = [{ mapping_kind: 'default_organization_type', source_key: 'default', albi_id: '12', confirmed: true }]
+  f.mappings.options.push(...g.mappings.options)
+  g.deps.albiRead.listOrganizations = async () => ({ records: structuredClone(g.organizations), cursor: null })
+  g.deps.albiWrite.createOrganization = async payload => { g.calls.push(['CREATE-ORG', structuredClone(payload)])
+    const created = { id: '60', name: 'Acme', organizationTypeIds: ['12'] }
+    g.organizations.push(created); f.organizations.push(created); return { id: '60' } }
+  const rows = { [f.row.id]: f.row, [orgReviewId]: g.row }
+  const deps = { repository: { getConfig: f.deps.repository.getConfig, getReview: async (_c, id) => rows[id] ?? null,
+    getMappings: f.deps.repository.getMappings,
+    getCurrentReviewResolution: async (_c, id) => (id === orgReviewId ? g : f).intent },
+  loadResolutionOptions: async ({ row }) => row.object_type === 'contacts'
+    ? { createReadiness: { ready: false, blockedReason: 'organization_not_synced', organization: { sourceId: '42', reviewId: orgReviewId } } }
+    : { createReadiness: { ready: true } },
+  executeResolution: (_deps, args) => executeReviewResolution(args.reviewId === orgReviewId ? g.deps : f.deps, args) }
+  const result = await executeOrganizationThenContactCreate(deps, { companyId: 'tenant', actorId, contactReviewId: f.row.id,
+    contactExpectedUpdatedAt: stamp, organizationReviewId: orgReviewId, organizationExpectedUpdatedAt: stamp, referralSourceId: '5',
+    clientRequestId: '00000000-0000-4000-8000-0000000000d2' })
+  assert.equal(result.organization.resolution.status, 'ready_to_recheck')
+  assert.equal(result.contact.resolution.status, 'ready_to_recheck')
+  assert.equal(f.mappings.organizations[0].albi_organization_id, '60')
+  assert.equal(mutations(g).length, 1)
+  assert.equal(mutations(f).length, 1)
+  assert.equal(mutations(f)[0][1].organizationId, '60')
+})

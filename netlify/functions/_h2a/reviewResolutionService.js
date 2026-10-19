@@ -698,6 +698,8 @@ async function assertOrgFirstEligible(deps, input) {
   const open = row => row?.status === 'needs_review' || row?.status === 'cleared' && row.recheck_outcome === 'safe_to_create'
   if (!contact || !organization || contact.object_type !== 'contacts' || organization.object_type !== 'companies' ||
     reviewKind(contact) !== reviewKind(organization) || contact.portal_id !== organization.portal_id ||
+    // Both versions are checked before the org create so a changed contact cannot leave an orphan Albi organization.
+    contact.updated_at !== input.contactExpectedUpdatedAt || organization.updated_at !== input.organizationExpectedUpdatedAt ||
     !open(contact) || !open(organization) ||
     !Array.isArray(organization.candidate_snapshots) || organization.candidate_snapshots.length !== 0) fail(409, NOT_ELIGIBLE)
   const config = await repository.getConfig(input.companyId)
@@ -739,7 +741,9 @@ export async function executeOrganizationThenContactCreate(deps, input) {
   const status = organization?.resolution?.status
   if (!['completed', 'ready_to_recheck'].includes(status) ||
     !await organizationMapped(deps, input.companyId, input.organizationReviewId)) return { organization, contact: null }
-  const contact = await run(deps, { companyId: input.companyId, actorId: input.actorId, reviewId: input.contactReviewId,
-    expectedUpdatedAt: input.contactExpectedUpdatedAt, clientRequestId: contactRequestId, decision })
-  return { organization, contact }
+  try {
+    const contact = await run(deps, { companyId: input.companyId, actorId: input.actorId, reviewId: input.contactReviewId,
+      expectedUpdatedAt: input.contactExpectedUpdatedAt, clientRequestId: contactRequestId, decision })
+    return { organization, contact }
+  } catch (error) { return { organization, contact: { error } } }
 }

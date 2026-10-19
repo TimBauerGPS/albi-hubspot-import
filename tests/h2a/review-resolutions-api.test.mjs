@@ -336,3 +336,15 @@ test('create_with_organization reports an organization failure without a contact
   const member = fixture({ role: 'member' })
   assert.equal((await member.request(orgFirst)).statusCode, 403)
 })
+
+test('create_with_organization surfaces a contact error beside the organization result', async () => {
+  const f = fixture()
+  f.options.executeOrganizationFirst = async () => ({ organization: { resolution: f.row }, contact: { error: new H2AReviewError(409, 'secret') } })
+  const result = await f.request(orgFirst)
+  assert.equal(result.statusCode, 200)
+  const body = JSON.parse(result.body)
+  assert.equal(body.organization.resolution.id, resolutionId)
+  assert.equal(body.contact.error.includes('Retry'), true)
+  assert.equal(body.contact.status, 409)
+  assert.equal(result.body.includes('secret'), false)
+})
