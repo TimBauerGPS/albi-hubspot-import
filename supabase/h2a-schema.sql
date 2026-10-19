@@ -1334,7 +1334,6 @@ grant execute on function public.h2a_requeue_conflict_resume(uuid, uuid) to serv
 -- Durable service-owned review resolution storage.
 
 
--- Bind a resolution to the review's actual tenant AND run, including direct writes.
 -- Live review workspace: live HubSpot->Albi conflicts share the sample review row table.
 alter table public.h2a_dry_run_reviews
   add column if not exists review_kind text not null default 'sample' check (review_kind in ('sample', 'live')),
@@ -1420,11 +1419,11 @@ declare
   v_resume_id uuid;
 begin
   if p_company_id is null or p_review_id is null or p_actor_id is null
-    or p_outcome not in ('resolved', 'resolved_by_sync', 'skipped', 'source_missing')
+    or p_outcome is null or p_outcome not in ('resolved', 'resolved_by_sync', 'skipped', 'source_missing')
     or (p_resolution_action is not null and p_resolution_action not in ('link_existing', 'create_new', 'skip'))
-    or (p_outcome = 'resolved' and p_resolution_action not in ('link_existing', 'create_new'))
+    or (p_outcome = 'resolved' and coalesce(p_resolution_action, '') not in ('link_existing', 'create_new'))
     or (p_outcome in ('skipped', 'source_missing') and p_resolution_action is distinct from 'skip')
-    or (p_outcome = 'resolved_by_sync' and p_resolution_action is not null) then
+    or (p_outcome = 'resolved_by_sync' and p_resolution_action is not null and p_resolution_action <> 'link_existing') then
     return pg_catalog.jsonb_build_object('error', 'invalid_action');
   end if;
 
@@ -1443,7 +1442,7 @@ begin
 
   v_status := case when p_outcome = 'skipped' or p_outcome = 'source_missing' then 'skipped' else 'resolved' end;
   v_event_type := case when v_status = 'skipped' then 'skipped' else 'resolved' end;
-  v_db_action := case when p_outcome = 'resolved_by_sync' then null else p_resolution_action end;
+  v_db_action := case when p_outcome = 'resolved_by_sync' then 'link_existing' else p_resolution_action end;
 
   for v_conflict in
     select c.* from public.h2a_conflicts c
@@ -1461,11 +1460,11 @@ begin
         'before', pg_catalog.jsonb_build_object('status', v_conflict.status, 'updatedAt', v_conflict.updated_at),
         'after', pg_catalog.jsonb_build_object('status', v_status, 'resolutionAction', v_db_action)), v_now);
     v_closed := v_closed || v_conflict.id;
-    if p_outcome = 'resolved' then
+    if p_outcome in ('resolved', 'resolved_by_sync') then
       v_resume_id := null;
       insert into public.h2a_conflict_resumes (company_id, conflict_id, resolution_action, source_object_type, source_id,
         activity_object_type, activity_id, originating_run_id, activity_delivery_id, created_at, updated_at)
-      values (p_company_id, v_conflict.id, p_resolution_action, v_conflict.object_type, v_conflict.source_id,
+      values (p_company_id, v_conflict.id, v_db_action, v_conflict.object_type, v_conflict.source_id,
         v_conflict.activity_object_type, v_conflict.activity_id, v_conflict.run_id, v_conflict.activity_delivery_id, v_now, v_now)
       on conflict (company_id, conflict_id) do nothing
       returning id into v_resume_id;
@@ -1491,6 +1490,7 @@ $$;
 revoke execute on function public.h2a_close_live_review(uuid, uuid, uuid, text, text) from public, anon, authenticated;
 grant execute on function public.h2a_close_live_review(uuid, uuid, uuid, text, text) to service_role;
 
+-- Bind a resolution to the review's actual tenant AND run, including direct writes.
 do $$
 begin
   if not exists (
