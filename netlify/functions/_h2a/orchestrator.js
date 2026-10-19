@@ -7,7 +7,7 @@ import { evaluateContactReview, evaluateOrganizationReview, safeReviewSnapshot, 
 import { resolveActivityTargets, buildAlbiActivity } from './activity.js'
 import { resolveActivityType, resolveContactType } from './options.js'
 import { reserveDelivery, completeDelivery } from './deliveries.js'
-import { normalizePhone } from './normalize.js'
+import { captureLiveReview } from './liveReview.js'
 
 const text = value => value == null ? '' : String(value).trim()
 const sourceFields = record => record?.properties ?? record ?? {}
@@ -132,6 +132,14 @@ async function conflict(deps, ctx, data) {
       activity_object_type: activity.objectType, activity_id: activity.id,
     })
     if (persisted?.inserted === true) ctx.newConflictCount = (ctx.newConflictCount ?? 0) + 1
+    // Live and backfill runs both write to Albi, so both hold contact/company conflicts in the live review queue.
+    if (['contacts', 'companies'].includes(data.objectType)) {
+      await captureLiveReview(deps, { companyId, runId, portalId, objectType: data.objectType, sourceId: data.sourceId,
+        reason: data.reason, conflictType: data.type, source: data.source ?? { id: data.sourceId },
+        candidates: data.candidates ?? [], evidence: data.evidence, proposedChanges: data.proposedChanges,
+        conflictId: text(persisted?.id),
+        mappings: data.objectType === 'companies' ? ctx.mappings?.organizations : ctx.mappings?.contacts })
+    }
   }
   await recordOnce(deps.repository, companyId, runId, { portal_id: portalId, object_type: data.objectType,
     source_id: data.sourceId, outcome: ctx.mode === 'dry_run' ? 'dry_run' : 'conflict',
@@ -172,20 +180,12 @@ async function resolveOrganization(deps, ctx, source) {
       outcome: 'dry_run', sanitized_details: { proposedAction: 'create_organization', organizationTypeId: String(orgTypeId) } })
     return { id: sourceId, action: 'conflict', outcome: 'safe_to_create', reason: 'dry_run_preview', organizationTypeId: String(orgTypeId) }
   }
-  const fields = sourceFields(source)
-  const phone = text(fields.phone) ? normalizePhone(fields.phone) : null
-  const created = await deps.albi.createOrganization({ name: text(fields.name), organizationTypeIds: [orgTypeId],
-    ...(phone ? { phoneNumber: phone.writable } : {}) })
-  const targetId = idOf(created)
-  if (!targetId) throw new Error('Albi organization create returned no ID')
-  const saved = await deps.repository.saveMapping(companyId, 'organization', { portal_id: portalId, hubspot_id: sourceId,
-    albi_organization_id: targetId, match_method: 'created' })
-  mappings.organizations.push(saved)
-  indexes.organizations.push({ id: targetId, name: text(fields.name), phoneNumber: phone?.writable ?? null,
-    organizationTypeIds: [String(orgTypeId)] })
-  await recordOnce(deps.repository, companyId, runId, { portal_id: portalId, object_type: 'companies', source_id: sourceId,
-    albi_target_type: 'organization', albi_target_id: targetId, outcome: 'created', sanitized_details: {} })
-  return { id: sourceId, action: 'link', outcome: 'safe_to_link', targetId, organizationTypeId: String(orgTypeId) }
+  // Live sync never creates Albi records: a new organization waits for a reviewer in the live review queue.
+  // outcome stays safe_to_create so a contact behind it is evaluated (and held) the same way as in the dry run.
+  await conflict(deps, ctx, { objectType: 'companies', sourceId, type: 'identity', reason: 'new_record_needs_review',
+    source, candidates: [], evidence: evaluation.evidence, proposedChanges: evaluation.proposedChanges })
+  return { id: sourceId, action: 'conflict', outcome: 'safe_to_create', reason: 'new_record_needs_review',
+    organizationTypeId: String(orgTypeId) }
 }
 
 async function resolveContact(deps, ctx, source, organization, associatedCompanyIds = [], organizationChoice = null, availableCompanies = []) {
@@ -214,7 +214,6 @@ async function resolveContact(deps, ctx, source, organization, associatedCompany
         ...(ctx.mode === 'dry_run' ? { proposedAction: 'link_contact' } : {}) } })
     return { id: sourceId, action: 'link', targetId }
   }
-  const fields = sourceFields(source)
   const type = resolveContactType({ mappings: mappings.options,
     inheritFromOrganization: true, organizationTypeId: organization?.organizationTypeId })
   if (ctx.mode === 'dry_run') {
@@ -222,20 +221,10 @@ async function resolveContact(deps, ctx, source, organization, associatedCompany
       outcome: 'dry_run', sanitized_details: { proposedAction: 'create_contact', contactTypeId: type.contactTypeId } })
     return { id: sourceId, action: 'conflict', reason: 'dry_run_preview' }
   }
-  const phone = text(fields.phone) ? normalizePhone(fields.phone) : null
-  const created = await deps.albi.createContact({ firstName: text(fields.firstname), lastName: text(fields.lastname),
-    contactTypeIds: [type.contactTypeId], ...(organization?.targetId ? { organizationId: organization.targetId } : {}),
-    ...(text(fields.email) ? { email: text(fields.email) } : {}), ...(phone ? { phoneNumber: phone.writable } : {}) })
-  const targetId = idOf(created)
-  if (!targetId) throw new Error('Albi contact create returned no ID')
-  const saved = await deps.repository.saveMapping(companyId, 'contact', { portal_id: portalId, hubspot_id: sourceId,
-    albi_contact_id: targetId, match_method: 'created' })
-  mappings.contacts.push(saved)
-  indexes.contacts.push({ id: targetId, firstName: text(fields.firstname), lastName: text(fields.lastname), email: text(fields.email),
-    phoneNumber: text(fields.phone), organizationId: organization?.targetId ?? null })
-  await recordOnce(deps.repository, companyId, runId, { portal_id: portalId, object_type: 'contacts', source_id: sourceId,
-    albi_target_type: 'contact', albi_target_id: targetId, outcome: 'created', sanitized_details: {} })
-  return { id: sourceId, action: 'link', targetId }
+  // Live sync never creates Albi records: a new contact waits for a reviewer in the live review queue.
+  await conflict(deps, ctx, { objectType: 'contacts', sourceId, type: 'identity', reason: 'new_record_needs_review',
+    source, candidates: [], evidence: evaluation.evidence, proposedChanges: evaluation.proposedChanges })
+  return { id: sourceId, action: 'conflict', reason: 'new_record_needs_review' }
 }
 
 async function processActivity(deps, ctx, activity, deadline) {

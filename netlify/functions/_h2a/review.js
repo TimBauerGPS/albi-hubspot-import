@@ -27,7 +27,7 @@ const EVIDENCE = frozenSet(['existing_mapping', 'email', 'phone', 'mobilePhone',
 export const REVIEW_REASONS = frozenSet(Object.keys(H2A_REVIEW_REASON_CATALOG))
 export const REVIEW_CONFLICT_TYPES = frozenSet([
   'organization_match', 'organization_fields', 'organization_phone', 'contact_match', 'contact_fields',
-  'contact_phone', 'configuration', 'association', 'missing_source', 'activity_target',
+  'contact_phone', 'configuration', 'association', 'missing_source', 'activity_target', 'identity',
 ])
 
 const SHARED_FIELDS = {

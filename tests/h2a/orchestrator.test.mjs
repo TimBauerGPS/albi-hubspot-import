@@ -232,7 +232,7 @@ function liveFixture({ contactIds = ['10'], companyIds = ['20'], activities = [{
     { mapping_kind: 'default_organization_type', source_key: 'default', albi_id: '2', confirmed_at: '2026-10-01T00:00:00Z' },
     { mapping_kind: 'activity_type', source_key: 'calls', albi_id: '3', confirmed_at: '2026-10-01T00:00:00Z' },
   ] }
-  const deliveries = new Map()
+  const deliveries = new Map(), conflicts = [], liveReviews = [], liveLinks = []
   const repository = {
     claimLease: async () => true, releaseLease: async () => { events.push('release') }, heartbeatLease: async () => true,
     getConfig: async () => ({ state: 'live', portal_id: '123', selected_start_date: '2026-10-01', preflight_status: 'valid' }),
@@ -248,7 +248,30 @@ function liveFixture({ contactIds = ['10'], companyIds = ['20'], activities = [{
       events.push(`item:${row.outcome}`)
     },
     saveMapping: async (_company, kind, row) => { events.push(`mapping:${kind}`); return row },
-    recordConflict: async (_company, row) => { events.push(`conflict:${row.reason}`); return row },
+    recordConflict: async (_company, row) => {
+      events.push(`conflict:${row.reason}`)
+      const same = conflict => conflict.status === 'open' && ['portal_id', 'object_type', 'source_id', 'conflict_type', 'reason',
+        'activity_object_type', 'activity_id'].every(key => conflict[key] === row[key])
+      const existing = conflicts.find(same)
+      if (existing) return { ...existing, inserted: false }
+      const saved = { ...row, id: `conflict-${conflicts.length + 1}` }
+      conflicts.push(saved)
+      return { ...saved, inserted: true }
+    },
+    upsertLiveReview: async (_company, row) => {
+      const open = liveReviews.find(review => review.status === 'needs_review' && review.portal_id === row.portal_id &&
+        review.object_type === row.object_type && review.source_id === row.source_id)
+      if (open) { Object.assign(open, { ...row, run_id: open.run_id }); return { id: open.id, inserted: false } }
+      const saved = { ...row, id: `review-${liveReviews.length + 1}`, status: 'needs_review', review_kind: 'live' }
+      liveReviews.push(saved)
+      events.push(`review:${row.object_type}:${row.reason}`)
+      return { id: saved.id, inserted: true }
+    },
+    linkLiveReviewConflict: async (_company, reviewId, conflictId) => {
+      if (liveLinks.some(link => link.conflictId === conflictId)) return false
+      liveLinks.push({ reviewId, conflictId })
+      return true
+    },
     totals: (_company, runId, mode) => totalsRepository.totals('c1', runId, mode),
     finishRun: async (_company, runId, status, totals) => { persistedRuns.push({ id: runId, company_id: 'c1', runId, status, totals,
       mode: 'dry_run', sample_limit_per_type: null,
@@ -281,17 +304,88 @@ function liveFixture({ contactIds = ['10'], companyIds = ['20'], activities = [{
     createContact: async () => { events.push('create:contact'); return { id: '200' } },
     createActivity: async () => { events.push('create:activity'); return { id: '300' } },
   }
-  return { repository, hubspot, albi, events, items, durableItems, cursors, mappings, persistedRuns, runCheckpoints }
+  return { repository, hubspot, albi, events, items, durableItems, cursors, mappings, persistedRuns, runCheckpoints,
+    conflicts, liveReviews, liveLinks }
 }
 
-test('live sync creates organization before contact and persists delivery before cursor', async () => {
-  const deps = liveFixture()
+// Albi already holds the HubSpot company and contact, so live sync links them and delivers.
+const existingAlbi = () => ({
+  albiOrganizations: [{ id: '100', name: 'Company20', phoneNumber: '415-555-0123', organizationTypeIds: ['2'] }],
+  albiContacts: [{ id: '200', firstName: 'First10', lastName: 'Last10', email: '10@example.com', organizationId: '100' }],
+})
+// The default fixture echoes every association row for every lookup; this one keeps contact -> company links exact.
+const exactAssociations = (deps, contactIds = ['10'], companyIds = ['20']) => {
+  deps.hubspot.getAssociations = async ({ objectType, objectIds }) => objectType === 'contacts'
+    ? objectIds.map(id => ({ fromId: id, toObjectType: 'companies', toIds: companyIds }))
+    : [{ toObjectType: 'contacts', toIds: contactIds }, { toObjectType: 'companies', toIds: companyIds }]
+  return deps
+}
+const throwingCreates = deps => {
+  deps.albi.createContact = async () => { throw Error('live sync must never create an Albi contact') }
+  deps.albi.createOrganization = async () => { throw Error('live sync must never create an Albi organization') }
+  return deps
+}
+
+test('live sync links existing records and persists delivery before cursor', async () => {
+  const deps = exactAssociations(throwingCreates(liveFixture(existingAlbi())))
   const result = await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
   assert.equal(result.status, 'completed')
-  assert.ok(deps.events.indexOf('create:organization') < deps.events.indexOf('create:contact'))
-  assert.ok(deps.events.indexOf('create:contact') < deps.events.indexOf('create:activity'))
+  assert.ok(deps.events.indexOf('mapping:organization') < deps.events.indexOf('mapping:contact'))
+  assert.ok(deps.events.indexOf('mapping:contact') < deps.events.indexOf('create:activity'))
   assert.equal(deps.items.filter(item => item.outcome === 'delivered').length, 1)
   assert.deepEqual(deps.cursors.find(row => row.type === 'calls')?.cursor, { timestamp: '2026-10-02T12:00:00.000Z', objectId: '50' })
+})
+
+test('live sync never calls albi.createContact or albi.createOrganization', async () => {
+  const deps = exactAssociations(throwingCreates(liveFixture()))
+  const result = await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
+  assert.equal(result.status, 'partially_failed')
+  assert.ok(!deps.items.some(item => item.outcome === 'failed'), 'no create was attempted, so nothing failed')
+  assert.ok(!deps.items.some(item => item.outcome === 'created'))
+  assert.ok(!deps.events.includes('create:activity'))
+  assert.equal(deps.cursors.length, 0)
+})
+
+test('a new live contact is held as new_record_needs_review with a live review row', async () => {
+  const deps = exactAssociations(throwingCreates(liveFixture({ companyIds: [] })), ['10'], [])
+  const result = await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
+  assert.equal(result.status, 'partially_failed')
+  const conflict = deps.conflicts.find(row => row.object_type === 'contacts')
+  assert.equal(conflict.reason, 'new_record_needs_review')
+  assert.equal(conflict.conflict_type, 'identity')
+  assert.deepEqual(conflict.candidate_snapshots, [])
+  assert.equal(deps.liveReviews.length, 1)
+  const review = deps.liveReviews[0]
+  assert.deepEqual([review.object_type, review.source_id, review.reason, review.conflict_type, review.run_id],
+    ['contacts', '10', 'new_record_needs_review', 'identity', 'run1'])
+  assert.equal(review.source_snapshot.email, '10@example.com')
+  assert.equal(review.triage_bucket, 'decision')
+  assert.deepEqual(deps.liveLinks, [{ reviewId: review.id, conflictId: conflict.id }])
+  const item = deps.items.find(row => row.object_type === 'contacts')
+  assert.equal(item.outcome, 'conflict')
+  assert.equal(item.sanitized_details.reason, 'new_record_needs_review')
+  assert.ok(deps.items.some(row => row.object_type === 'calls' && row.outcome === 'conflict'), 'the activity waits on its contact')
+  assert.ok(!deps.items.some(row => row.object_type === 'calls' && row.outcome === 'delivered'))
+  assert.equal(deps.cursors.length, 0)
+})
+
+test('a new contact behind a new organization is held, and the organization is held too', async () => {
+  const deps = exactAssociations(throwingCreates(liveFixture()))
+  await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
+  assert.deepEqual(deps.liveReviews.map(review => [review.object_type, review.source_id, review.reason]),
+    [['companies', '20', 'new_record_needs_review'], ['contacts', '10', 'new_record_needs_review']])
+  assert.equal(deps.liveLinks.length, 2)
+  assert.deepEqual(deps.items.filter(item => ['companies', 'contacts'].includes(item.object_type)).map(item => [item.object_type, item.outcome]),
+    [['companies', 'conflict'], ['contacts', 'conflict']])
+  assert.ok(!deps.events.some(event => event.startsWith('mapping:')))
+  // A second activity for the same records links its own conflicts to the same open rows.
+  const again = exactAssociations(throwingCreates(liveFixture({ activities: [
+    { id: '50', occurredAt: '2026-10-02T12:00:00Z', objectType: 'calls', properties: { hs_timestamp: '2026-10-02T12:00:00Z' } },
+    { id: '51', occurredAt: '2026-10-02T12:01:00Z', objectType: 'calls', properties: { hs_timestamp: '2026-10-02T12:01:00Z' } },
+  ] })))
+  await runCompanySync(again, { companyId: 'c1', mode: 'live', trigger: 'manual' })
+  assert.equal(again.liveReviews.length, 2)
+  assert.equal(again.liveLinks.filter(link => link.reviewId === again.liveReviews[1].id).length, 2)
 })
 
 test('missing name leaves a review conflict and does not create a contact', async () => {
@@ -304,19 +398,8 @@ test('missing name leaves a review conflict and does not create a contact', asyn
   assert.equal(deps.cursors.length, 0)
 })
 
-test('first-use create scope denial fails the item and holds the checkpoint', async () => {
-  const deps = liveFixture({ companyIds: [] })
-  deps.albi.createContact = async () => {
-    throw new ApiError('permission', { operation: 'createContact', status: 403, requiredScope: 'contacts:create' })
-  }
-  const result = await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
-  assert.equal(result.status, 'partially_failed')
-  assert.equal(deps.cursors.length, 0)
-  assert.ok(deps.items.some(item => item.outcome === 'failed' && item.sanitized_details.requiredScope === 'contacts:create'))
-})
-
 test('activity create scope denial keeps delivery disposition and names the required scope', async () => {
-  const deps = liveFixture()
+  const deps = exactAssociations(liveFixture(existingAlbi()))
   deps.albi.createActivity = async () => {
     throw new ApiError('permission', { operation: 'createActivity', status: 403, requiredScope: 'activities:create' })
   }
@@ -428,18 +511,8 @@ test('dry run evaluates associations and proposed creations without provider wri
   assert.equal(deps.cursors.length, 0)
 })
 
-test('new records write US phone in Albi format', async () => {
-  const deps = liveFixture()
-  let contactPayload, organizationPayload
-  deps.albi.createOrganization = async payload => { organizationPayload = payload; return { id: '100' } }
-  deps.albi.createContact = async payload => { contactPayload = payload; return { id: '200' } }
-  await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
-  assert.equal(organizationPayload.phoneNumber, '415-555-0123')
-  assert.equal(contactPayload.phoneNumber, undefined)
-})
-
 test('targeted conflict resume loads and processes only its persisted activity without moving cursors', async () => {
-  const deps = liveFixture()
+  const deps = exactAssociations(liveFixture(existingAlbi()))
   const calls = []
   const intent = { id: 'resume-1', company_id: 'c1', status: 'pending', resolution_action: 'link_existing',
     source_object_type: 'contacts', source_id: '10', activity_object_type: 'calls', activity_id: '50' }
@@ -470,7 +543,7 @@ test('reviewer skip remains terminal in later broad cursor overlap', async () =>
 })
 
 test('same-timestamp page boundary does not advance cursor before next page is durable', async () => {
-  const deps = liveFixture()
+  const deps = exactAssociations(liveFixture(existingAlbi()))
   let calls = 0
   deps.hubspot.listActivities = async ({ objectType }) => {
     if (objectType !== 'calls') return { records: [], after: null }
@@ -629,6 +702,19 @@ test('backfill divides a seeded range into Pacific day reads across spring DST',
   assert.deepEqual(saved.at(-1), { id: 'window1', patch: { status: 'completed', run_id: 'run1' } })
 })
 
+test('backfill also never auto-creates and holds new records as live review rows', async () => {
+  const deps = exactAssociations(throwingCreates(liveFixture()))
+  deps.repository.listBackfillWindows = async (_company, objectType) => objectType === 'calls' ? [{
+    id: 'window1', object_type: 'calls', start_at: '2026-10-02T07:00:00.000Z', end_at: '2026-10-03T07:00:00.000Z',
+    status: 'pending', checkpoint_timestamp: null, checkpoint_object_id: null,
+  }] : []
+  deps.repository.saveBackfillWindow = async () => {}
+  await runCompanySync(deps, { companyId: 'c1', mode: 'backfill', trigger: 'manual' })
+  assert.deepEqual(deps.liveReviews.map(review => [review.object_type, review.reason]),
+    [['companies', 'new_record_needs_review'], ['contacts', 'new_record_needs_review']])
+  assert.ok(!deps.items.some(item => item.outcome === 'created' || item.outcome === 'failed'))
+})
+
 test('an already delivered identity stays terminal when the source body changes', async () => {
   const deps = liveFixture({ companyIds: [], albiContacts: [{ id: '200', firstName: 'First10', lastName: 'Last10', email: '10@example.com' }] })
   await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
@@ -674,15 +760,15 @@ test('run error summary cannot persist an arbitrary provider code or secret', as
 })
 
 test('contact association chooses its own organization when activity has several companies', async () => {
-  const deps = liveFixture({ companyIds: ['20', '21'] })
-  let nextId = 100, contactPayload
-  deps.albi.createOrganization = async () => ({ id: String(nextId++) })
-  deps.albi.createContact = async payload => { contactPayload = payload; return { id: '200' } }
+  const deps = throwingCreates(liveFixture({ companyIds: ['20', '21'] }))
   deps.hubspot.getAssociations = async ({ objectType }) => objectType === 'contacts'
     ? [{ fromId: '10', toObjectType: 'companies', toIds: ['20'] }]
     : [{ toObjectType: 'contacts', toIds: ['10'] }, { toObjectType: 'companies', toIds: ['20', '21'] }]
   await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
-  assert.equal(contactPayload.organizationId, '100')
+  // Its own single organization settles the context, so the contact waits as a new record rather than an ambiguity.
+  assert.equal(deps.events.includes('conflict:multiple_associated_organizations'), false)
+  assert.deepEqual(deps.liveReviews.filter(review => review.object_type === 'contacts').map(review => review.reason),
+    ['new_record_needs_review'])
 })
 
 function reviewedSyncFixture() {
@@ -698,7 +784,7 @@ function reviewedSyncFixture() {
   deps.hubspot.getAssociations = async ({ objectType }) => objectType === 'contacts'
     ? [{ fromId: '10', toObjectType: 'companies', toIds: deps.directIds }]
     : [{ toObjectType: 'contacts', toIds: ['10'] }, { toObjectType: 'companies', toIds: ['20', '21'] }]
-  deps.albi.createContact = async payload => { deps.contactPayload = payload; return { id: '200' } }
+  deps.albi.createContact = async payload => { deps.contactPayload = payload; throw Error('live sync must never create an Albi contact') }
   for (const object of [deps.hubspot, deps.albi]) for (const name of ['removeAssociation', 'removeContactCompanyAssociation', 'updateContact', 'associateContact']) {
     Object.defineProperty(object, name, { get() { throw Error(`Forbidden capability: ${name}`) } })
   }
@@ -712,7 +798,10 @@ test('broad sync uses tenant-scoped reviewed context, preserves associations, an
     { id: '51', occurredAt: '2026-10-02T12:01:00Z', objectType: 'calls', properties: {} },
   ] : [], after: null })
   await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
-  assert.equal(deps.contactPayload?.organizationId, '101')
+  // The reviewed choice settles the organization context: the contact reaches the new-record hold.
+  assert.equal(deps.contactPayload, undefined)
+  assert.deepEqual(deps.liveReviews.map(review => [review.object_type, review.source_id, review.reason]),
+    [['contacts', '10', 'new_record_needs_review']])
   assert.deepEqual(deps.directIds, ['20', '21'])
   assert.deepEqual(deps.choiceReads, [['c1', '123', '10']])
   assert.equal(deps.events.includes('conflict:multiple_associated_organizations'), false)
@@ -744,14 +833,13 @@ test('broad sync permits an explicitly added company only after a new direct ass
     { id: '50', occurredAt: '2026-10-02T12:00:00Z', objectType: 'calls', properties: {} },
     { id: '51', occurredAt: '2026-10-02T12:01:00Z', objectType: 'calls', properties: {} },
   ] : [], after: null })
-  deps.albi.createContact = async payload => {
-    assert.equal(associationReads, 2)
-    deps.contactPayload = payload
-    return { id: '200' }
-  }
   await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
   assert.ok(deps.events.includes('conflict:multiple_associated_organizations'))
-  assert.equal(deps.contactPayload?.organizationId, '101')
+  // Only the second, fresh association read permits the choice; the contact then waits as a new record.
+  assert.deepEqual(deps.conflicts.filter(row => row.object_type === 'contacts').map(row => [row.activity_id, row.reason]),
+    [['50', 'multiple_associated_organizations'], ['51', 'new_record_needs_review']])
+  assert.equal(associationReads, 2)
+  assert.equal(deps.contactPayload, undefined)
   assert.deepEqual(deps.choiceReads, [['c1', '123', '10']])
 })
 
@@ -862,16 +950,6 @@ test('organization conflict holds the activity checkpoint while safe contact sti
   assert.equal(result.status, 'partially_failed')
   assert.equal(deps.items.filter(item => item.outcome === 'delivered').length, 1)
   assert.equal(deps.cursors.length, 0)
-})
-
-test('new organization confirmed type inheritance selects contact type before the fallback', async () => {
-  const deps = liveFixture()
-  deps.mappings.options.push({ mapping_kind: 'organization_to_contact_type', source_key: '2', albi_id: '9',
-    confirmed_at: '2026-10-01T00:00:00Z' })
-  let contactPayload
-  deps.albi.createContact = async payload => { contactPayload = payload; return { id: '200' } }
-  await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
-  assert.deepEqual(contactPayload.contactTypeIds, ['9'])
 })
 
 test('dry preview shows inherited contact type without creating records', async () => {
@@ -1309,15 +1387,13 @@ test('colliding capped target prefixes fail closed instead of linking or publish
   }
 })
 
-test('safe creates use the same boolean-confirmed original organization type accepted by evaluation', async () => {
-  const deps = liveFixture()
+test('a boolean-confirmed organization type lets a new live organization reach the new-record hold', async () => {
+  const deps = exactAssociations(throwingCreates(liveFixture({ contactIds: [] })), [], ['20'])
   deps.mappings.options = deps.mappings.options.map(row => row.mapping_kind === 'default_organization_type'
     ? { mapping_kind: row.mapping_kind, source_key: 'default', albi_id: '2', confirmed: true } : row)
-  let organizationPayload
-  deps.albi.createOrganization = async payload => { organizationPayload = payload; return { id: '100' } }
-  const result = await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
-  assert.equal(result.status, 'completed')
-  assert.deepEqual(organizationPayload.organizationTypeIds, ['2'])
+  await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
+  assert.equal(deps.events.includes('conflict:organization_type_confirmation_required'), false)
+  assert.deepEqual(deps.liveReviews.map(review => [review.object_type, review.reason]), [['companies', 'new_record_needs_review']])
 })
 
 test('sample missing HubSpot organization captures its underlying identity even without contacts', async () => {
@@ -1372,7 +1448,7 @@ test('existing mapped long targets remain full IDs even when absent from the pro
 })
 
 test('a different portal mapping with the same source ID does not change safe current-portal linking', async () => {
-  const deps = liveFixture({ companyIds: [], albiContacts: [{ id: '200', firstName: 'First10', lastName: 'Last10', email: '10@example.com' }] })
+  const deps = exactAssociations(liveFixture({ companyIds: [], albiContacts: [{ id: '200', firstName: 'First10', lastName: 'Last10', email: '10@example.com' }] }), ['10'], [])
   deps.mappings.contacts.push({ portal_id: '999', hubspot_id: '10', albi_contact_id: 'other-portal-target' })
   const result = await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
   assert.equal(result.status, 'completed')

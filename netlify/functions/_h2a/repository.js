@@ -216,6 +216,24 @@ function reviewEventPayload(companyId, reviewId, { eventType, reason = null, act
     sanitized_details: projectReviewEvent({ sanitized_details: details }).details, created_at: now }
 }
 
+function safeTriageDetails(details) {
+  if (!details || typeof details !== 'object' || Array.isArray(details)) throw new TypeError('Invalid triage details')
+  const safe = {}
+  if (typeof details.blockedReason === 'string') safe.blockedReason = details.blockedReason.slice(0, 80)
+  if (details.merged === true) safe.merged = true
+  if (['link', 'create'].includes(details.quickKind)) safe.quickKind = details.quickKind
+  return safe
+}
+
+// Key-order-independent JSON, so jsonb read back from Postgres compares equal to the payload.
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`
+  }
+  return JSON.stringify(value ?? null)
+}
+
 function checked(result) {
   if (result?.error) throw result.error
   return result?.data
@@ -353,11 +371,7 @@ export function createH2ARepository(supabase) {
       requireReviewIdentity(companyId)
       requireReviewIdentity(reviewId)
       requireReviewValue(bucket, new Set(TRIAGE_BUCKETS), 'bucket')
-      if (!details || typeof details !== 'object' || Array.isArray(details)) throw new TypeError('Invalid triage details')
-      const safe = {}
-      if (typeof details.blockedReason === 'string') safe.blockedReason = details.blockedReason.slice(0, 80)
-      if (details.merged === true) safe.merged = true
-      if (['link', 'create'].includes(details.quickKind)) safe.quickKind = details.quickKind
+      const safe = safeTriageDetails(details)
       checked(await supabase.from('h2a_dry_run_reviews').update({ triage_bucket: bucket, triage_details: safe })
         .eq('company_id', companyId).eq('id', reviewId))
     },
@@ -411,6 +425,68 @@ export function createH2ARepository(supabase) {
         }
       }
       return review
+    },
+    async getReview(companyId, reviewId) {
+      requireReviewIdentity(companyId)
+      requireReviewIdentity(reviewId)
+      return checked(await supabase.from('h2a_dry_run_reviews').select(REVIEW_COLUMNS)
+        .eq('company_id', companyId).eq('id', reviewId).maybeSingle())
+    },
+    // Upserts on the live partial key (one open live row per source). Supabase cannot target a
+    // partial index in onConflict, so this is select-then-insert with a unique-violation retry.
+    // run_id keeps the run that first captured the row; later captures only refresh evidence and triage.
+    async upsertLiveReview(companyId, input) {
+      for (const value of [companyId, input.run_id, input.portal_id, input.source_id]) requireReviewIdentity(value)
+      requireReviewValue(input.object_type, REVIEW_OBJECT_TYPES, 'object type')
+      assertReviewClassification(input.reason, input.conflict_type)
+      requireReviewValue(input.triage_bucket, new Set(TRIAGE_BUCKETS), 'bucket')
+      const identity = { portal_id: input.portal_id, object_type: input.object_type, source_id: input.source_id }
+      const evidence = { reason: input.reason, conflict_type: input.conflict_type,
+        ...reviewEvidencePayload(input, input.object_type), triage_bucket: input.triage_bucket,
+        triage_details: safeTriageDetails(input.triage_details) }
+      const openLive = () => reviewSourceIdentity(supabase.from('h2a_dry_run_reviews').select(REVIEW_COLUMNS)
+        .eq('company_id', companyId), identity).eq('review_kind', 'live').eq('status', 'needs_review')
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const existing = checked(await openLive().maybeSingle())
+        if (existing?.id) {
+          if (Object.keys(evidence).every(key => stableJson(existing[key]) === stableJson(evidence[key]))) {
+            return { id: existing.id, inserted: false }
+          }
+          const refreshed = checked(await supabase.from('h2a_dry_run_reviews')
+            .update({ ...evidence, updated_at: new Date().toISOString() })
+            .eq('company_id', companyId).eq('id', existing.id).eq('review_kind', 'live').eq('status', 'needs_review')
+            .select(REVIEW_COLUMNS).maybeSingle())
+          if (refreshed?.id) return { id: refreshed.id, inserted: false }
+          continue // Closed between read and refresh: capture again.
+        }
+        const inserted = await supabase.from('h2a_dry_run_reviews').insert({ company_id: companyId, run_id: input.run_id,
+          ...identity, ...evidence, status: 'needs_review', review_kind: 'live' }).select(REVIEW_COLUMNS).single()
+        if (!inserted?.error) {
+          const row = checked(inserted)
+          if (!row?.id) throw new Error('Invalid live review capture response')
+          return { id: row.id, inserted: true }
+        }
+        if (inserted.error.code !== '23505') throw inserted.error
+        // The per-run key also covers live rows. A row this run already captured and that has
+        // since closed stays closed: report it as handled rather than reopening it.
+        const sameRun = checked(await reviewSourceIdentity(reviewQuery(supabase, companyId, input.run_id), identity).maybeSingle())
+        if (sameRun?.id && sameRun.status !== 'needs_review') {
+          if (sameRun.review_kind !== 'live') throw inserted.error
+          return { id: sameRun.id, inserted: false, closed: true }
+        }
+        // Otherwise a concurrent capture won the live key; refresh its row on the next pass.
+      }
+      throw new Error('Live review capture did not settle')
+    },
+    async linkLiveReviewConflict(companyId, reviewId, conflictId) {
+      for (const value of [companyId, reviewId, conflictId]) requireReviewIdentity(value)
+      const result = await supabase.from('h2a_live_review_conflicts')
+        .insert({ company_id: companyId, review_id: reviewId, conflict_id: conflictId })
+      if (result?.error) {
+        if (result.error.code === '23505') return false
+        throw result.error
+      }
+      return true
     },
     async applyDryRunRecheck(companyId, input) {
       requireReviewIdentity(companyId)
