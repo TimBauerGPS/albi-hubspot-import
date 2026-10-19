@@ -7,6 +7,7 @@ const reason = (code, label, category, actions = [], guidance = GENERIC_GUIDANCE
   Object.freeze({ code, label, category, actions: Object.freeze(actions), guidance })
 
 export const H2A_REVIEW_REASON_CATALOG = Object.freeze({
+  new_record_needs_review: reason("new_record_needs_review", "New in HubSpot, not in Albi yet", "identity", ["create_albi","link_existing"], "Choose a referral source and create it in Albi, or link it if it already exists."),
   existing_mapping: reason("existing_mapping", "Already mapped", "identity", ["link_existing","create_albi","force_create_albi"], "Confirm the existing mapping points to the intended Albi record."),
   unique_exact_match: reason("unique_exact_match", "Exact match found", "identity", ["link_existing","create_albi","force_create_albi"], "Confirm the exact match and correct stale source or mapping data if needed."),
   unique_exact_domain: reason("unique_exact_domain", "Organization domain match", "identity", ["link_existing","create_albi","force_create_albi"], "Confirm the organization domain belongs to the intended Albi organization."),

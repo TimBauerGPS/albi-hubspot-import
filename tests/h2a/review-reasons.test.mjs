@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { REVIEW_REASONS } from '../../netlify/functions/_h2a/review.js'
 import { H2A_REVIEW_REASON_CATALOG, getH2AReviewActions, getH2AReviewReason, listH2AReviewReasonOptions } from '../../shared/h2aReviewReasons.js'
+import { H2A_BLOCKED_REASONS, blockedReasonCopy } from '../../shared/h2aBlockedReasons.js'
 import { buildAlbiRecordUrl, buildHubSpotRecordUrl } from '../../shared/h2aProviderLinks.js'
 
 test('stored review reasons have safe shared presentation and action metadata', () => {
@@ -58,4 +59,25 @@ test('a contact field difference can also correct the organization context; noth
   assert.deepEqual(getH2AReviewActions('organization_unresolved', 'contacts'), ['choose_organization'])
   assert.deepEqual(getH2AReviewActions('secret', 'contacts'), [])
   assert.ok(Object.isFrozen(getH2AReviewActions('nonblank_field_difference', 'contacts')))
+})
+
+test('new_record_needs_review is a create-capable identity reason', () => {
+  const entry = getH2AReviewReason('new_record_needs_review')
+  assert.equal(entry.label, 'New in HubSpot, not in Albi yet')
+  assert.equal(entry.category, 'identity')
+  assert.equal(entry.guidance, 'Choose a referral source and create it in Albi, or link it if it already exists.')
+  assert.deepEqual(getH2AReviewActions('new_record_needs_review'), ['create_albi', 'link_existing'])
+  assert.ok(getH2AReviewActions('new_record_needs_review').includes('create_albi'))
+})
+
+test('blockedReasonCopy returns copy for every blocked code and null otherwise', () => {
+  const codes = ['referrer_type_missing', 'active_status_missing', 'owner_not_found', 'salesperson_not_found', 'source_already_mapped', 'multiple_organizations', 'organization_not_synced']
+  assert.deepEqual(Object.keys(H2A_BLOCKED_REASONS).sort(), [...codes].sort())
+  assert.ok(Object.isFrozen(H2A_BLOCKED_REASONS))
+  for (const code of codes) assert.ok(blockedReasonCopy(code))
+  assert.equal(blockedReasonCopy('organization_not_synced'), 'This contact’s HubSpot organization is not in Albi yet. Create or link the organization first.')
+  assert.equal(blockedReasonCopy('referrer_type_missing'), 'Albi has no “Referrer” relationship type. Add it in Albi, then recheck this record.')
+  assert.equal(blockedReasonCopy('nope'), null)
+  assert.equal(blockedReasonCopy('__proto__'), null)
+  assert.equal(blockedReasonCopy(undefined), null)
 })
