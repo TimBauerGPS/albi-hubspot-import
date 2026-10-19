@@ -264,3 +264,18 @@ test('separate-record creation names why it is unavailable for a mapped source o
     reads: { ...reads, hubspotRead: { ...reads.hubspotRead, getAssociations: async () => [{ fromId: '123', toObjectType: 'companies', toIds: ['777', '778'] }] } } })
   assert.deepEqual(several.forceCreateReadiness, { eligible: false, ready: false, blockedReason: 'multiple_organizations' })
 })
+
+import { loadOrgFirstCreate } from '../../netlify/functions/_h2a/reviewResolutionOptions.js'
+test('orgFirstCreate is eligible only for a blocked contact whose organization is ready with no candidates', async () => {
+  const readiness = { ready: false, blockedReason: 'organization_not_synced', organization: { sourceId: '900', reviewId: null } }
+  const contact = { company_id: 'c', id: 'k', portal_id: '123', object_type: 'contacts', review_kind: 'live', candidate_snapshots: [] }
+  const org = { id: 'o', status: 'needs_review', object_type: 'companies', source_id: '900', candidate_snapshots: [], source_snapshot: { name: 'Acme' } }
+  const repository = { findOpenLiveReviewBySource: async () => org }
+  const load = async () => ({ createReadiness: { ready: true } })
+  assert.deepEqual(await loadOrgFirstCreate({ row: contact, readiness, repository, reads: {}, load }),
+    { eligible: true, organizationReviewId: 'o', organizationName: 'Acme' })
+  assert.deepEqual(await loadOrgFirstCreate({ row: contact, readiness, repository: { findOpenLiveReviewBySource: async () => null }, reads: {}, load }), { eligible: false })
+  assert.deepEqual(await loadOrgFirstCreate({ row: contact, readiness, repository, reads: {}, load: async () => ({ createReadiness: { ready: false } }) }), { eligible: false })
+  assert.deepEqual(await loadOrgFirstCreate({ row: contact, readiness: { ...readiness, blockedReason: 'x' }, repository, reads: {}, load }), { eligible: false })
+  assert.deepEqual(await loadOrgFirstCreate({ row: contact, readiness, repository: { findOpenLiveReviewBySource: async () => ({ ...org, candidate_snapshots: [{ id: '1' }] }) }, reads: {}, load }), { eligible: false })
+})

@@ -307,3 +307,32 @@ test('the write endpoint wires resume dispatch and live close capabilities into 
   assert.equal((await f.request({ ...input, action: 'skip_live' })).statusCode, 200)
   assert.equal(deps.dispatchResume, f.options.dispatchResume)
 })
+
+const orgReviewId = '00000000-0000-4000-8000-0000000000a1'
+const orgFirst = { companyId: 'company-a', op: 'create_with_organization', reviewId, expectedUpdatedAt: stamp, clientRequestId,
+  organizationReviewId: orgReviewId, organizationExpectedUpdatedAt: stamp, referralSourceId: '5' }
+
+test('create_with_organization runs the org-first service with one referral source and returns both steps', async () => {
+  const f = fixture(); let received
+  f.options.executeOrganizationFirst = async (deps, args) => { received = args; return { organization: { resolution: f.row }, contact: { resolution: f.row } } }
+  const result = await f.request(orgFirst)
+  assert.equal(result.statusCode, 200)
+  assert.deepEqual(received, { companyId: 'company-a', actorId, contactReviewId: reviewId, contactExpectedUpdatedAt: stamp,
+    organizationReviewId: orgReviewId, organizationExpectedUpdatedAt: stamp, referralSourceId: '5', clientRequestId })
+  const body = JSON.parse(result.body)
+  assert.equal(body.organization.resolution.id, resolutionId)
+  assert.equal(body.contact.resolution.id, resolutionId)
+})
+
+test('create_with_organization reports an organization failure without a contact and rejects bad input', async () => {
+  const f = fixture()
+  f.options.executeOrganizationFirst = async () => ({ organization: { error: new H2AReviewError(409, 'x') }, contact: null })
+  const failed = await f.request(orgFirst)
+  assert.equal(failed.statusCode, 409)
+  for (const bad of [{ ...orgFirst, referralSourceId: undefined }, { ...orgFirst, referralSourceId: 'abc' },
+    { ...orgFirst, organizationReviewId: 'nope' }, { ...orgFirst, organizationExpectedUpdatedAt: 'nope' }]) {
+    assert.equal((await fixture().request(bad)).statusCode, 400)
+  }
+  const member = fixture({ role: 'member' })
+  assert.equal((await member.request(orgFirst)).statusCode, 403)
+})

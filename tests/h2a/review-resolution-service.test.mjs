@@ -1,9 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { executeReviewResolution, reconcileReviewResolution, createReviewResolutionCapabilities,
+import { executeReviewResolution, executeOrganizationThenContactCreate, reconcileReviewResolution, createReviewResolutionCapabilities,
   createReviewReconciliationCapabilities } from '../../netlify/functions/_h2a/reviewResolutionService.js'
 import { recheckDryRunReview, createReviewRepositoryCapabilities } from '../../netlify/functions/_h2a/reviewService.js'
 import { ApiError } from '../../netlify/functions/_h2a/http.js'
+import { H2AReviewError as H2AReviewErrorForTest } from '../../netlify/functions/_h2a/reviewService.js'
 import { liveCloseStore } from './live-close-fixture.mjs'
 
 const stamp = '2026-10-13T12:00:00Z'
@@ -899,4 +900,100 @@ test('a live row closed by another path before the write is superseded, not link
   assert.equal(result.resolution.status, 'superseded')
   assert.deepEqual(f.mappings.contacts, [])
   assert.deepEqual(f.store.state.closeCalls, [])
+})
+
+// Org-first: two separately audited resolutions driven by one reviewer choice.
+const orgFirstIds = { contact: '00000000-0000-4000-8000-0000000000c1', organization: '00000000-0000-4000-8000-0000000000a1' }
+function orgFirstFixture({ kind = 'live', orgCandidates = [], orgReady = true, fail = null } = {}) {
+  const calls = [], mappings = { contacts: [], organizations: [], options: [] }, resolutions = new Map()
+  const rows = {
+    [orgFirstIds.contact]: { id: orgFirstIds.contact, review_kind: kind, object_type: 'contacts', source_id: '42', portal_id: '123',
+      status: 'needs_review', updated_at: stamp, candidate_snapshots: [], source_snapshot: {} },
+    [orgFirstIds.organization]: { id: orgFirstIds.organization, review_kind: kind, object_type: 'companies', source_id: '900', portal_id: '123',
+      status: 'needs_review', updated_at: stamp, candidate_snapshots: orgCandidates, source_snapshot: {} },
+  }
+  const f = { calls, mappings, resolutions, rows }
+  f.deps = {
+    repository: {
+      getConfig: async () => ({ portal_id: '123' }),
+      getReview: async (_company, id) => rows[id] ?? null,
+      getMappings: async () => mappings,
+      getCurrentReviewResolution: async (_company, reviewId) => resolutions.get(reviewId) ?? null,
+    },
+    getResolutionClients: async () => ({}),
+    loadResolutionOptions: async ({ row }) => row.object_type === 'contacts'
+      ? { createReadiness: mappings.organizations.length ? { ready: true }
+        : { ready: false, blockedReason: 'organization_not_synced', organization: { sourceId: '900', reviewId: orgFirstIds.organization } } }
+      : { createReadiness: { ready: orgReady, ...(orgReady ? { referralSources: [{ id: '5', label: 'Network' }] } : {}) } },
+    executeResolution: async (_deps, args) => {
+      const replay = [...resolutions.values()].find(item => item.client_request_id === args.clientRequestId)
+      if (replay) return { resolution: replay }
+      calls.push(['create', args.reviewId, args.clientRequestId, args.decision])
+      if (fail && args.reviewId === orgFirstIds.organization) throw fail
+      if (args.reviewId === orgFirstIds.contact) assert.equal(mappings.organizations.length, 1, 'organization must already be mapped')
+      if (args.reviewId === orgFirstIds.organization) mappings.organizations.push({ portal_id: '123', hubspot_id: '900', albi_organization_id: '777' })
+      const resolution = { id: `res-${args.reviewId}`, status: kind === 'live' ? 'completed' : 'ready_to_recheck',
+        client_request_id: args.clientRequestId, review_id: args.reviewId }
+      resolutions.set(args.reviewId, resolution)
+      return { resolution }
+    },
+  }
+  f.input = { companyId: 'tenant', actorId, contactReviewId: orgFirstIds.contact, contactExpectedUpdatedAt: stamp,
+    organizationReviewId: orgFirstIds.organization, organizationExpectedUpdatedAt: stamp, referralSourceId: '5',
+    clientRequestId: '00000000-0000-4000-8000-0000000000d1' }
+  return f
+}
+
+test('creates organization then contact against the new organization id', async () => {
+  for (const kind of ['live', 'sample']) {
+    const f = orgFirstFixture({ kind })
+    const result = await executeOrganizationThenContactCreate(f.deps, f.input)
+    assert.deepEqual(f.calls.map(call => [call[1], call[3]]), [
+      [orgFirstIds.organization, { action: 'create_albi', referralSourceId: '5' }],
+      [orgFirstIds.contact, { action: 'create_albi', referralSourceId: '5' }]])
+    assert.notEqual(f.calls[0][2], f.calls[1][2])
+    assert.match(f.calls[0][2], /^[0-9a-f-]{36}$/)
+    assert.equal(result.organization.resolution.review_id, orgFirstIds.organization)
+    assert.equal(result.contact.resolution.review_id, orgFirstIds.contact)
+  }
+})
+
+test('organization failure never attempts the contact', async () => {
+  const f = orgFirstFixture({ fail: new H2AReviewErrorForTest(409) })
+  const result = await executeOrganizationThenContactCreate(f.deps, f.input)
+  assert.equal(result.contact, null)
+  assert.equal(result.organization.error.statusCode, 409)
+  assert.deepEqual(f.calls.map(call => call[1]), [orgFirstIds.organization])
+  // A step that ends failed (no thrown error) also stops before the contact.
+  const g = orgFirstFixture(), run = g.deps.executeResolution
+  g.deps.executeResolution = async (deps, args) => {
+    const result = await run(deps, args)
+    if (args.reviewId === orgFirstIds.organization) { g.mappings.organizations.length = 0; result.resolution.status = 'failed' }
+    return result
+  }
+  const failed = await executeOrganizationThenContactCreate(g.deps, g.input)
+  assert.equal(failed.contact, null); assert.equal(failed.organization.resolution.status, 'failed')
+  assert.deepEqual(g.calls.map(call => call[1]), [orgFirstIds.organization])
+})
+
+test('replay with the same clientRequestId creates nothing twice', async () => {
+  const f = orgFirstFixture()
+  await executeOrganizationThenContactCreate(f.deps, f.input)
+  const replay = await executeOrganizationThenContactCreate(f.deps, f.input)
+  assert.equal(f.calls.length, 2)
+  assert.equal(replay.organization.resolution.review_id, orgFirstIds.organization)
+  assert.equal(replay.contact.resolution.review_id, orgFirstIds.contact)
+})
+
+test('ineligible when the organization has candidates', async () => {
+  for (const f of [orgFirstFixture({ orgCandidates: [{ id: '1' }] }), orgFirstFixture({ orgReady: false }),
+    orgFirstFixture({ kind: 'live' })]) {
+    if (f.rows[orgFirstIds.organization].review_kind === 'live' && !f.rows[orgFirstIds.organization].candidate_snapshots.length &&
+      f.deps.loadResolutionOptions) f.rows[orgFirstIds.contact].review_kind = 'sample' // mixed kinds
+    await assert.rejects(executeOrganizationThenContactCreate(f.deps, f.input), error => error.statusCode === 409)
+    assert.equal(f.calls.length, 0)
+  }
+  const unblocked = orgFirstFixture(); unblocked.mappings.organizations.push({ portal_id: '123', hubspot_id: '900', albi_organization_id: '1' })
+  await assert.rejects(executeOrganizationThenContactCreate(unblocked.deps, unblocked.input), error => error.statusCode === 409)
+  assert.equal(unblocked.calls.length, 0)
 })

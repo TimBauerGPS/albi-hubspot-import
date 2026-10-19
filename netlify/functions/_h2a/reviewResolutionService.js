@@ -1,5 +1,5 @@
 import { loadCreateDefaults } from './createDefaults.js'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { ApiError, isRecord, malformed } from './http.js'
 import { H2AReviewError, resolveReviewSample } from './reviewService.js'
@@ -11,6 +11,7 @@ import { refreshReviewTriage } from './triage.js'
 import { LIVE_CLOSE_FOR_ACTION, closeLiveReview } from './liveReview.js'
 import { decideContactMatch, decideOrganizationMatch, selectAllReviewCandidates } from './match.js'
 import { normalizePhone } from './normalize.js'
+import { loadReviewResolutionOptions } from './reviewResolutionOptions.js'
 import { H2A_REVIEW_ERROR_CATEGORIES, H2A_REVIEW_ERROR_CODES } from '../../../shared/h2aReviewReasons.js'
 
 const fail = (status, message) => { throw new H2AReviewError(status, message) }
@@ -672,4 +673,73 @@ export async function recordResolutionRecheckFailure(deps, { companyId, reviewId
   const status = claimed.execution_phase === 'applying' ? 'failed' : claimed.execution_phase
   return { resolution: rpc(await repository.finishReviewResolution(companyId, saved.id, owner,
     { actorId, status, eventType: 'failed', providerOutcomeCode: details.code, details })) }
+}
+
+// Each org-first step has its own request id so each is a separately audited, idempotent resolution.
+// The resolution store keys requests by uuid, so the `${clientRequestId}:org|contact` seed is hashed
+// into a deterministic uuid rather than stored as the literal suffixed string.
+export function orgFirstRequestId(clientRequestId, step) {
+  const bytes = createHash('sha1').update(`${clientRequestId}:${step}`).digest().subarray(0, 16)
+  bytes[6] = (bytes[6] & 0x0f) | 0x50
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  const hex = bytes.toString('hex')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
+
+const reviewKind = row => row?.review_kind === 'live' ? 'live' : 'sample'
+const NOT_ELIGIBLE = 'Creating with the organization is not available for this record.'
+
+// Server-side eligibility: the contact waits only on this organization, the organization has no
+// candidates and is itself ready to create, and both rows are the same kind in the same tenant.
+async function assertOrgFirstEligible(deps, input) {
+  const repository = deps.repository
+  const [contact, organization] = await Promise.all([repository.getReview(input.companyId, input.contactReviewId),
+    repository.getReview(input.companyId, input.organizationReviewId)])
+  const open = row => row?.status === 'needs_review' || row?.status === 'cleared' && row.recheck_outcome === 'safe_to_create'
+  if (!contact || !organization || contact.object_type !== 'contacts' || organization.object_type !== 'companies' ||
+    reviewKind(contact) !== reviewKind(organization) || contact.portal_id !== organization.portal_id ||
+    !open(contact) || !open(organization) ||
+    !Array.isArray(organization.candidate_snapshots) || organization.candidate_snapshots.length !== 0) fail(409, NOT_ELIGIBLE)
+  const config = await repository.getConfig(input.companyId)
+  if (!config?.portal_id || config.portal_id !== contact.portal_id) fail(409, NOT_ELIGIBLE)
+  const reads = deps.getResolutionClients ? await deps.getResolutionClients(input.companyId, config) : deps
+  const load = deps.loadResolutionOptions ?? loadReviewResolutionOptions
+  const [contactOptions, organizationOptions] = await Promise.all([
+    load({ row: { ...contact, company_id: input.companyId }, repository, reads }),
+    load({ row: { ...organization, company_id: input.companyId }, repository, reads })])
+  const blocked = contactOptions?.createReadiness
+  if (blocked?.blockedReason !== 'organization_not_synced' || blocked.organization?.sourceId !== organization.source_id ||
+    organizationOptions?.createReadiness?.ready !== true) fail(409, NOT_ELIGIBLE)
+}
+
+async function organizationMapped(deps, companyId, organizationReviewId) {
+  const organization = await deps.repository.getReview(companyId, organizationReviewId)
+  const mappings = await deps.repository.getMappings(companyId)
+  return Boolean(organization && (mappings?.organizations ?? []).some(item =>
+    item?.portal_id === organization.portal_id && item?.hubspot_id === organization.source_id))
+}
+
+// One reviewer choice, two audited creates: the organization first, then the contact against it.
+// The contact step only runs when the organization step ended with its mapping saved: `completed`
+// for live rows, `ready_to_recheck` (or `completed`) for sample rows.
+export async function executeOrganizationThenContactCreate(deps, input) {
+  const run = deps.executeResolution ?? executeReviewResolution
+  const organizationRequestId = orgFirstRequestId(input.clientRequestId, 'org')
+  const contactRequestId = orgFirstRequestId(input.clientRequestId, 'contact')
+  const decision = { action: 'create_albi', referralSourceId: input.referralSourceId }
+  // A replay already created the organization, so the contact is no longer waiting on it; the
+  // eligibility check applies to the first attempt only and the engine replays by request id.
+  const prior = await deps.repository.getCurrentReviewResolution(input.companyId, input.organizationReviewId)
+  if (prior?.client_request_id !== organizationRequestId) await assertOrgFirstEligible(deps, input)
+  let organization
+  try {
+    organization = await run(deps, { companyId: input.companyId, actorId: input.actorId, reviewId: input.organizationReviewId,
+      expectedUpdatedAt: input.organizationExpectedUpdatedAt, clientRequestId: organizationRequestId, decision })
+  } catch (error) { return { organization: { error }, contact: null } }
+  const status = organization?.resolution?.status
+  if (!['completed', 'ready_to_recheck'].includes(status) ||
+    !await organizationMapped(deps, input.companyId, input.organizationReviewId)) return { organization, contact: null }
+  const contact = await run(deps, { companyId: input.companyId, actorId: input.actorId, reviewId: input.contactReviewId,
+    expectedUpdatedAt: input.contactExpectedUpdatedAt, clientRequestId: contactRequestId, decision })
+  return { organization, contact }
 }

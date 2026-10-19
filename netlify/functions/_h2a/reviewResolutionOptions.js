@@ -189,3 +189,40 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
   } catch { /* A failed read cannot become an actionable projection. */ }
   return unavailable
 }
+
+// Advisory projection for "Create organization and contact". Eligible only when this contact waits on
+// exactly one unsynced organization whose own review has no candidates and is ready to create. Live rows
+// use the open live organization row (never prepared here); sample rows use the sample review, or a
+// not-yet-saved row built from HubSpot so the reviewer can be offered the action before it is prepared.
+export async function loadOrgFirstCreate({ row, readiness, repository, reads, load = loadReviewResolutionOptions }) {
+  const no = { eligible: false }
+  try {
+    const sourceId = readiness?.organization?.sourceId
+    if (!record(row) || row.object_type !== 'contacts' || readiness?.blockedReason !== 'organization_not_synced' ||
+      !providerId(sourceId) || (row.candidate_snapshots ?? []).length !== 0) return no
+    const live = row.review_kind === 'live'
+    let organization = null
+    if (live) {
+      organization = typeof repository.findOpenLiveReviewBySource === 'function'
+        ? await repository.findOpenLiveReviewBySource(row.company_id, row.portal_id, 'companies', sourceId) : null
+    } else if (typeof readiness.organization.reviewId === 'string') {
+      organization = await repository.getReview(row.company_id, readiness.organization.reviewId)
+    }
+    if (organization && (organization.object_type !== 'companies' || organization.source_id !== sourceId ||
+      organization.status !== 'needs_review' || (organization.candidate_snapshots ?? []).length !== 0)) return no
+    let candidate = organization
+    if (!candidate) {
+      if (live) return no
+      const companies = await reads.hubspotRead.getCompanies([sourceId])
+      if (!Array.isArray(companies) || companies.length !== 1 || companies[0]?.id !== sourceId || companies[0]?.archived === true ||
+        !record(companies[0]?.properties)) return no
+      candidate = { company_id: row.company_id, run_id: row.run_id, portal_id: row.portal_id, object_type: 'companies', source_id: sourceId,
+        reason: 'no_match', status: 'needs_review', candidate_snapshots: [], source_snapshot: safeReviewSnapshot(companies[0], 'companies') }
+    }
+    const loaded = await load({ row: { ...candidate, company_id: row.company_id }, repository, reads })
+    if (loaded?.createReadiness?.ready !== true) return no
+    const name = typeof candidate.source_snapshot?.name === 'string' ? candidate.source_snapshot.name.trim().slice(0, 200) : ''
+    return { eligible: true, ...(organization?.id ? { organizationReviewId: organization.id } : {}),
+      ...(name ? { organizationName: name } : {}) }
+  } catch { return no }
+}

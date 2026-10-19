@@ -2,10 +2,11 @@ import { H2AAuthError, requireH2ARequest } from './_h2a/auth.js'
 import { createH2ARepository } from './_h2a/repository.js'
 import { createH2AProviderClients, reviewResolutionProviderCapabilities } from './_h2a/providerClients.js'
 import { H2AReviewError, resolveReviewSample } from './_h2a/reviewService.js'
-import { executeReviewResolution } from './_h2a/reviewResolutionService.js'
+import { executeReviewResolution, executeOrganizationThenContactCreate } from './_h2a/reviewResolutionService.js'
 import { normalizeResolutionDecision, projectReviewResolution } from './_h2a/reviewResolution.js'
 import { canResolve, resolutionMode, hubspotWriteReadiness, projectResolutionCapability, WRITE_AUTH_REJECTION_MESSAGE } from './_h2a/resolutionCapability.js'
 import { ApiError, isRecord } from './_h2a/http.js'
+import { prepareOrganizationReview } from './_h2a/organizationReview.js'
 import { defaultDispatchResume } from './h2a-conflict-resolve.js'
 
 export { canResolve } from './_h2a/resolutionCapability.js'
@@ -20,7 +21,7 @@ const SAFE_MESSAGES = new Set(['Invalid request body.', 'Unsupported request fie
   'A single company selector is required.', 'Invalid resolution request.', 'Invalid resolution decision.',
   'Review resolution is unavailable.', 'Administrator access is required.', 'Super administrator access is required.',
   'Sample review item not found.', 'Run a new sample to create detailed review data.', 'Review item not found.',
-  'Skip is only available for live reviews.'])
+  'Skip is only available for live reviews.', 'Creating with the organization is not available for this record.'])
 const reply = (statusCode, body) => ({ statusCode, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store',
   'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Content-Type, Authorization',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS' }, body: JSON.stringify(body) })
@@ -39,6 +40,15 @@ function request(event) {
   if (typeof input.reviewId !== 'string' || !UUID.test(input.reviewId)) fail(400, 'Invalid resolution request.')
   if (event.httpMethod === 'GET') return { companyId: selectors[0], reviewId: input.reviewId }
   if (typeof body.clientRequestId !== 'string' || !UUID.test(body.clientRequestId) || !validTime(body.expectedUpdatedAt)) fail(400, 'Invalid resolution request.')
+  if (body.op === 'create_with_organization') {
+    const { companyId, reviewId, expectedUpdatedAt, clientRequestId, op, organizationReviewId, organizationExpectedUpdatedAt, referralSourceId, ...extra } = body
+    if (Object.keys(extra).length) fail(400, 'Unsupported request fields.')
+    try { normalizeResolutionDecision({ action: 'create_albi', referralSourceId }) } catch { fail(400, 'Invalid resolution decision.') }
+    if (referralSourceId === undefined || organizationReviewId !== undefined && (typeof organizationReviewId !== 'string' || !UUID.test(organizationReviewId)) ||
+      organizationReviewId !== undefined && !validTime(organizationExpectedUpdatedAt) ||
+      organizationReviewId === undefined && organizationExpectedUpdatedAt !== undefined) fail(400, 'Invalid resolution request.')
+    return { companyId: selectors[0], reviewId, expectedUpdatedAt, clientRequestId, orgFirst: { organizationReviewId, organizationExpectedUpdatedAt, referralSourceId } }
+  }
   const { companyId, reviewId, expectedUpdatedAt, clientRequestId, ...decisionInput } = body
   let decision
   try { decision = normalizeResolutionDecision(decisionInput) } catch { fail(400, 'Invalid resolution decision.') }
@@ -72,18 +82,47 @@ export function createReviewResolutionHandler(options = {}) {
       }
       const repository = options.repository ?? createH2ARepository(auth.supabase)
       const companyId = auth.companyId
-      if (isWrite) {
-        const result = await (options.executeResolution ?? executeReviewResolution)({ repository,
+      const resolutionDeps = () => ({ repository,
           now: options.now, clockMs: options.clockMs, deadlineMs: options.deadlineMs,
-          // A completed live resolution closes its row; each inserted conflict resume is delivered here.
           dispatchResume: options.dispatchResume ?? (intent => defaultDispatchResume(intent, options)),
           getResolutionClients: async (_company, config) => {
             const clients = options.makeClients ? await options.makeClients(companyId) : await createH2AProviderClients({
               companyId, repository, env: options.env, keyring: options.keyring, fetch: options.fetch })
-            // Credential identity must still match the server's configured portal before reads/writes.
             if ((await clients.hubspot.getAccountInfo()).portalId !== config.portal_id) throw new ApiError('permission', { code: 'authorization_rejected' })
             return reviewResolutionProviderCapabilities(clients)
-          } }, { companyId, reviewId: input.reviewId, expectedUpdatedAt: input.expectedUpdatedAt,
+          } })
+      if (isWrite && input.orgFirst) {
+        let { organizationReviewId, organizationExpectedUpdatedAt } = input.orgFirst
+        if (!organizationReviewId) {
+          // Sample rows only: capture the organization's own review through the existing prepare path.
+          const contact = await repository.getReview?.(companyId, input.reviewId)
+          if (contact?.review_kind === 'live') fail(409, 'Creating with the organization is not available for this record.')
+          const prepared = await prepareOrganizationReview({ repository, options, companyId,
+            input: { reviewId: input.reviewId, expectedUpdatedAt: input.expectedUpdatedAt } })
+          const { sample } = await resolveReviewSample(repository, companyId)
+          const organizationRow = prepared.reviewId && sample ? await repository.getDryRunReview(companyId, sample.id, prepared.reviewId) : null
+          if (!organizationRow) fail(409, 'Creating with the organization is not available for this record.')
+          organizationReviewId = organizationRow.id
+          organizationExpectedUpdatedAt = organizationRow.updated_at
+        }
+        const result = await (options.executeOrganizationFirst ?? executeOrganizationThenContactCreate)(resolutionDeps(), { companyId,
+          actorId: auth.userId, contactReviewId: input.reviewId, contactExpectedUpdatedAt: input.expectedUpdatedAt,
+          organizationReviewId, organizationExpectedUpdatedAt, referralSourceId: input.orgFirst.referralSourceId,
+          clientRequestId: input.clientRequestId })
+        if (result?.organization?.error) throw result.organization.error
+        const credentials = typeof repository.getCredentials === 'function' ? await repository.getCredentials(companyId) : null
+        const project = async step => {
+          if (!step) return null
+          if (!isRecord(step.resolution) || step.resolution.company_id !== companyId) throw Error('Invalid resolution result')
+          const events = await repository.listReviewResolutionEvents(companyId, step.resolution.id)
+          if (!Array.isArray(events)) throw Error('Invalid resolution events')
+          return { resolution: projectReviewResolution(step.resolution, events),
+            resolutionCapability: projectResolutionCapability(auth, mode, hubspotWriteReadiness(step.resolution, events, credentials?.updated_at)) }
+        }
+        return reply(200, { organization: await project(result.organization), contact: await project(result.contact) })
+      }
+      if (isWrite) {
+        const result = await (options.executeResolution ?? executeReviewResolution)(resolutionDeps(), { companyId, reviewId: input.reviewId, expectedUpdatedAt: input.expectedUpdatedAt,
           clientRequestId: input.clientRequestId, decision: input.decision, actorId: auth.userId })
         if (!isRecord(result?.resolution) || result.resolution.company_id !== companyId) throw Error('Invalid resolution result')
         const events = await repository.listReviewResolutionEvents(companyId, result.resolution.id)

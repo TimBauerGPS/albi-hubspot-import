@@ -441,6 +441,14 @@ export function createH2ARepository(supabase) {
       return checked(await supabase.from('h2a_dry_run_reviews').select(REVIEW_COLUMNS)
         .eq('company_id', companyId).eq('id', reviewId).maybeSingle())
     },
+    // The one open live review row for a source (the live partial unique key), or null.
+    async findOpenLiveReviewBySource(companyId, portalId, objectType, sourceId) {
+      for (const value of [companyId, portalId, sourceId]) requireReviewIdentity(value)
+      requireReviewValue(objectType, REVIEW_OBJECT_TYPES, 'object type')
+      return checked(await reviewSourceIdentity(supabase.from('h2a_dry_run_reviews').select(REVIEW_COLUMNS)
+        .eq('company_id', companyId), { portal_id: portalId, object_type: objectType, source_id: sourceId })
+        .eq('review_kind', 'live').eq('status', 'needs_review').maybeSingle())
+    },
     // Upserts on the live partial key (one open live row per source). Supabase cannot target a
     // partial index in onConflict, so this is select-then-insert with a unique-violation retry.
     // run_id keeps the run that first captured the row; later captures only refresh evidence and triage.

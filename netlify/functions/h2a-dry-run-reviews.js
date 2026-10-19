@@ -10,7 +10,8 @@ import { ApiError } from './_h2a/http.js'
 import { currentResolutionProjection } from './h2a-dry-run-review-resolutions.js'
 import { projectResolutionCapability } from './_h2a/resolutionCapability.js'
 import { TRIAGE_BUCKETS, createTriageCapabilities, refreshReviewTriage } from './_h2a/triage.js'
-import { loadReviewResolutionOptions } from './_h2a/reviewResolutionOptions.js'
+import { prepareOrganizationReview } from './_h2a/organizationReview.js'
+import { loadOrgFirstCreate, loadReviewResolutionOptions } from './_h2a/reviewResolutionOptions.js'
 import { getH2AReviewActions } from '../../shared/h2aReviewReasons.js'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -106,6 +107,20 @@ async function detail(repository, companyId, runId, row, auth, options, config) 
       if (loaded) resolutionOptions = loaded
     } catch { /* The chooser remains disabled when live evidence cannot be read. */ }
   }
+  // "Create organization and contact": advisory, so any failure or timeout simply leaves it unavailable.
+  let orgFirstCreate = { eligible: false }
+  if (resolutionCapability.canResolve && row.object_type === 'contacts' &&
+    resolutionOptions.createReadiness?.blockedReason === 'organization_not_synced') {
+    try {
+      orgFirstCreate = await advisoryWithin(async () => {
+        const clients = options.makeClients ? await options.makeClients(companyId) : await createH2AProviderClients({
+          companyId, repository, keyring: options.keyring, env: options.env, fetch: options.fetch })
+        if (!options.makeClients && (await clients.hubspot.getAccountInfo()).portalId !== config.portal_id) return null
+        return loadOrgFirstCreate({ row: { ...row, company_id: companyId }, readiness: resolutionOptions.createReadiness, repository,
+          reads: readOnlyH2ACapabilities(clients) })
+      }, Number.isFinite(options.detailDeadlineMs) ? Math.min(10000, Math.max(1, options.detailDeadlineMs)) : 5000) ?? orgFirstCreate
+    } catch { orgFirstCreate = { eligible: false } }
+  }
   // Live association names (the contact's own snapshot only carries a free-text company property).
   // null means unknown, [] means HubSpot has none.
   let hubspotOrganizations = null, mergedInto = null
@@ -145,7 +160,7 @@ async function detail(repository, companyId, runId, row, auth, options, config) 
   if (refreshed) { projectedRow.triageBucket = refreshed.bucket; projectedRow.triageDetails = refreshed.details }
   return { ...projectedRow, resolutionStatus: projected.resolution?.status ?? null,
     events: events.map(projectReviewEvent), resolution: projected.resolution,
-    resolutionCapability, hubspotOrganizations, ...(mergedInto ? { mergedInto } : {}), ...resolutionOptions }
+    resolutionCapability, hubspotOrganizations, orgFirstCreate, ...(mergedInto ? { mergedInto } : {}), ...resolutionOptions }
 }
 
 // Captures (or finds) a review for the HubSpot record a merged-away source now points to, in the current run.
@@ -170,39 +185,6 @@ async function prepareMergedSurvivorReview({ repository, options, companyId, inp
   return { sourceId: survivor, reviewId: created.id }
 }
 
-// Captures (or finds) the review for a contact's one unmapped organization so it can be created and
-// audited on its own. Reads HubSpot only; the Albi create is a separate resolution on that review.
-async function prepareOrganizationReview({ repository, options, auth, companyId, input }) {
-  const { config, sample } = await resolveReviewSample(repository, companyId)
-  if (!sample) fail(409, 'Run a new sample to create detailed review data.')
-  const row = await repository.getDryRunReview(companyId, sample.id, input.reviewId)
-  if (!row) fail(404, 'Sample review item not found.')
-  if (row.object_type !== 'contacts' || row.updated_at !== input.expectedUpdatedAt ||
-    !(row.status === 'needs_review' || row.status === 'cleared' && row.recheck_outcome === 'safe_to_create')) {
-    fail(409, 'This sample review changed. Refresh it before preparing the organization.')
-  }
-  const clients = options.makeClients ? await options.makeClients(companyId) : await createH2AProviderClients({
-    companyId, repository, keyring: options.keyring, env: options.env, fetch: options.fetch })
-  if (!options.makeClients && (await clients.hubspot.getAccountInfo()).portalId !== config.portal_id) throw new ApiError('permission')
-  const hubspotRead = { getAssociations: args => clients.hubspot.getAssociations(args), getCompanies: ids => clients.hubspot.getCompanies(ids) }
-  const associations = await hubspotRead.getAssociations({ objectType: 'contacts', objectIds: [row.source_id], toObjectTypes: ['companies'] })
-  const toIds = Array.isArray(associations) && associations.length === 1 && associations[0]?.fromId === row.source_id &&
-    associations[0]?.toObjectType === 'companies' && Array.isArray(associations[0].toIds) ? [...new Set(associations[0].toIds)] : null
-  if (!toIds || toIds.length !== 1 || !providerId(toIds[0])) fail(409, 'This contact needs exactly one associated organization.')
-  const [sourceId] = toIds
-  const mappings = await repository.getMappings(companyId)
-  const mapped = (mappings?.organizations ?? []).some(item => item?.portal_id === row.portal_id && item?.hubspot_id === sourceId)
-  const existing = await repository.findDryRunReviewBySource(companyId, sample.id, 'companies', sourceId)
-  if (mapped || existing) return { sourceId, reviewId: existing?.id ?? null, mapped }
-  const companies = await hubspotRead.getCompanies([sourceId])
-  if (!Array.isArray(companies) || companies.length !== 1 || companies[0]?.id !== sourceId || companies[0]?.archived === true ||
-    !companies[0]?.properties || typeof companies[0].properties !== 'object') fail(409, 'The associated organization is no longer available in HubSpot.')
-  const created = await repository.recordDryRunReview(companyId, { run_id: sample.id, portal_id: row.portal_id, object_type: 'companies',
-    source_id: sourceId, reason: 'no_match', conflict_type: 'organization_match',
-    source_snapshot: safeReviewSnapshot(companies[0], 'companies'), candidate_snapshots: [], match_evidence: { evidence: [] }, proposed_changes: {} })
-  return { sourceId, reviewId: created.id, mapped: false }
-}
-
 export function createDryRunReviewHandler(options = {}) {
   return async event => {
     if (event.httpMethod === 'OPTIONS') return reply(200, {})
@@ -218,7 +200,7 @@ export function createDryRunReviewHandler(options = {}) {
         return reply(200, { survivor: await prepareMergedSurvivorReview({ repository, options, companyId, input }) })
       }
       if (isRecheck && input.prepareOrganization === true) {
-        return reply(200, { organization: await prepareOrganizationReview({ repository, options, auth, companyId, input }) })
+        return reply(200, { organization: await prepareOrganizationReview({ repository, options, companyId, input }) })
       }
       if (isRecheck) {
         const resolutionRepository = ['getCurrentReviewResolution', 'claimReviewResolution', 'finishReviewResolution', 'getContactOrganizationChoice']
