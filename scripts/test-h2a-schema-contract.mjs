@@ -8,6 +8,7 @@ const sampleMigrationUrl = new URL('../supabase/h2a-dry-run-samples.sql', import
 const reviewMigrationUrl = new URL('../supabase/h2a-dry-run-review-workflow.sql', import.meta.url)
 const resolutionMigrationUrl = new URL('../supabase/h2a-review-resolutions.sql', import.meta.url)
 const recheckBatchMigrationUrl = new URL('../supabase/h2a-review-recheck-batches.sql', import.meta.url)
+const liveReviewMigrationUrl = new URL('../supabase/h2a-live-review-workspace.sql', import.meta.url)
 const mappingOwnershipMigrationUrl = new URL('../supabase/h2a-mapping-target-ownership.sql', import.meta.url)
 const requiredTables = [
   'h2a_company_config', 'h2a_option_mappings', 'h2a_sync_runs',
@@ -18,10 +19,10 @@ const requiredTables = [
   'h2a_run_checkpoints',
   'h2a_dry_run_reviews', 'h2a_dry_run_review_events',
   'h2a_dry_run_review_resolutions', 'h2a_dry_run_review_resolution_events', 'h2a_contact_organization_choices',
-  'h2a_review_recheck_batches',
+  'h2a_review_recheck_batches', 'h2a_live_review_conflicts',
 ]
 const serviceOnlyTables = ['h2a_dry_run_reviews', 'h2a_dry_run_review_events']
-const batchTables = ['h2a_review_recheck_batches']
+const batchTables = ['h2a_review_recheck_batches', 'h2a_live_review_conflicts']
 const resolutionTables = ['h2a_dry_run_review_resolutions', 'h2a_dry_run_review_resolution_events', 'h2a_contact_organization_choices']
 const readSchema = () => readFileSync(schemaUrl, 'utf8').replace(/--[^\n]*/g, '').toLowerCase()
 const readSampleMigration = () => readFileSync(sampleMigrationUrl, 'utf8').replace(/--[^\n]*/g, '').toLowerCase()
@@ -636,5 +637,66 @@ test('recheck batches allow one active batch per company and stay service-only i
     assert.match(sql, /grant select, insert, update on table public\.h2a_review_recheck_batches to service_role;/)
     assert.doesNotMatch(sql, /grant [^;]*public\.h2a_review_recheck_batches to (?:public|anon|authenticated)/)
     assert.doesNotMatch(sql, /create policy[^;]*public\.h2a_review_recheck_batches/)
+  }
+})
+
+const readLiveMigration = () => {
+  assert.ok(existsSync(liveReviewMigrationUrl), 'live review workspace migration must exist')
+  return readFileSync(liveReviewMigrationUrl, 'utf8').replace(/--[^\n]*/g, '').toLowerCase()
+}
+
+test('live review workspace migration exists and is mirrored in h2a-schema.sql', () => {
+  const migration = readLiveMigration()
+  const schema = readSchema()
+  for (const sql of [migration, schema]) {
+    assert.match(sql, /add column if not exists review_kind text not null default 'sample' check \(review_kind in \('sample', 'live'\)\)/)
+    assert.match(sql, /add column if not exists triage_bucket text not null default 'decision'\s+check \(triage_bucket in \('quick', 'todo', 'decision', 'blocked', 'done'\)\)/)
+    assert.match(sql, /add column if not exists triage_details jsonb not null default '\{\}'::jsonb\s+check \(jsonb_typeof\(triage_details\) = 'object'\)/)
+    assert.match(sql, /create or replace function public\.h2a_block_run_delete_with_open_live_reviews\(\)/)
+    assert.match(sql, /create trigger h2a_block_run_delete_with_open_live_reviews\s+before delete on public\.h2a_sync_runs/)
+    assert.match(sql, /r\.review_kind = 'live' and r\.status = 'needs_review'/)
+  }
+})
+
+test('live review rows are unique per open HubSpot source', () => {
+  for (const sql of [readLiveMigration(), readSchema()]) {
+    assert.match(sql, /create unique index (?:if not exists )?h2a_live_review_open_source_idx\s+on public\.h2a_dry_run_reviews \(company_id, portal_id, object_type, source_id\)\s+where review_kind = 'live' and status = 'needs_review'/)
+  }
+})
+
+test('h2a_live_review_conflicts is service-only and unique per conflict', () => {
+  for (const sql of [readLiveMigration(), readSchema()]) {
+    const body = tableBody(sql, 'public.h2a_live_review_conflicts')
+    assert.match(body, /foreign key \(company_id, review_id\) references public\.h2a_dry_run_reviews \(company_id, id\)/)
+    assert.match(body, /foreign key \(company_id, conflict_id\) references public\.h2a_conflicts \(company_id, id\)/)
+    assert.match(body, /unique \(company_id, conflict_id\)/)
+    assert.match(sql, /alter table public\.h2a_live_review_conflicts enable row level security;/)
+    assert.match(sql, /revoke all on table public\.h2a_live_review_conflicts from public, anon, authenticated, service_role;/)
+    assert.doesNotMatch(sql, /grant [^;]*public\.h2a_live_review_conflicts to (?:public|anon|authenticated)/)
+    assert.doesNotMatch(sql, /create policy[^;]*public\.h2a_live_review_conflicts/)
+  }
+})
+
+test('h2a_close_live_review closes conflicts and inserts resumes in one function body', () => {
+  for (const sql of [readLiveMigration(), readSchema()]) {
+    const body = functionBody(sql, 'h2a_close_live_review')
+    assert.match(body, /update public\.h2a_conflicts/)
+    assert.match(body, /insert into public\.h2a_conflict_resumes/)
+    assert.match(body, /on conflict \(company_id, conflict_id\) do nothing/)
+    assert.match(body, /insert into public\.h2a_conflict_events/)
+    assert.match(body, /for update/)
+    assert.match(sql, /create or replace function public\.h2a_close_live_review\([\s\S]*?security definer set search_path = ''/)
+    assert.match(sql, /revoke execute on function public\.h2a_close_live_review\(uuid, uuid, uuid, text, text\) from public, anon, authenticated;/)
+    assert.match(sql, /grant execute on function public\.h2a_close_live_review\(uuid, uuid, uuid, text, text\) to service_role;/)
+    assert.doesNotMatch(sql, /grant execute on function public\.h2a_close_live_review\([^;]*to (?:public|anon|authenticated)/)
+  }
+})
+
+test('recheck batches are scoped by review_kind and may list review_ids', () => {
+  for (const sql of [readLiveMigration(), readSchema()]) {
+    assert.match(sql, /alter table public\.h2a_review_recheck_batches\s+add column if not exists review_kind text not null default 'sample' check \(review_kind in \('sample', 'live'\)\),\s+add column if not exists review_ids uuid\[\];/)
+    assert.match(sql, /alter table public\.h2a_review_recheck_batches alter column run_id drop not null;/)
+    assert.match(sql, /check \(review_kind = 'live' or run_id is not null\)/)
+    assert.match(sql, /create unique index (?:if not exists )?h2a_review_recheck_batches_one_active_kind_idx\s+on public\.h2a_review_recheck_batches \(company_id, review_kind\)\s+where status in \('queued', 'running'\)/)
   }
 })
