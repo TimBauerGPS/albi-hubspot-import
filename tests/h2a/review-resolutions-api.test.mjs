@@ -274,3 +274,36 @@ test('outcome code without a matching durable event never establishes readiness'
     assert.equal(JSON.parse(result.body).resolutionCapability.hubspotWrites, 'verified_when_first_used')
   }
 })
+
+test('GET derives the live kind from the row and skips the sample gate', async () => {
+  const f = fixture()
+  f.repository.getCurrentReviewSample = async () => null
+  f.repository.getReview = async (...args) => { f.calls.push(['live', ...args]); return { id: reviewId, review_kind: 'live', run_id: 'live-run',
+    object_type: 'contacts', portal_id: '123', source_id: '10', status: 'needs_review', updated_at: stamp } }
+  const result = await f.request(undefined, { method: 'GET', query: { companyId: 'company-a', reviewId } })
+  assert.equal(result.statusCode, 200)
+  assert.equal(JSON.parse(result.body).resolution.id, resolutionId)
+  assert.equal(f.calls.some(call => call[0] === 'review'), false)
+})
+
+test('skip_live is accepted as a decision and rejected with 400 on a sample row', async () => {
+  const f = fixture()
+  let received
+  f.options.executeResolution = async (_deps, args) => { received = args; return { resolution: f.row } }
+  assert.equal((await f.request({ companyId: 'company-a', reviewId, expectedUpdatedAt: stamp, clientRequestId, action: 'skip_live' })).statusCode, 200)
+  assert.deepEqual(received.decision, { action: 'skip_live' })
+  assert.equal((await f.request({ companyId: 'company-a', reviewId, expectedUpdatedAt: stamp, clientRequestId, action: 'skip_live', candidateId: '1' })).statusCode, 400)
+  const sample = fixture()
+  const refused = await sample.request({ companyId: 'company-a', reviewId, expectedUpdatedAt: stamp, clientRequestId, action: 'skip_live' })
+  assert.equal(refused.statusCode, 400)
+  assert.equal(sample.calls.some(call => call[0] === 'create'), false)
+})
+
+test('the write endpoint wires resume dispatch and live close capabilities into execution', async () => {
+  const f = fixture()
+  let deps
+  f.options.dispatchResume = async () => true
+  f.options.executeResolution = async received => { deps = received; return { resolution: f.row } }
+  assert.equal((await f.request({ ...input, action: 'skip_live' })).statusCode, 200)
+  assert.equal(deps.dispatchResume, f.options.dispatchResume)
+})

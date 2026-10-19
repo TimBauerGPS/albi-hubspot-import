@@ -236,7 +236,7 @@ export function projectReviewRow(row, { detail = false, mappings = [] } = {}) {
   const objectType = ['contacts', 'companies'].includes(stored.object_type) ? stored.object_type : null
   const source = safeReviewSnapshot(stored.source_snapshot, objectType)
   const projected = {
-    id: scalar(stored.id), runId: scalar(stored.run_id), objectType, sourceId: scalar(stored.source_id),
+    id: scalar(stored.id), runId: scalar(stored.run_id), reviewKind: stored.review_kind === 'live' ? 'live' : 'sample', objectType, sourceId: scalar(stored.source_id),
     reason: displayReason(stored.reason), conflictType: REVIEW_CONFLICT_TYPES.has(stored.conflict_type) ? stored.conflict_type : 'other_review_reason',
     status: STATUSES.has(stored.status) ? stored.status : null, recheckOutcome: REVIEW_OUTCOMES.has(stored.recheck_outcome) ? stored.recheck_outcome : null,
     resolutionStatus: RESOLUTION_STATUSES.has(stored.resolution_status) ? stored.resolution_status : null,

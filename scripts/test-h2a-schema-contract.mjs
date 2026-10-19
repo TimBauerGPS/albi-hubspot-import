@@ -221,7 +221,9 @@ test('resolution deployable migration and canonical mirror are semantically iden
   const schema = readSchema()
   const start = schema.indexOf('create table public.h2a_dry_run_review_resolutions')
   assert.ok(start > 0, 'canonical resolution block exists')
-  const canonical = schema.slice(schema.lastIndexOf('do $$', start))
+  // The live review workspace later replaces two of these functions; those overrides close the file.
+  const overrides = schema.indexOf('create or replace function public.h2a_apply_dry_run_recheck(', start)
+  const canonical = overrides > 0 ? `${schema.slice(schema.lastIndexOf('do $$', start), overrides)}commit;` : schema.slice(schema.lastIndexOf('do $$', start))
   const migration = readResolutionMigration()
   const normalize = value => value.replace(/\bif not exists\s+/g, '').replace(/create or replace function/g, 'create function').replace(/\s+/g, ' ').trim()
   assert.equal(normalize(canonical), normalize(migration.slice(migration.indexOf('do $$'))))
@@ -693,6 +695,34 @@ test('h2a_close_live_review closes conflicts and inserts resumes in one function
     assert.match(sql, /revoke execute on function public\.h2a_close_live_review\(uuid, uuid, uuid, text, text\) from public, anon, authenticated;/)
     assert.match(sql, /grant execute on function public\.h2a_close_live_review\(uuid, uuid, uuid, text, text\) to service_role;/)
     assert.doesNotMatch(sql, /grant execute on function public\.h2a_close_live_review\([^;]*to (?:public|anon|authenticated)/)
+  }
+})
+
+// The last definition wins on a fresh install of h2a-schema.sql and on the live migration.
+const lastFunctionBody = (sql, name) => {
+  const bodies = [...sql.matchAll(new RegExp(`create (?:or replace )?function public\\.${name}\\([\\s\\S]*?as \\$\\$([\\s\\S]*?)\\$\\$;`, 'g'))]
+  assert.ok(bodies.length, `${name} must exist`)
+  return bodies.at(-1)[1]
+}
+
+test('live rows recheck without the sample gate and only while open', () => {
+  for (const sql of [readLiveMigration(), readSchema()]) {
+    const body = lastFunctionBody(sql, 'h2a_apply_dry_run_recheck')
+    assert.match(body, /if v_review\.review_kind = 'live' then\s+if v_review\.status <> 'needs_review' then\s+return pg_catalog\.jsonb_build_object\('error', 'stale'\);/)
+    assert.match(body, /else[\s\S]*?r\.sample_limit_per_type = 10[\s\S]*?if v_current_run_id is distinct from v_review\.run_id\s+or v_current_review_version is distinct from 1 then\s+return pg_catalog\.jsonb_build_object\('error', 'superseded'\)/)
+    assert.match(body, /if v_review\.review_kind = 'live' then[\s\S]*?if p_status <> 'needs_review' then\s+return pg_catalog\.jsonb_build_object\('error', 'invalid_recheck'\);[\s\S]*?else/)
+    assert.ok(body.indexOf("review_kind = 'live'") < body.indexOf('update public.h2a_dry_run_reviews set'))
+    assert.match(sql, /revoke execute on function public\.h2a_apply_dry_run_recheck\([^;]+\) from public, anon, authenticated;/)
+  }
+})
+
+test('skip_live is a resolution action allowed only on live rows', () => {
+  for (const sql of [readLiveMigration(), readSchema()]) {
+    assert.match(sql, /add constraint h2a_dry_run_review_resolutions_action_check\s+check \(action in \('resolve_fields', 'link_existing', 'create_albi', 'force_create_albi', 'choose_organization', 'skip_live'\)\)/)
+    const body = lastFunctionBody(sql, 'h2a_create_review_resolution')
+    assert.match(body, /p_action not in \('resolve_fields', 'link_existing', 'create_albi', 'force_create_albi', 'choose_organization', 'skip_live'\)/)
+    assert.match(body, /if p_action = 'skip_live' and v_review\.review_kind is distinct from 'live' then\s+return pg_catalog\.jsonb_build_object\('error', 'invalid_resolution'\);/)
+    assert.match(body, /v_review\.review_kind = 'sample' and p_action = 'create_albi'\s+and v_review\.status = 'cleared' and v_review\.recheck_outcome = 'safe_to_create'/)
   }
 })
 

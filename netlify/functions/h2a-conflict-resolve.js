@@ -20,7 +20,8 @@ function parseBody(event) {
   return body
 }
 
-async function defaultDispatchResume(intent, options) {
+// Shared by every path that inserts conflict resumes (legacy resolve, live review close).
+export async function defaultDispatchResume(intent, options) {
   const base = options.siteUrl ?? process.env.URL
   const secret = options.internalCronSecret ?? process.env.INTERNAL_CRON_SECRET
   if (!base || !secret) return false

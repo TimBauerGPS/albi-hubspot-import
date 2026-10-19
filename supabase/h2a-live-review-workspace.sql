@@ -158,4 +158,208 @@ $$;
 revoke execute on function public.h2a_close_live_review(uuid, uuid, uuid, text, text) from public, anon, authenticated;
 grant execute on function public.h2a_close_live_review(uuid, uuid, uuid, text, text) to service_role;
 
+-- Live rows recheck without the sample gate: evidence refresh only, while the row is open.
+create or replace function public.h2a_apply_dry_run_recheck(
+  p_company_id uuid,
+  p_review_id uuid,
+  p_expected_updated_at timestamptz,
+  p_actor_id uuid,
+  p_status text,
+  p_recheck_outcome text,
+  p_reason text,
+  p_conflict_type text,
+  p_source_snapshot jsonb,
+  p_candidate_snapshots jsonb,
+  p_match_evidence jsonb,
+  p_proposed_changes jsonb,
+  p_event_type text,
+  p_event_details jsonb,
+  p_now timestamptz
+) returns jsonb language plpgsql security invoker set search_path = '' as $$
+declare
+  v_review public.h2a_dry_run_reviews%rowtype;
+  v_current_run_id uuid;
+  v_current_review_version smallint;
+begin
+  -- Fail closed before locks or mutations, including NULL CAS timestamps.
+  if p_company_id is null or p_review_id is null
+    or p_expected_updated_at is null or p_actor_id is null or p_now is null
+    or p_status is null or p_status not in ('needs_review', 'cleared', 'no_longer_in_scope')
+    or p_recheck_outcome is null or p_recheck_outcome not in ('still_needs_review', 'safe_to_link', 'safe_to_create', 'source_missing')
+    or p_event_type is null or p_event_type not in ('still_needs_review', 'cleared', 'no_longer_in_scope')
+    or p_reason is null or length(pg_catalog.btrim(p_reason)) = 0
+    or p_conflict_type is null or length(pg_catalog.btrim(p_conflict_type)) = 0
+    or p_source_snapshot is null or pg_catalog.jsonb_typeof(p_source_snapshot) <> 'object'
+    or p_candidate_snapshots is null or pg_catalog.jsonb_typeof(p_candidate_snapshots) <> 'array'
+    or p_match_evidence is null or pg_catalog.jsonb_typeof(p_match_evidence) <> 'object'
+    or p_proposed_changes is null or pg_catalog.jsonb_typeof(p_proposed_changes) <> 'object'
+    or p_event_details is null or pg_catalog.jsonb_typeof(p_event_details) <> 'object' then
+    return pg_catalog.jsonb_build_object('error', 'invalid_recheck');
+  end if;
+  -- Only inspect array length after its type has been validated.
+  if pg_catalog.jsonb_array_length(p_candidate_snapshots) > 10 then
+    return pg_catalog.jsonb_build_object('error', 'invalid_recheck');
+  end if;
+
+  select * into v_review
+    from public.h2a_dry_run_reviews r
+    where r.company_id = p_company_id and r.id = p_review_id
+    for update;
+  if not found then return pg_catalog.jsonb_build_object('error', 'not_found'); end if;
+  -- Live rows belong to the live run that captured them: they are current while open,
+  -- and a live recheck only refreshes evidence (closing goes through h2a_close_live_review).
+  if v_review.review_kind = 'live' then
+    if v_review.status <> 'needs_review' then
+      return pg_catalog.jsonb_build_object('error', 'stale');
+    end if;
+    if p_status <> 'needs_review' then
+      return pg_catalog.jsonb_build_object('error', 'invalid_recheck');
+    end if;
+  else
+    select r.id, r.review_capture_version into v_current_run_id, v_current_review_version
+      from public.h2a_sync_runs r
+      where r.company_id = p_company_id
+        and r.mode = 'dry_run'
+        and r.status = 'completed'
+        and r.sample_limit_per_type = 10
+      order by r.created_at desc, r.id desc
+      limit 1;
+    if v_current_run_id is distinct from v_review.run_id
+      or v_current_review_version is distinct from 1 then
+      return pg_catalog.jsonb_build_object('error', 'superseded');
+    end if;
+  end if;
+  if v_review.updated_at is distinct from p_expected_updated_at then
+    return pg_catalog.jsonb_build_object('error', 'stale');
+  end if;
+
+  update public.h2a_dry_run_reviews set
+    status = p_status,
+    recheck_outcome = p_recheck_outcome,
+    reason = p_reason,
+    conflict_type = p_conflict_type,
+    source_snapshot = p_source_snapshot,
+    candidate_snapshots = p_candidate_snapshots,
+    match_evidence = p_match_evidence,
+    proposed_changes = p_proposed_changes,
+    last_rechecked_at = p_now,
+    last_rechecked_by = p_actor_id,
+    updated_at = p_now
+  where company_id = p_company_id and id = p_review_id
+  returning * into v_review;
+
+  insert into public.h2a_dry_run_review_events (
+    company_id, review_id, actor_id, event_type, reason, sanitized_details, created_at
+  ) values (
+    p_company_id, p_review_id, p_actor_id, p_event_type, p_reason, p_event_details, p_now
+  );
+  return pg_catalog.jsonb_build_object('review', pg_catalog.to_jsonb(v_review));
+end;
+$$;
+revoke execute on function public.h2a_apply_dry_run_recheck(uuid, uuid, timestamptz, uuid, text, text, text, text, jsonb, jsonb, jsonb, jsonb, text, jsonb, timestamptz) from public, anon, authenticated;
+grant execute on function public.h2a_apply_dry_run_recheck(uuid, uuid, timestamptz, uuid, text, text, text, text, jsonb, jsonb, jsonb, jsonb, text, jsonb, timestamptz) to service_role;
+
+-- Skip is a resolution on a live row, audited and idempotent like every other reviewer action.
+alter table public.h2a_dry_run_review_resolutions
+  drop constraint if exists h2a_dry_run_review_resolutions_action_check;
+alter table public.h2a_dry_run_review_resolutions
+  add constraint h2a_dry_run_review_resolutions_action_check
+  check (action in ('resolve_fields', 'link_existing', 'create_albi', 'force_create_albi', 'choose_organization', 'skip_live'));
+
+create or replace function public.h2a_create_review_resolution(
+  p_company_id uuid, p_run_id uuid, p_review_id uuid,
+  p_portal_id text, p_object_type text, p_source_id text, p_action text,
+  p_expected_review_updated_at timestamptz, p_decision jsonb, p_decision_hash text,
+  p_client_request_id uuid, p_actor_id uuid
+) returns jsonb language plpgsql security invoker set search_path = '' as $$
+declare
+  v_review public.h2a_dry_run_reviews%rowtype;
+  v_row public.h2a_dry_run_review_resolutions%rowtype;
+  v_now timestamptz;
+begin
+  if p_company_id is null or p_run_id is null or p_review_id is null
+    or p_portal_id is null or length(pg_catalog.btrim(p_portal_id)) = 0
+    or p_object_type is null or p_object_type not in ('contacts', 'companies')
+    or p_source_id is null or length(pg_catalog.btrim(p_source_id)) = 0
+    or p_action is null or p_action not in ('resolve_fields', 'link_existing', 'create_albi', 'force_create_albi', 'choose_organization', 'skip_live')
+    or p_expected_review_updated_at is null or p_decision is null or pg_catalog.jsonb_typeof(p_decision) <> 'object'
+    or p_decision_hash is null or p_decision_hash !~ '^[a-f0-9]{64}$'
+    or p_client_request_id is null or p_actor_id is null then
+    return pg_catalog.jsonb_build_object('error', 'invalid_resolution');
+  end if;
+  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
+    pg_catalog.jsonb_build_array(p_company_id::text, p_portal_id, 'source', p_object_type, p_source_id)::text, 0));
+  select * into v_review from public.h2a_dry_run_reviews r
+    where r.company_id = p_company_id and r.id = p_review_id for update;
+  if not found then return pg_catalog.jsonb_build_object('error', 'not_found'); end if;
+  if v_review.run_id is distinct from p_run_id
+    or v_review.portal_id is distinct from p_portal_id
+    or v_review.object_type is distinct from p_object_type
+    or v_review.source_id is distinct from p_source_id then
+    return pg_catalog.jsonb_build_object('error', 'identity_mismatch');
+  end if;
+  -- Skipping closes a live row's conflicts; a sample row has none to skip.
+  if p_action = 'skip_live' and v_review.review_kind is distinct from 'live' then
+    return pg_catalog.jsonb_build_object('error', 'invalid_resolution');
+  end if;
+  -- Under the review lock, exact replays survive subsequent review rechecks.
+  -- Client UUID reuse must not silently select a different semantic decision.
+  select * into v_row from public.h2a_dry_run_review_resolutions r
+    where r.company_id = p_company_id and r.client_request_id = p_client_request_id;
+  if not found then
+    select * into v_row from public.h2a_dry_run_review_resolutions r
+      where r.company_id = p_company_id and r.review_id = p_review_id
+        and r.expected_review_updated_at = p_expected_review_updated_at and r.decision_hash = p_decision_hash;
+  end if;
+  if found then
+    if v_row.run_id is distinct from p_run_id or v_row.review_id is distinct from p_review_id
+      or v_row.portal_id is distinct from p_portal_id or v_row.object_type is distinct from p_object_type
+      or v_row.source_id is distinct from p_source_id or v_row.action is distinct from p_action
+      or v_row.expected_review_updated_at is distinct from p_expected_review_updated_at
+      or v_row.decision_hash is distinct from p_decision_hash or v_row.decision is distinct from p_decision then
+      return pg_catalog.jsonb_build_object('error', 'request_conflict');
+    end if;
+    return pg_catalog.jsonb_build_object('resolution', pg_catalog.to_jsonb(v_row), 'created', false);
+  end if;
+  if p_action = 'force_create_albi' then
+    if exists (select 1 from public.h2a_dry_run_review_resolutions r
+      where r.company_id = p_company_id and r.portal_id = p_portal_id
+        and r.object_type = p_object_type and r.source_id = p_source_id
+        and r.action = 'force_create_albi' and r.status in ('pending', 'applying')) then
+      return pg_catalog.jsonb_build_object('error', 'request_conflict');
+    end if;
+    if (p_object_type = 'contacts' and exists (select 1 from public.h2a_contact_mappings m
+          where m.company_id = p_company_id and m.portal_id = p_portal_id and m.hubspot_id = p_source_id))
+      or (p_object_type = 'companies' and exists (select 1 from public.h2a_organization_mappings m
+          where m.company_id = p_company_id and m.portal_id = p_portal_id and m.hubspot_id = p_source_id)) then
+      return pg_catalog.jsonb_build_object('error', 'stale');
+    end if;
+  end if;
+  if v_review.updated_at is distinct from p_expected_review_updated_at then
+    return pg_catalog.jsonb_build_object('error', 'stale');
+  end if;
+  if v_review.status <> 'needs_review' and not (v_review.review_kind = 'sample' and p_action = 'create_albi'
+    and v_review.status = 'cleared' and v_review.recheck_outcome = 'safe_to_create') then
+    return pg_catalog.jsonb_build_object('error', 'stale');
+  end if;
+  v_now := pg_catalog.clock_timestamp();
+  insert into public.h2a_dry_run_review_resolutions (
+    company_id, run_id, review_id, portal_id, object_type, source_id, action,
+    expected_review_updated_at, decision, decision_hash, client_request_id, created_by, created_at, updated_at
+  ) values (
+    p_company_id, p_run_id, p_review_id, p_portal_id, p_object_type, p_source_id, p_action,
+    p_expected_review_updated_at, p_decision, p_decision_hash, p_client_request_id, p_actor_id, v_now, v_now
+  ) on conflict do nothing returning * into v_row;
+  -- Same-review RPC creators serialize on the lock; a remaining conflict means
+  -- concurrent client-ID reuse by another review or an out-of-band service write.
+  if not found then return pg_catalog.jsonb_build_object('error', 'request_conflict'); end if;
+  insert into public.h2a_dry_run_review_resolution_events (
+    company_id, resolution_id, actor_id, event_type, created_at
+  ) values (p_company_id, v_row.id, p_actor_id, 'planned', v_now);
+  return pg_catalog.jsonb_build_object('resolution', pg_catalog.to_jsonb(v_row), 'created', true);
+end;
+$$;
+revoke execute on function public.h2a_create_review_resolution(uuid, uuid, uuid, text, text, text, text, timestamptz, jsonb, text, uuid, uuid) from public, anon, authenticated;
+grant execute on function public.h2a_create_review_resolution(uuid, uuid, uuid, text, text, text, text, timestamptz, jsonb, text, uuid, uuid) to service_role;
+
 commit;

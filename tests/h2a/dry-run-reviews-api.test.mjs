@@ -502,3 +502,93 @@ test('the surviving record of a merge gets its own captured review once', async 
   const notMerged = mergedFixture(); notMerged.row.source_id = '11'
   assert.equal((await notMerged.handler({ httpMethod: 'POST', body: JSON.stringify({ companyId: 'selected', reviewId, expectedUpdatedAt: stamp, prepareMergedSurvivor: true }) })).statusCode, 409)
 })
+
+const liveRow = extra => ({ id: reviewId, run_id: 'live-run', review_kind: 'live', object_type: 'contacts', source_id: '10', portal_id: '123',
+  reason: 'name_only_candidate', conflict_type: 'contact_match', status: 'needs_review', created_at: stamp, updated_at: stamp,
+  source_snapshot: { firstName: 'A', lastName: 'Person', email: 'a@example.com' }, candidate_snapshots: [], triage_bucket: 'quick',
+  triage_details: { quickKind: 'link' }, ...extra })
+
+test('live list filters by kind and bucket, returns bucket counts and omits sample-only parts', async () => {
+  const f = fixture()
+  const counts = { quick: 1, todo: 0, decision: 2, blocked: 0, done: 4 }
+  f.repository.listDryRunReviews = async (...args) => { f.calls.push(['list', ...args]); return { items: [liveRow()], hasMore: false, bucketCounts: counts } }
+  const response = await f.handler(get({ companyId: 'selected-company', kind: 'live', bucket: 'quick' }))
+  assert.equal(response.statusCode, 200)
+  const [, company, runId, filters] = f.calls.find(call => call[0] === 'list')
+  assert.deepEqual([company, runId, filters.kind, filters.bucket, filters.includeCounts], ['authorized-company', null, 'live', 'quick', true])
+  const body = JSON.parse(response.body)
+  assert.deepEqual(body.bucketCounts, counts)
+  assert.equal(Object.hasOwn(body, 'sample'), false)
+  assert.equal(Object.hasOwn(body, 'progress'), false)
+  assert.equal(body.items[0].reviewKind, 'live')
+  assert.equal(f.calls.some(call => ['sample', 'latest', 'count'].includes(call[0])), false)
+})
+
+test('sample list passes its kind and bucket and returns bucket counts', async () => {
+  const f = fixture()
+  f.repository.listDryRunReviews = async (...args) => { f.calls.push(['list', ...args]); return { items: [f.row], hasMore: false, bucketCounts: { quick: 0, todo: 1, decision: 0, blocked: 0, done: 0 } } }
+  const response = await f.handler(get({ bucket: 'todo' }))
+  assert.equal(response.statusCode, 200)
+  const filters = f.calls.find(call => call[0] === 'list')[3]
+  assert.deepEqual([filters.kind, filters.bucket, filters.includeCounts], ['sample', 'todo', true])
+  const body = JSON.parse(response.body)
+  assert.equal(body.bucketCounts.todo, 1)
+  assert.equal(body.progress.fullDryRunReady, false)
+  assert.equal(body.items[0].reviewKind, 'sample')
+})
+
+test('unknown kind or bucket filters are rejected before any read', async () => {
+  for (const query of [{ kind: 'all' }, { bucket: 'later' }, { kind: 'live', reviewId: 'not-a-uuid' }]) {
+    const f = fixture()
+    const response = await f.handler(get(query))
+    assert.equal(response.statusCode, 400)
+    assert.equal(f.calls.some(call => call[0] === 'list'), false)
+  }
+})
+
+test('live detail loads by review id without the sample gate', async () => {
+  const f = fixture()
+  f.repository.getCurrentReviewSample = async () => null
+  f.repository.getReview = async (...args) => { f.calls.push(['review', ...args]); return liveRow() }
+  const response = await f.handler(get({ reviewId }))
+  assert.equal(response.statusCode, 200)
+  const body = JSON.parse(response.body)
+  assert.equal(body.item.reviewKind, 'live')
+  assert.deepEqual(f.calls.find(call => call[0] === 'events'), ['events', 'authorized-company', 'live-run', reviewId])
+  assert.equal(f.calls.some(call => call[0] === 'detail'), false)
+})
+
+test('live detail from another portal is not found', async () => {
+  const f = fixture()
+  f.repository.getReview = async () => liveRow({ portal_id: '999' })
+  const response = await f.handler(get({ reviewId }))
+  assert.equal(response.statusCode, 404)
+})
+
+test('live detail retries the close of a completed resolution left open', async () => {
+  const f = fixture()
+  const row = liveRow()
+  const closes = []
+  f.repository.getReview = async () => row
+  f.repository.getCurrentReviewResolution = async () => ({ id: reviewId, company_id: 'authorized-company', portal_id: '123', review_id: reviewId,
+    action: 'link_existing', status: 'completed' })
+  f.repository.listReviewResolutionEvents = async () => []
+  f.repository.closeLiveReview = async (company, args) => { closes.push([company, args]); row.status = 'cleared'; return { closedConflictIds: ['c-1'], resumeIds: [], replayed: false } }
+  const response = await f.handler(get({ reviewId }))
+  assert.equal(response.statusCode, 200)
+  assert.deepEqual(closes, [['authorized-company', { reviewId, actorId: '00000000-0000-4000-8000-000000000002', outcome: 'resolved', resolutionAction: 'link_existing' }]])
+  assert.equal(JSON.parse(response.body).item.status, 'cleared')
+})
+
+test('live recheck responds with detail and no sample progress', async () => {
+  const f = fixture()
+  const row = liveRow({ candidate_snapshots: [] })
+  f.repository.getCurrentReviewSample = async () => null
+  f.repository.getReview = async () => row
+  f.repository.applyDryRunRecheck = async (_company, payload) => { Object.assign(row, { recheck_outcome: payload.outcome }); return { review: { ...row } } }
+  const response = await f.handler({ httpMethod: 'POST', queryStringParameters: {}, body: JSON.stringify({ companyId: 'selected-company', reviewId, expectedUpdatedAt: stamp }) })
+  assert.equal(response.statusCode, 200)
+  const body = JSON.parse(response.body)
+  assert.equal(body.item.reviewKind, 'live')
+  assert.equal(Object.hasOwn(body, 'progress'), false)
+})

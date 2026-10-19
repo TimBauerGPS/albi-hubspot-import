@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { recheckDryRunReview } from '../../netlify/functions/_h2a/reviewService.js'
 import * as reviewService from '../../netlify/functions/_h2a/reviewService.js'
 import { readOnlyH2ACapabilities } from '../../netlify/functions/_h2a/providerClients.js'
+import { liveCloseStore } from './live-close-fixture.mjs'
 
 const reviewId = '00000000-0000-4000-8000-000000000001'
 const actorId = '00000000-0000-4000-8000-000000000002'
@@ -475,4 +476,81 @@ test('a reviewed email-match link clears later rechecks whose only differences a
   assert.equal((await run(null)).outcome, 'still_needs_review')
   assert.equal((await run(accepted, { jobtitle: 'Engineer' })).outcome, 'still_needs_review')
   assert.equal((await run({ ...accepted, decision: { ...accepted.decision, candidateId: '21' } })).outcome, 'still_needs_review')
+})
+
+// Live rows are owned by the live run that captured them; the sample gate never applies to them.
+function liveFixture(options = {}) {
+  const f = fixture(options)
+  Object.assign(f.row, { review_kind: 'live', run_id: 'live-run' })
+  const store = liveCloseStore({ review: f.row })
+  const triage = []
+  f.deps.repository.getReview = async (...args) => { f.calls.push(['review', ...args]); return f.row }
+  f.deps.repository.applyDryRunRecheck = async (company, payload) => {
+    f.applied.push([company, payload])
+    Object.assign(f.row, { status: payload.status, recheck_outcome: payload.outcome, updated_at: '2026-10-12T11:00:00.000000Z' })
+    return { review: { ...f.row } }
+  }
+  f.deps.liveCloseRepository = store.methods
+  f.deps.dispatchResume = store.dispatchResume
+  f.deps.triageRepository = { setReviewTriage: async (_company, id, next) => { triage.push([id, next]) } }
+  return { ...f, store, triage }
+}
+
+test('live recheck that now auto-links closes as resolved_by_sync', async () => {
+  const f = liveFixture({ contacts: [{ id: '20', firstName: 'A', lastName: 'Person', email: 'a@example.com' }] })
+  const result = await recheckDryRunReview(f.deps, input)
+  const [, payload] = f.applied[0]
+  assert.deepEqual([payload.runId, payload.status, payload.outcome, payload.eventType, payload.kind],
+    ['live-run', 'needs_review', 'safe_to_link', 'still_needs_review', 'live'])
+  assert.deepEqual(f.store.state.closeCalls.map(call => [call.outcome, call.resolutionAction]), [['resolved_by_sync', null]])
+  assert.equal(result.review.status, 'no_longer_in_scope')
+  assert.equal(f.store.state.resumes.length, 2)
+  assert.deepEqual(f.store.state.dispatched, ['resume-1', 'resume-2'])
+  assert.equal(f.calls.some(call => call[0] === 'sample'), false)
+})
+
+test('deleted HubSpot source closes as source_missing; merged source stays open', async () => {
+  const deleted = liveFixture({ source: null })
+  deleted.deps.hubspotRead.getMergedInto = async () => null
+  const gone = await recheckDryRunReview(deleted.deps, input)
+  assert.equal(deleted.applied[0][1].outcome, 'source_missing')
+  assert.deepEqual(deleted.store.state.closeCalls.map(call => [call.outcome, call.resolutionAction]), [['source_missing', 'skip']])
+  assert.deepEqual(deleted.store.state.conflicts.map(conflict => conflict.status), ['skipped', 'skipped'])
+  assert.equal(deleted.store.state.resumes.length, 0)
+  assert.equal(gone.review.status, 'no_longer_in_scope')
+
+  const merged = liveFixture({ source: null })
+  merged.deps.hubspotRead.getMergedInto = async (type, id) => type === 'contacts' && id === '10' ? '77' : null
+  const open = await recheckDryRunReview(merged.deps, input)
+  assert.equal(merged.applied[0][1].status, 'needs_review')
+  assert.deepEqual(merged.store.state.closeCalls, [])
+  assert.equal(open.review.status, 'needs_review')
+  assert.deepEqual(merged.store.state.conflicts.map(conflict => conflict.status), ['open', 'open'])
+  assert.deepEqual(merged.triage.at(-1), [reviewId, { bucket: 'blocked', details: { merged: true } }])
+})
+
+test('a live recheck that is only safe to create stays open for a reviewer', async () => {
+  const f = liveFixture({ options: [{ mapping_kind: 'default_contact_type', albi_id: '7', confirmed: true }] })
+  const result = await recheckDryRunReview(f.deps, input)
+  assert.deepEqual([f.applied[0][1].status, f.applied[0][1].outcome], ['needs_review', 'safe_to_create'])
+  assert.deepEqual(f.store.state.closeCalls, [])
+  assert.equal(result.review.status, 'needs_review')
+})
+
+test('a closed live row cannot be rechecked and starts no provider read', async () => {
+  const f = liveFixture(); f.row.status = 'cleared'
+  await assert.rejects(recheckDryRunReview(f.deps, input), error => error.statusCode === 409)
+  assert.deepEqual(f.applied, [])
+  assert.equal(f.calls.some(call => call[0] === 'contacts'), false)
+})
+
+test('a failed live close leaves the rechecked row open so the next recheck retries', async () => {
+  const f = liveFixture({ contacts: [{ id: '20', firstName: 'A', lastName: 'Person', email: 'a@example.com' }] })
+  f.store.state.failClose = 1
+  const first = await recheckDryRunReview(f.deps, input)
+  assert.equal(first.review.status, 'needs_review')
+  assert.equal(first.review.recheck_outcome, 'safe_to_link')
+  const second = await recheckDryRunReview(f.deps, { ...input, expectedUpdatedAt: first.review.updated_at })
+  assert.equal(second.review.status, 'no_longer_in_scope')
+  assert.equal(f.store.state.resumes.length, 2)
 })

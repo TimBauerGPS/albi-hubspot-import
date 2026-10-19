@@ -6,6 +6,7 @@ import { executeReviewResolution } from './_h2a/reviewResolutionService.js'
 import { normalizeResolutionDecision, projectReviewResolution } from './_h2a/reviewResolution.js'
 import { canResolve, resolutionMode, hubspotWriteReadiness, projectResolutionCapability, WRITE_AUTH_REJECTION_MESSAGE } from './_h2a/resolutionCapability.js'
 import { ApiError, isRecord } from './_h2a/http.js'
+import { defaultDispatchResume } from './h2a-conflict-resolve.js'
 
 export { canResolve } from './_h2a/resolutionCapability.js'
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -18,7 +19,8 @@ const AUTH_MESSAGES = new Set(['Authentication required.', 'Invalid authenticati
 const SAFE_MESSAGES = new Set(['Invalid request body.', 'Unsupported request fields.', 'Unsupported query parameters.',
   'A single company selector is required.', 'Invalid resolution request.', 'Invalid resolution decision.',
   'Review resolution is unavailable.', 'Administrator access is required.', 'Super administrator access is required.',
-  'Sample review item not found.', 'Run a new sample to create detailed review data.'])
+  'Sample review item not found.', 'Run a new sample to create detailed review data.', 'Review item not found.',
+  'Skip is only available for live reviews.'])
 const reply = (statusCode, body) => ({ statusCode, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store',
   'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Content-Type, Authorization',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS' }, body: JSON.stringify(body) })
@@ -73,6 +75,8 @@ export function createReviewResolutionHandler(options = {}) {
       if (isWrite) {
         const result = await (options.executeResolution ?? executeReviewResolution)({ repository,
           now: options.now, clockMs: options.clockMs, deadlineMs: options.deadlineMs,
+          // A completed live resolution closes its row; each inserted conflict resume is delivered here.
+          dispatchResume: options.dispatchResume ?? (intent => defaultDispatchResume(intent, options)),
           getResolutionClients: async (_company, config) => {
             const clients = options.makeClients ? await options.makeClients(companyId) : await createH2AProviderClients({
               companyId, repository, env: options.env, keyring: options.keyring, fetch: options.fetch })
@@ -89,10 +93,19 @@ export function createReviewResolutionHandler(options = {}) {
           resolutionCapability: projectResolutionCapability(auth, mode, hubspotWriteReadiness(result.resolution, events, credentials?.updated_at)),
           ...(result.resolution.provider_outcome_code === 'authorization_rejected' ? { message: WRITE_AUTH_REJECTION_MESSAGE } : {}) })
       }
-      const { sample, config } = await resolveReviewSample(repository, companyId)
-      if (!sample) fail(409, 'Run a new sample to create detailed review data.')
-      const row = await repository.getDryRunReview(companyId, sample.id, input.reviewId)
-      if (!row) fail(404, 'Sample review item not found.')
+      // Kind comes from the stored row: a live row is read without the sample gate.
+      const live = typeof repository.getReview === 'function' ? await repository.getReview(companyId, input.reviewId) : null
+      let config
+      if (live?.review_kind === 'live') {
+        config = await repository.getConfig(companyId)
+        if (!config?.portal_id || live.portal_id !== config.portal_id) fail(404, 'Review item not found.')
+      } else {
+        const resolved = await resolveReviewSample(repository, companyId)
+        config = resolved.config
+        if (!resolved.sample) fail(409, 'Run a new sample to create detailed review data.')
+        const row = await repository.getDryRunReview(companyId, resolved.sample.id, input.reviewId)
+        if (!row) fail(404, 'Sample review item not found.')
+      }
       const projected = await currentResolutionProjection(repository, companyId, input.reviewId, config.portal_id)
       return reply(200, { resolution: projected.resolution, resolutionCapability: projectResolutionCapability(auth, mode, projected.hubspotWrites),
         ...(projected.resolution?.providerOutcomeCode === 'authorization_rejected' ? { message: WRITE_AUTH_REJECTION_MESSAGE } : {}) })

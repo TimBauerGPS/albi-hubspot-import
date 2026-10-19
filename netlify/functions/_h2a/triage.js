@@ -9,12 +9,13 @@ export const TRIAGE_BUCKETS = Object.freeze(['quick', 'todo', 'decision', 'block
 // mergedInto is optional because merge state is read live from HubSpot, not stored.
 export function computeTriage({ row, ranking, createReadiness, resolutionStatus, mergedInto } = {}) {
   const candidates = Array.isArray(ranking?.candidates) ? ranking.candidates : []
+  // Open Albi work wins over a cleared safe recheck: the reviewer still owes that to-do.
+  if (resolutionStatus === 'waiting_on_albi' && ['needs_review', 'cleared'].includes(row?.status)) return { bucket: 'todo', details: {} }
   if (row?.status === 'cleared' && resolutionStatus !== 'completed' &&
     ['safe_to_link', 'safe_to_create'].includes(row?.recheck_outcome)) {
     return { bucket: 'quick', details: { quickKind: row.recheck_outcome === 'safe_to_link' ? 'link' : 'create' } }
   }
   if (row?.status !== 'needs_review' || resolutionStatus === 'completed') return { bucket: 'done', details: {} }
-  if (resolutionStatus === 'waiting_on_albi') return { bucket: 'todo', details: {} }
   if (mergedInto?.sourceId) return { bucket: 'blocked', details: { merged: true } }
   const blockedReason = createReadiness?.blockedReason
   if (candidates.length === 0 && blockedReasonCopy(blockedReason)) return { bucket: 'blocked', details: { blockedReason } }

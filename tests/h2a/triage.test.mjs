@@ -97,3 +97,7 @@ test('merge block carries over when mergedInto is unknown and clears when null',
   await refreshReviewTriage(repository, { companyId: 'c', row: blocked, mergedInto: null })
   assert.equal(writes[0][2].bucket, 'decision')
 })
+test('waiting on Albi wins over a cleared safe recheck', () => {
+  assert.deepEqual(computeTriage({ row: cleared('safe_to_link'), ranking: none, resolutionStatus: 'waiting_on_albi' }), { bucket: 'todo', details: {} })
+  assert.equal(computeTriage({ row: cleared('safe_to_create'), ranking: none, resolutionStatus: 'waiting_on_albi' }).bucket, 'todo')
+})

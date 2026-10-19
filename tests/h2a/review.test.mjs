@@ -296,7 +296,7 @@ const row = { id: 'review', run_id: 'run', object_type: 'contacts', source_id: '
   last_rechecked_at: null, last_rechecked_by: null, created_at: 'created', updated_at: 'updated', authorization: 'SECRET' }
 
 test('list projection constructs the exact summary shape from safe source identity', () => {
-  assert.deepEqual(projectReviewRow(row), { id: 'review', runId: 'run', objectType: 'contacts', sourceId: 'hs', reason: 'name_only_candidate', conflictType: 'contact_match', status: 'needs_review', recheckOutcome: null, resolutionStatus: null, triageBucket: 'decision', triageDetails: {},
+  assert.deepEqual(projectReviewRow(row), { id: 'review', runId: 'run', reviewKind: 'sample', objectType: 'contacts', sourceId: 'hs', reason: 'name_only_candidate', conflictType: 'contact_match', status: 'needs_review', recheckOutcome: null, resolutionStatus: null, triageBucket: 'decision', triageDetails: {},
     displayName: 'A Person', identity: { email: 'a@example.com', phone: '5551112222', organizationName: 'Allied', domain: null }, lastRecheckedAt: null, createdAt: 'created', updatedAt: 'updated' })
 })
 
@@ -309,7 +309,7 @@ test('only detailed review projection exposes a validated portal for fixed-origi
 })
 
 test('detail projection independently re-sanitizes stored JSON into the exact detail shape', () => {
-  assert.deepEqual(projectReviewRow(row, { detail: true }), { id: 'review', runId: 'run', objectType: 'contacts', sourceId: 'hs', reason: 'name_only_candidate', conflictType: 'contact_match', status: 'needs_review', recheckOutcome: null, resolutionStatus: null, triageBucket: 'decision', triageDetails: {},
+  assert.deepEqual(projectReviewRow(row, { detail: true }), { id: 'review', runId: 'run', reviewKind: 'sample', objectType: 'contacts', sourceId: 'hs', reason: 'name_only_candidate', conflictType: 'contact_match', status: 'needs_review', recheckOutcome: null, resolutionStatus: null, triageBucket: 'decision', triageDetails: {},
     portalId: null,
     sourceSnapshot: { id: 'hs', firstName: 'A', lastName: 'Person', email: 'a@example.com', phoneNumber: '5551112222', organizationName: 'Allied' },
     candidateSnapshots: [{ id: 'albi', firstName: 'A' }], matchEvidence: ['email'],

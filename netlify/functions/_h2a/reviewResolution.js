@@ -11,6 +11,8 @@ const ACTION_FIELDS = Object.freeze({
   create_albi: new Set(['referralSourceId']),
   force_create_albi: new Set(['ignoredCandidateIds', 'referralSourceId']),
   choose_organization: new Set(['organizationSourceId', 'addHubSpotAssociation']),
+  // Live rows only: closes every linked conflict as skipped. No provider work, no plan.
+  skip_live: new Set([]),
 })
 const CONTACT_FIELDS = ['firstName', 'lastName', 'email', 'phoneNumber', 'mobileNumber', 'jobTitle',
   'address1', 'address2', 'city', 'state', 'zipcode', 'country']
@@ -21,7 +23,7 @@ export const RESOLUTION_EVENT_TYPES = Object.freeze(['planned', 'claimed', 'prov
   'waiting_on_albi', 'recheck_requested', 'completed', 'failed', 'superseded'])
 export const RESOLUTION_OUTCOME_CODES = Object.freeze([...H2A_REVIEW_ERROR_CODES, 'authorization_rejected',
   'provider_applied', 'provider_reconciled', 'waiting_on_albi', 'recheck_requested', 'completed', 'failed', 'superseded',
-  'safe_to_link', 'safe_to_create', 'still_needs_review', 'source_missing', 'recheck_failed', 'linked', 'created', 'forced_created', 'updated', 'reconciled'])
+  'safe_to_link', 'safe_to_create', 'still_needs_review', 'source_missing', 'recheck_failed', 'linked', 'created', 'forced_created', 'updated', 'reconciled', 'skipped'])
 export const RESOLUTION_EVENT_LIMIT = 100
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/

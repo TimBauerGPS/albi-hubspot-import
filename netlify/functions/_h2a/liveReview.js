@@ -1,6 +1,7 @@
 import { rankReviewCandidates } from './ranking.js'
 import { safeReviewCandidates, safeReviewChanges, safeReviewEvidence, safeReviewSnapshot } from './review.js'
 import { carriedMerge, carriedReadiness, computeTriage } from './triage.js'
+import { dispatchConflictResumes } from './conflicts.js'
 
 const identity = value => typeof value === 'string' && value.trim() !== ''
 
@@ -35,4 +36,39 @@ export async function captureLiveReview(deps, { companyId, runId, portalId, obje
   if (review.closed === true) return { reviewId: review.id, inserted: false, closed: true }
   await repository.linkLiveReviewConflict(companyId, review.id, conflictId)
   return { reviewId: review.id, inserted: review.inserted === true }
+}
+
+// Close capability for callers that otherwise hold only reads (recheck): the close RPC and resume delivery.
+export function createLiveCloseCapabilities(repository) {
+  const bind = name => typeof repository?.[name] === 'function' ? repository[name].bind(repository) : undefined
+  return Object.freeze({ closeLiveReview: bind('closeLiveReview'), getConflictResume: bind('getConflictResume'),
+    claimConflictResume: bind('claimConflictResume'), finishConflictResume: bind('finishConflictResume') })
+}
+
+// Which close a completed reviewer resolution on a live row stands for.
+export const LIVE_CLOSE_FOR_ACTION = Object.freeze({
+  link_existing: Object.freeze({ outcome: 'resolved', resolutionAction: 'link_existing' }),
+  create_albi: Object.freeze({ outcome: 'resolved', resolutionAction: 'create_new' }),
+  force_create_albi: Object.freeze({ outcome: 'resolved', resolutionAction: 'create_new' }),
+  skip_live: Object.freeze({ outcome: 'skipped', resolutionAction: 'skip' }),
+})
+
+// Closes a live row and all its linked conflicts in one RPC transaction, then delivers each resume
+// it returned. Replays are safe: the RPC returns replayed with no new rows, and delivered resumes are
+// not sent again. A delivery failure never undoes the close; those resumes stay pending for retry.
+export async function closeLiveReview(deps, { companyId, reviewId, actorId, outcome, resolutionAction = null } = {}) {
+  const repository = deps?.repository
+  if (typeof repository?.closeLiveReview !== 'function') throw new TypeError('A live review close capability is required')
+  const result = await repository.closeLiveReview(companyId, { reviewId, actorId, outcome, resolutionAction })
+  if (!result || result.error || !Array.isArray(result.closedConflictIds) || !Array.isArray(result.resumeIds)) {
+    throw Object.assign(new Error('Unable to close this live review.'), { closeError: result?.error ?? 'invalid_response' })
+  }
+  let deliveries = []
+  try {
+    deliveries = result.resumeIds.length ? await dispatchConflictResumes(deps, companyId, result.resumeIds) : []
+  } catch {
+    deliveries = result.resumeIds.map(resumeId => ({ resumeId, accepted: false, pending: true }))
+  }
+  return { closedConflictIds: result.closedConflictIds, resumeIds: result.resumeIds, replayed: result.replayed === true,
+    dispatched: deliveries.filter(item => item.accepted).length, pending: deliveries.filter(item => item.pending).length }
 }

@@ -8,6 +8,7 @@ import { buildReviewResolutionPlan, hashResolutionDecision, normalizeResolutionD
 import { isResolutionProviderId } from './reviewResolution.js'
 import { safeReviewSnapshot } from './review.js'
 import { refreshReviewTriage } from './triage.js'
+import { LIVE_CLOSE_FOR_ACTION, closeLiveReview } from './liveReview.js'
 import { decideContactMatch, decideOrganizationMatch, selectAllReviewCandidates } from './match.js'
 import { normalizePhone } from './normalize.js'
 import { H2A_REVIEW_ERROR_CATEGORIES, H2A_REVIEW_ERROR_CODES } from '../../../shared/h2aReviewReasons.js'
@@ -309,7 +310,16 @@ async function saveLocal(caps, row, plan, actorId, resolutionId, targetId = plan
   }
 }
 
+// Kind comes from the stored row. Live rows are checked against the configured portal only; their
+// open status is enforced by the create RPC (so exact replays still return) and by stillCurrent.
 async function currentReview(deps, companyId, reviewId) {
+  const stored = typeof deps.repository.getReview === 'function' ? await deps.repository.getReview(companyId, reviewId) : null
+  if (stored?.review_kind === 'live') {
+    if (!['contacts', 'companies'].includes(stored.object_type)) fail(404, 'Review item not found.')
+    const config = await deps.repository.getConfig(companyId)
+    if (!config?.portal_id || stored.portal_id !== config.portal_id) stale('portal')
+    return { config, row: { ...stored, company_id: companyId } }
+  }
   const resolved = await resolveReviewSample(deps.repository, companyId)
   if (!resolved.sample) fail(409, 'This sample is no longer current. Run a new sample review.')
   const row = await deps.repository.getDryRunReview(companyId, resolved.sample.id, reviewId)
@@ -318,9 +328,86 @@ async function currentReview(deps, companyId, reviewId) {
   return { ...resolved, row: { ...row, company_id: companyId } }
 }
 
+// Sample rows are current while their sample is the latest completed one. Live rows are current while
+// open: a newer sample never supersedes them; reread so a close by sync or another reviewer is seen.
 async function stillCurrent(deps, row, config) {
+  if (row.review_kind === 'live') {
+    const fresh = typeof deps.repository.getReview === 'function' ? await deps.repository.getReview(row.company_id, row.id) : row
+    return fresh?.review_kind === 'live' && fresh.status === 'needs_review'
+  }
   const latest = await deps.repository.getLatestCompletedSampleDryRun(row.company_id, config.initial_start_locked_at)
   return latest?.id === row.run_id && latest.review_capture_version === 1
+}
+
+const closeDeps = deps => ({ repository: deps.liveCloseRepository ?? deps.repository, dispatchResume: deps.dispatchResume })
+
+// The resolution is already durable when this runs. A failed close is reported, never thrown: the
+// completed resolution on a still-open live row is the marker settleLiveReviewClose retries from.
+async function closeSafely(deps, args) {
+  try { return await closeLiveReview(closeDeps(deps), args) } catch { return { error: 'close_failed' } }
+}
+
+async function reloadReview(deps, companyId, row) {
+  return typeof deps.repository.getReview === 'function' ? await deps.repository.getReview(companyId, row.id) ?? row : row
+}
+
+// A completed reviewer resolution that should have closed this still-open live row (the close
+// failed or was interrupted) is closed now. Idempotent through the close RPC's replay.
+export async function settleLiveReviewClose(deps, { companyId, row, actorId }) {
+  if (row?.review_kind !== 'live' || row.status !== 'needs_review') return null
+  const repository = deps.resolutionRepository ?? deps.repository
+  if (typeof repository?.getCurrentReviewResolution !== 'function') return null
+  const saved = await repository.getCurrentReviewResolution(companyId, row.id)
+  const mapped = saved?.status === 'completed' ? LIVE_CLOSE_FOR_ACTION[saved.action] : null
+  if (!mapped) return null
+  const close = await closeLiveReview(closeDeps(deps), { companyId, reviewId: row.id, actorId: saved.created_by ?? actorId, ...mapped })
+  return { resolution: saved, close, review: await reloadReview(deps, companyId, row) }
+}
+
+// After a live recheck wrote its evaluation: an open resolution is finished like a sample clear,
+// then the row closes as the reviewer's own link/create when that resolution completed, else as
+// resolved_by_sync, or as source_missing. Without a close outcome the row stays open.
+export async function finalizeLiveRecheck(deps, ids, review, closeOutcome) {
+  if (!closeOutcome) {
+    const finalized = await finalizeRecheckedResolution(deps, ids, review)
+    return { resolution: finalized?.resolution ?? null, review }
+  }
+  const repository = deps.resolutionRepository ?? deps.repository
+  let saved = typeof repository?.getCurrentReviewResolution === 'function'
+    ? await repository.getCurrentReviewResolution(ids.companyId, ids.reviewId) : null
+  if (saved && !terminal(saved)) {
+    const finished = await finalizeRecheckedResolution(deps, ids,
+      { ...review, status: closeOutcome === 'source_missing' ? 'no_longer_in_scope' : 'cleared' })
+    if (finished?.resolution) saved = finished.resolution
+  }
+  const own = closeOutcome === 'resolved_by_sync' && saved?.status === 'completed' ? LIVE_CLOSE_FOR_ACTION[saved.action] : null
+  const args = own?.outcome === 'resolved' ? own
+    : closeOutcome === 'source_missing' ? { outcome: 'source_missing', resolutionAction: 'skip' } : { outcome: 'resolved_by_sync', resolutionAction: null }
+  const close = await closeSafely(deps, { companyId: ids.companyId, reviewId: ids.reviewId, actorId: ids.actorId, ...args })
+  return { resolution: saved, close, review: await reloadReview(deps, ids.companyId, review) }
+}
+
+// Skip on a live row: no provider work. The audited resolution completes, then the close RPC marks
+// every linked conflict skipped and writes the skipped ledger.
+async function runLiveSkip(deps, input, saved, context) {
+  const caps = createReviewResolutionCapabilities(deps.repository), owner = randomUUID()
+  const claimed = rpc(await caps.claimReviewResolution(input.companyId, saved.id, owner, input.actorId, 120))
+  if (claimed.execution_phase !== 'applying') fail(409, 'This resolution cannot be applied.')
+  if (claimed.lease_owner !== owner || !Number.isFinite(Date.parse(claimed.lease_expires_at)) ||
+    Date.parse(claimed.lease_expires_at) <= clock(deps)) fail(409, 'The resolution lease expired. Refresh and try again.')
+  const row = context.row
+  const finish = async (status, code) => rpc(await caps.finishReviewResolution(input.companyId, claimed.id, owner,
+    { actorId: input.actorId, status, eventType: status, providerOutcomeCode: code,
+      details: safeResolutionEventDetails({ code, ...(code === 'skipped' ? { outcome: 'skipped' } : {}) }) }))
+  if (row.review_kind !== 'live' || !await stillCurrent(deps, row, context.config)) {
+    const resolution = await finish('superseded', 'superseded')
+    await refreshReviewTriage(deps.triageRepository ?? deps.repository, { companyId: input.companyId, row, resolutionStatus: resolution.status })
+    return { resolution }
+  }
+  const resolution = await finish('completed', 'skipped')
+  const close = await closeSafely(deps, { companyId: input.companyId, reviewId: row.id, actorId: input.actorId,
+    outcome: 'skipped', resolutionAction: 'skip' })
+  return { resolution, close }
 }
 
 async function runClaim(deps, input, saved, context) {
@@ -339,6 +426,9 @@ async function runClaim(deps, input, saved, context) {
       resolutionStatus: finished.resolution.status ?? status })
     return finished
   }
+  const live = row.review_kind === 'live'
+  // A live row closed while this waited (e.g. by sync) completes the wait rather than superseding it.
+  if (live && phase !== 'applying' && ['cleared', 'no_longer_in_scope'].includes(row.status)) return finish('completed', 'completed')
   if (!await stillCurrent(deps, row, context.config) || saved.run_id !== row.run_id) return finish('superseded', 'superseded')
   if (phase !== 'applying' && ['cleared', 'no_longer_in_scope'].includes(row.status)) return finish('completed', 'completed')
   const deadline = Math.min(Date.parse(claimed.lease_expires_at) - 1000,
@@ -500,6 +590,13 @@ async function runClaim(deps, input, saved, context) {
   // Keep storage failures outside the provider-error catch: a failed finalization
   // leaves a live/expired lease for reconciliation instead of pretending success.
   const forced = plan.action === 'force_create_albi'
+  // Live link/create completes now and closes the row with every linked conflict (one resume each).
+  const liveClose = live && !plan.manualTasks.length ? LIVE_CLOSE_FOR_ACTION[plan.action] : null
+  if (liveClose) {
+    const finished = await finish('completed', 'completed', forced ? 'forced_created' : plan.action === 'link_existing' ? 'linked' : 'created',
+      forced ? { outcome: 'forced_created' } : {})
+    return { ...finished, close: await closeSafely(deps, { companyId: input.companyId, reviewId: row.id, actorId: input.actorId, ...liveClose }) }
+  }
   return finish(plan.verification.successStatus, plan.providerOperation ? reconciled ? 'provider_reconciled' : 'provider_applied'
     : plan.manualTasks.length ? 'waiting_on_albi' : 'recheck_requested', forced ? 'forced_created' : undefined,
   { manualTasks: plan.manualTasks, ...(forced ? { outcome: 'forced_created' } : {}) })
@@ -508,6 +605,15 @@ async function runClaim(deps, input, saved, context) {
 export async function executeReviewResolution(deps, input) {
   const decision = normalizeResolutionDecision(input.decision)
   const context = await currentReview(deps, input.companyId, input.reviewId)
+  const live = context.row.review_kind === 'live'
+  if (decision.action === 'skip_live' && !live) fail(400, 'Skip is only available for live reviews.')
+  if (live) {
+    // A completed resolution whose close failed is finished here instead of starting another decision.
+    let settled = null
+    try { settled = await settleLiveReviewClose(deps, { companyId: input.companyId, row: context.row, actorId: input.actorId }) }
+    catch { const saved = await deps.repository.getCurrentReviewResolution(input.companyId, input.reviewId); return { resolution: saved, close: { error: 'close_failed' } } }
+    if (settled) return { resolution: settled.resolution, close: settled.close }
+  }
   // The atomic RPC checks exact replay before freshness, including older intents.
   // Its stale rejection occurs before provider capability construction.
   const caps = createReviewResolutionCapabilities(deps.repository)
@@ -516,9 +622,11 @@ export async function executeReviewResolution(deps, input) {
     actorId: input.actorId, expectedUpdatedAt: input.expectedUpdatedAt, clientRequestId: input.clientRequestId, decision })
   const saved = rpc(created)
   if (terminal(saved)) return { resolution: saved }
-  if (context.row.status !== 'needs_review' && !(decision.action === 'create_albi' &&
+  if (live && context.row.status !== 'needs_review') stale('review')
+  if (!live && context.row.status !== 'needs_review' && !(decision.action === 'create_albi' &&
     context.row.status === 'cleared' && context.row.recheck_outcome === 'safe_to_create') && !(decision.action === 'link_existing' &&
     context.row.status === 'cleared' && context.row.recheck_outcome === 'safe_to_link')) stale('review')
+  if (saved.action === 'skip_live') return runLiveSkip(deps, input, saved, context)
   return runClaim(deps, input, saved, context)
 }
 
@@ -530,6 +638,7 @@ export async function reconcileReviewResolution(deps, input) {
   const stored = await deps.repository.getDryRunReview(input.companyId, saved.run_id, saved.review_id)
   if (!stored) fail(404, 'Sample review item not found.')
   const context = { config, row: { ...stored, company_id: input.companyId } }
+  if (saved.action === 'skip_live') return runLiveSkip(deps, input, saved, context)
   return runClaim(deps, input, saved, context)
 }
 

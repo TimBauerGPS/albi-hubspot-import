@@ -14,6 +14,11 @@ const MESSAGES = {
   stale: 'This sample review changed. Refresh it before rechecking.',
   superseded: 'This sample review is no longer current. Refresh before rechecking.',
 }
+const LIVE_MESSAGES = {
+  not_found: 'Review item not found.',
+  stale: 'This review changed. Refresh it before rechecking.',
+  failed: 'Unable to recheck this review.',
+}
 const CATEGORIES = new Set(['auth', 'permission', 'validation', 'permanent', 'transient', 'rate_limit'])
 const CODES = new Set(['pagination_loop', 'malformed_response', 'application_error', 'unsupported_contract', 'timeout', 'network'])
 const clock = deps => (deps.clockMs ?? Date.now)()
@@ -32,6 +37,8 @@ export function createReviewRepositoryCapabilities(repository) {
     getLatestCompletedSampleDryRun: repository.getLatestCompletedSampleDryRun.bind(repository),
     getCurrentReviewSample: repository.getCurrentReviewSample.bind(repository),
     getDryRunReview: repository.getDryRunReview.bind(repository),
+    // Kind-aware recheck reads the row by id first; absent on legacy sample-only adapters.
+    ...(typeof repository.getReview === 'function' ? { getReview: repository.getReview.bind(repository) } : {}),
     getMappings: repository.getMappings.bind(repository),
     appendDryRunReviewEvent: repository.appendDryRunReviewEvent.bind(repository),
     applyDryRunRecheck: repository.applyDryRunRecheck.bind(repository),
@@ -175,33 +182,26 @@ function organizationContext(evaluation, candidates, mappings, sourceId, portalI
   return { outcome: evaluation.outcome, targetId: null, organizationTypeId: resolved.action === 'resolved' ? resolved.contactTypeId : null }
 }
 
-export async function recheckDryRunReview(deps, { companyId, reviewId, actorId, expectedUpdatedAt }) {
+// Reads the current HubSpot source and Albi candidates and evaluates the row with the production
+// evaluators. Shared by sample and live rechecks; only reads and diagnostic events happen here.
+async function evaluateReviewRow(deps, { companyId, reviewId, actorId, row, config, runId, failureMessage, live = false }) {
   const repository = deps.repository
-  const { config, latest, sample } = await resolveReviewSample(repository, companyId)
-  if (!sample) {
-    if (latest?.review_capture_version === 1) fail(409, MESSAGES.superseded)
-    fail(409, 'Run a new sample to create detailed review data.')
-  }
-  const row = await repository.getDryRunReview(companyId, sample.id, reviewId)
-  if (!row) fail(404, MESSAGES.not_found)
-  if (!['contacts', 'companies'].includes(row.object_type)) fail(404, MESSAGES.not_found)
-  assertReviewClassification(row.reason, row.conflict_type)
-  if (row.updated_at !== expectedUpdatedAt) fail(409, MESSAGES.stale)
-  if (!row.source_id || !row.portal_id || config.portal_id !== row.portal_id) fail(409, MESSAGES.superseded)
-  await requireCurrentSample(repository, companyId, sample, config.initial_start_locked_at)
-  const started = await repository.appendDryRunReviewEvent(companyId, sample.id, reviewId,
-    { eventType: 'recheck_started', actorId, details: {}, now: iso(deps) })
-  if (!started) fail(404, MESSAGES.not_found)
   const deadline = clock(deps) + Math.min(60000, Math.max(1, deps.deadlineMs ?? 60000))
   const controller = new AbortController()
   const abortTimer = setTimeout(() => controller.abort(), Math.max(1, deadline - clock(deps)))
-  let source, evaluation
+  let source, evaluation, mergedInto = null
   try {
     const capabilities = deps.getReadClients ? await bounded(deps, () => deps.getReadClients(companyId, config, { signal: controller.signal }), deadline) : deps
     const hubspot = capabilities.hubspotRead, albi = capabilities.albiRead
     source = await currentSource(deps, hubspot, row.object_type, row.source_id, deadline)
-    if (!source) evaluation = { outcome: 'source_missing', evidence: [], candidates: [], proposedChanges: {} }
-    else {
+    if (!source) {
+      evaluation = { outcome: 'source_missing', evidence: [], candidates: [], proposedChanges: {} }
+      // A live row closes as gone only when HubSpot does not list the source as merged into a survivor.
+      if (live && typeof hubspot.getMergedInto === 'function') {
+        const survivor = await read(deps, () => hubspot.getMergedInto(row.object_type, row.source_id), deadline)
+        if (typeof survivor === 'string' && /^[1-9]\d{0,99}$/.test(survivor)) mergedInto = { sourceId: survivor }
+      }
+    } else {
       const associatedCompanyIds = row.object_type === 'contacts' ? associations(await read(deps, () => hubspot.getAssociations({
         objectType: 'contacts', objectIds: [row.source_id], toObjectTypes: ['companies'],
       }), deadline), row.source_id) : []
@@ -249,31 +249,61 @@ export async function recheckDryRunReview(deps, { companyId, reviewId, actorId, 
     if (clock(deps) >= deadline) throw timeout()
   } catch (error) {
     controller.abort()
-    try { await repository.appendDryRunReviewEvent(companyId, sample.id, reviewId,
+    try { await repository.appendDryRunReviewEvent(companyId, runId, reviewId,
       { eventType: 'recheck_failed', actorId, details: fixedFailure(error), now: iso(deps) }) }
     catch { /* Failed auditing cannot make the unchanged row safe. */ }
     try {
       const { recordResolutionRecheckFailure } = await import('./reviewResolutionService.js')
       await recordResolutionRecheckFailure(deps, { companyId, reviewId, actorId }, error)
     } catch { /* An unchanged durable intent remains available for reconciliation. */ }
-    fail(502, 'Unable to recheck this sample review.')
+    fail(502, failureMessage)
   } finally { clearTimeout(abortTimer) }
-  await requireCurrentSample(repository, companyId, sample, config.initial_start_locked_at)
-  const terminal = {
-    needs_review: { status: 'needs_review', outcome: 'still_needs_review', eventType: 'still_needs_review' },
-    safe_to_link: { status: 'cleared', outcome: 'safe_to_link', eventType: 'cleared' },
-    safe_to_create: { status: 'cleared', outcome: 'safe_to_create', eventType: 'cleared' },
-    source_missing: { status: 'no_longer_in_scope', outcome: 'source_missing', eventType: 'no_longer_in_scope' },
-  }[evaluation.outcome]
-  if (!terminal) fail(502, 'Unable to recheck this sample review.')
-  const result = await repository.applyDryRunRecheck(companyId, { runId: sample.id, reviewId, expectedUpdatedAt, actorId,
-    ...terminal, reason: evaluation.outcome === 'needs_review' ? evaluation.reason : row.reason,
+  return { source, evaluation, mergedInto }
+}
+
+function recheckPayload(row, source, evaluation) {
+  return { reason: evaluation.outcome === 'needs_review' ? evaluation.reason : row.reason,
     conflictType: evaluation.outcome === 'needs_review' ? evaluation.conflictType : row.conflict_type,
     sourceSnapshot: safeReviewSnapshot(source ?? row.source_snapshot, row.object_type),
     candidateSnapshots: safeReviewCandidates(evaluation.candidates, row.object_type),
     matchEvidence: { evidence: safeReviewEvidence(evaluation.evidence) },
-    proposedChanges: safeReviewChanges(evaluation.proposedChanges, row.object_type),
-    eventDetails: { outcome: terminal.outcome }, now: iso(deps) })
+    proposedChanges: safeReviewChanges(evaluation.proposedChanges, row.object_type) }
+}
+
+const RECHECK_TERMINALS = {
+  needs_review: { status: 'needs_review', outcome: 'still_needs_review', eventType: 'still_needs_review' },
+  safe_to_link: { status: 'cleared', outcome: 'safe_to_link', eventType: 'cleared' },
+  safe_to_create: { status: 'cleared', outcome: 'safe_to_create', eventType: 'cleared' },
+  source_missing: { status: 'no_longer_in_scope', outcome: 'source_missing', eventType: 'no_longer_in_scope' },
+}
+
+export async function recheckDryRunReview(deps, { companyId, reviewId, actorId, expectedUpdatedAt }) {
+  const repository = deps.repository
+  // Kind comes from the stored row: live rows never consult the sample gate.
+  const stored = typeof repository.getReview === 'function' ? await repository.getReview(companyId, reviewId) : null
+  if (stored?.review_kind === 'live') return recheckLiveReview(deps, { companyId, reviewId, actorId, expectedUpdatedAt }, stored)
+  const { config, latest, sample } = await resolveReviewSample(repository, companyId)
+  if (!sample) {
+    if (latest?.review_capture_version === 1) fail(409, MESSAGES.superseded)
+    fail(409, 'Run a new sample to create detailed review data.')
+  }
+  const row = await repository.getDryRunReview(companyId, sample.id, reviewId)
+  if (!row) fail(404, MESSAGES.not_found)
+  if (!['contacts', 'companies'].includes(row.object_type)) fail(404, MESSAGES.not_found)
+  assertReviewClassification(row.reason, row.conflict_type)
+  if (row.updated_at !== expectedUpdatedAt) fail(409, MESSAGES.stale)
+  if (!row.source_id || !row.portal_id || config.portal_id !== row.portal_id) fail(409, MESSAGES.superseded)
+  await requireCurrentSample(repository, companyId, sample, config.initial_start_locked_at)
+  const started = await repository.appendDryRunReviewEvent(companyId, sample.id, reviewId,
+    { eventType: 'recheck_started', actorId, details: {}, now: iso(deps) })
+  if (!started) fail(404, MESSAGES.not_found)
+  const { source, evaluation } = await evaluateReviewRow(deps, { companyId, reviewId, actorId, row, config,
+    runId: sample.id, failureMessage: 'Unable to recheck this sample review.' })
+  await requireCurrentSample(repository, companyId, sample, config.initial_start_locked_at)
+  const terminal = RECHECK_TERMINALS[evaluation.outcome]
+  if (!terminal) fail(502, 'Unable to recheck this sample review.')
+  const result = await repository.applyDryRunRecheck(companyId, { runId: sample.id, reviewId, expectedUpdatedAt, actorId,
+    ...terminal, ...recheckPayload(row, source, evaluation), eventDetails: { outcome: terminal.outcome }, now: iso(deps) })
   if (result?.error) fail(result.error === 'not_found' ? 404 : ['stale', 'superseded'].includes(result.error) ? 409 : 502,
     MESSAGES[result.error] ?? 'Unable to recheck this sample review.')
   if (!isRecord(result?.review)) fail(502, 'Unable to recheck this sample review.')
@@ -281,6 +311,43 @@ export async function recheckDryRunReview(deps, { companyId, reviewId, actorId, 
   const finalized = await finalizeRecheckedResolution(deps, { companyId, reviewId, actorId }, result.review)
   await refreshReviewTriage(deps.triageRepository, { companyId, row: result.review, resolutionStatus: finalized?.resolution?.status })
   return { review: result.review, sample, config }
+}
+
+// A live recheck refreshes evidence on the open row, then closes it when the record now auto-links
+// or is already mapped (resolved_by_sync, or the reviewer's own completed link/create), or when its
+// HubSpot source was deleted (source_missing). A merged source stays open with the merge block.
+async function recheckLiveReview(deps, { companyId, reviewId, actorId, expectedUpdatedAt }, row) {
+  const repository = deps.repository
+  if (!['contacts', 'companies'].includes(row.object_type)) fail(404, LIVE_MESSAGES.not_found)
+  assertReviewClassification(row.reason, row.conflict_type)
+  const config = await repository.getConfig(companyId)
+  const service = await import('./reviewResolutionService.js')
+  // A completed resolution whose close did not finish is closed now instead of being re-evaluated.
+  let settled
+  try { settled = await service.settleLiveReviewClose(deps, { companyId, row, actorId }) } catch { fail(502, LIVE_MESSAGES.failed) }
+  if (settled) return { review: settled.review, config, close: settled.close }
+  if (row.status !== 'needs_review' || row.updated_at !== expectedUpdatedAt) fail(409, LIVE_MESSAGES.stale)
+  if (!row.source_id || !row.portal_id || config?.portal_id !== row.portal_id) fail(409, LIVE_MESSAGES.stale)
+  const started = await repository.appendDryRunReviewEvent(companyId, row.run_id, reviewId,
+    { eventType: 'recheck_started', actorId, details: {}, now: iso(deps) })
+  if (!started) fail(404, LIVE_MESSAGES.not_found)
+  const { source, evaluation, mergedInto } = await evaluateReviewRow(deps, { companyId, reviewId, actorId, row, config,
+    runId: row.run_id, failureMessage: LIVE_MESSAGES.failed, live: true })
+  const terminal = RECHECK_TERMINALS[evaluation.outcome]
+  if (!terminal) fail(502, LIVE_MESSAGES.failed)
+  const result = await repository.applyDryRunRecheck(companyId, { runId: row.run_id, reviewId, expectedUpdatedAt, actorId,
+    kind: 'live', status: 'needs_review', outcome: terminal.outcome, eventType: 'still_needs_review',
+    ...recheckPayload(row, source, evaluation), eventDetails: { outcome: terminal.outcome }, now: iso(deps) })
+  if (result?.error) fail(result.error === 'not_found' ? 404 : ['stale', 'superseded'].includes(result.error) ? 409 : 502,
+    result.error === 'not_found' ? LIVE_MESSAGES.not_found : result.error === 'invalid_recheck' ? LIVE_MESSAGES.failed : LIVE_MESSAGES.stale)
+  if (!isRecord(result?.review)) fail(502, LIVE_MESSAGES.failed)
+  const closeOutcome = evaluation.outcome === 'safe_to_link' ? 'resolved_by_sync'
+    : evaluation.outcome === 'source_missing' && !mergedInto ? 'source_missing' : null
+  const finalized = await service.finalizeLiveRecheck(deps, { companyId, reviewId, actorId }, result.review, closeOutcome)
+  const review = finalized.review ?? result.review
+  await refreshReviewTriage(deps.triageRepository, { companyId, row: review, resolutionStatus: finalized.resolution?.status,
+    mergedInto: evaluation.outcome === 'source_missing' ? mergedInto : null })
+  return { review, config, ...(finalized.close ? { close: finalized.close } : {}) }
 }
 
 // Batch rechecks read the open queue and claim, heartbeat and finish their own batch row.
@@ -358,7 +425,7 @@ export async function runReviewRecheckBatch(deps, { companyId, batchId }) {
       else counts.stillNeedsReview++
     } catch (error) {
       if (error?.message === MESSAGES.superseded) return finish('failed', 'superseded')
-      if (error?.message === MESSAGES.stale || error?.message === MESSAGES.not_found) counts.stale++
+      if ([MESSAGES.stale, MESSAGES.not_found, LIVE_MESSAGES.stale, LIVE_MESSAGES.not_found].includes(error?.message)) counts.stale++
       else counts.failed++
     }
     counts.done++

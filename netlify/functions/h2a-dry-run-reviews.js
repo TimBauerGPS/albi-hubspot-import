@@ -2,12 +2,14 @@ import { H2AAuthError, requireH2ARequest } from './_h2a/auth.js'
 import { createH2ARepository } from './_h2a/repository.js'
 import { createH2AProviderClients, readOnlyH2ACapabilities } from './_h2a/providerClients.js'
 import { H2AReviewError, createReviewRepositoryCapabilities, recheckDryRunReview, resolveReviewSample, reviewProgress } from './_h2a/reviewService.js'
-import { createReviewReconciliationCapabilities } from './_h2a/reviewResolutionService.js'
+import { createReviewReconciliationCapabilities, settleLiveReviewClose } from './_h2a/reviewResolutionService.js'
+import { createLiveCloseCapabilities } from './_h2a/liveReview.js'
+import { defaultDispatchResume } from './h2a-conflict-resolve.js'
 import { REVIEW_REASONS, projectReviewRow, projectReviewEvent, safeReviewSnapshot } from './_h2a/review.js'
 import { ApiError } from './_h2a/http.js'
 import { currentResolutionProjection } from './h2a-dry-run-review-resolutions.js'
 import { projectResolutionCapability } from './_h2a/resolutionCapability.js'
-import { createTriageCapabilities, refreshReviewTriage } from './_h2a/triage.js'
+import { TRIAGE_BUCKETS, createTriageCapabilities, refreshReviewTriage } from './_h2a/triage.js'
 import { loadReviewResolutionOptions } from './_h2a/reviewResolutionOptions.js'
 import { getH2AReviewActions } from '../../shared/h2aReviewReasons.js'
 
@@ -58,21 +60,25 @@ function request(event) {
     if (Object.hasOwn(body, 'prepareOrganization') && body.prepareOrganization !== true) fail(400, 'Invalid sample review request.')
     if (Object.keys(query).some(key => key !== 'companyId')) fail(400, 'Unsupported query parameters.')
     if (!UUID.test(body.reviewId ?? '') || !validTime(body.expectedUpdatedAt)) fail(400, 'Invalid sample review request.')
-  } else if (Object.keys(query).some(key => !['companyId', 'limit', 'cursor', 'status', 'objectType', 'reason', 'reviewId'].includes(key))) fail(400, 'Unsupported query parameters.')
+  } else if (Object.keys(query).some(key => !['companyId', 'limit', 'cursor', 'status', 'objectType', 'reason', 'reviewId', 'kind', 'bucket'].includes(key))) fail(400, 'Unsupported query parameters.')
   const selectors = [query.companyId, body.companyId].filter(value => value !== undefined)
   if (selectors.some(value => typeof value !== 'string' || !value.trim() || value.length > 200) || new Set(selectors).size > 1) fail(400, 'A single company selector is required.')
   if (event.httpMethod === 'POST') return { companyId: selectors[0], ...body }
   if (query.reviewId !== undefined) {
-    if (!UUID.test(query.reviewId) || Object.keys(query).some(key => !['companyId', 'reviewId'].includes(key))) fail(400, 'Invalid sample review request.')
+    // A detail's kind comes from its stored row; an explicit kind is accepted but not trusted.
+    if (!UUID.test(query.reviewId) || Object.keys(query).some(key => !['companyId', 'reviewId', 'kind'].includes(key)) ||
+      query.kind !== undefined && !['sample', 'live'].includes(query.kind)) fail(400, 'Invalid sample review request.')
     return { companyId: selectors[0], reviewId: query.reviewId }
   }
   const limit = query.limit === undefined ? 25 : typeof query.limit === 'string' && /^\d{1,3}$/.test(query.limit) ? Number(query.limit) : NaN
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) fail(400, 'Sample review page size must be between 1 and 100.')
   if (query.status !== undefined && !['needs_review', 'cleared', 'no_longer_in_scope'].includes(query.status) ||
     query.objectType !== undefined && !['contacts', 'companies'].includes(query.objectType) ||
-    query.reason !== undefined && !REVIEW_REASONS.has(query.reason)) fail(400, 'Unsupported sample review filters.')
-  return { companyId: selectors[0], filters: { limit, before: cursor(query.cursor), status: query.status ?? null,
-    objectType: query.objectType ?? null, reason: query.reason ?? null } }
+    query.reason !== undefined && !REVIEW_REASONS.has(query.reason) ||
+    query.kind !== undefined && !['sample', 'live'].includes(query.kind) ||
+    query.bucket !== undefined && !TRIAGE_BUCKETS.includes(query.bucket)) fail(400, 'Unsupported sample review filters.')
+  return { companyId: selectors[0], kind: query.kind ?? 'sample', filters: { limit, before: cursor(query.cursor), status: query.status ?? null,
+    objectType: query.objectType ?? null, reason: query.reason ?? null, kind: query.kind ?? 'sample', bucket: query.bucket ?? null, includeCounts: true } }
 }
 
 async function detail(repository, companyId, runId, row, auth, options, config) {
@@ -219,6 +225,9 @@ export function createDryRunReviewHandler(options = {}) {
           .every(method => typeof repository[method] === 'function') ? createReviewReconciliationCapabilities(repository) : undefined
         const result = await recheckDryRunReview({ repository: createReviewRepositoryCapabilities(repository), resolutionRepository,
           triageRepository: createTriageCapabilities(repository),
+          // Live rows close through the close RPC when a recheck finds them resolved or gone.
+          liveCloseRepository: createLiveCloseCapabilities(repository),
+          dispatchResume: options.dispatchResume ?? (intent => defaultDispatchResume(intent, options)),
           now: options.now, clockMs: options.clockMs,
           sleep: options.sleep, deadlineMs: options.deadlineMs, getReadClients: async (_companyId, config, { signal }) => {
             const clients = options.makeClients ? await options.makeClients(companyId) : await createH2AProviderClients({
@@ -231,8 +240,36 @@ export function createDryRunReviewHandler(options = {}) {
             if (!options.makeClients && (await clients.hubspot.getAccountInfo()).portalId !== config.portal_id) throw new ApiError('permission')
             return readOnlyH2ACapabilities(clients)
           } }, { companyId, reviewId: input.reviewId, expectedUpdatedAt: input.expectedUpdatedAt, actorId: auth.userId })
+        if (!result.sample) return reply(200, { item: await detail(repository, companyId, result.review.run_id, result.review, auth, options, result.config) })
         return reply(200, { item: await detail(repository, companyId, result.sample.id, result.review, auth, options, result.config),
           progress: await reviewProgress(repository, companyId, result.sample, result.config.initial_start_locked_at) })
+      }
+      if (input.reviewId) {
+        const stored = typeof repository.getReview === 'function' ? await repository.getReview(companyId, input.reviewId) : null
+        if (stored?.review_kind === 'live') {
+          const config = await repository.getConfig(companyId)
+          if (!config?.portal_id || stored.portal_id !== config.portal_id || !['contacts', 'companies'].includes(stored.object_type)) {
+            fail(404, 'Sample review item not found.')
+          }
+          // A completed resolution whose close failed earlier is closed now (best effort; idempotent).
+          let row = stored
+          try {
+            const settled = await settleLiveReviewClose({ repository,
+              dispatchResume: options.dispatchResume ?? (intent => defaultDispatchResume(intent, options)) },
+            { companyId, row: stored, actorId: auth.userId })
+            if (settled?.review) row = settled.review
+          } catch { /* The open row stays the retry marker for the next detail load or recheck. */ }
+          return reply(200, { item: await detail(repository, companyId, row.run_id, row, auth, options, config) })
+        }
+      }
+      if (input.kind === 'live') {
+        const page = await repository.listDryRunReviews(companyId, null, input.filters)
+        const resolutionStatuses = typeof repository.getCurrentReviewResolution === 'function'
+          ? await Promise.all(page.items.map(async row => (await repository.getCurrentReviewResolution(companyId, row.id))?.status ?? null)) : []
+        const last = page.items.at(-1)
+        return reply(200, { items: page.items.map((row, index) => projectReviewRow({ ...row, resolution_status: resolutionStatuses[index] })),
+          nextCursor: page.hasMore && last ? Buffer.from(JSON.stringify({ createdAt: last.created_at, id: last.id })).toString('base64url') : null,
+          ...(page.bucketCounts ? { bucketCounts: page.bucketCounts } : {}) })
       }
       const { config, latest, sample } = await resolveReviewSample(repository, companyId)
       if (input.reviewId) {
@@ -254,7 +291,8 @@ export function createDryRunReviewHandler(options = {}) {
       const last = page.items.at(-1)
       return reply(200, { sample: metadata, progress: await reviewProgress(repository, companyId, sample, config.initial_start_locked_at),
         items: page.items.map((row, index) => projectReviewRow({ ...row, resolution_status: resolutionStatuses[index] })), nextCursor: page.hasMore && last
-          ? Buffer.from(JSON.stringify({ createdAt: last.created_at, id: last.id })).toString('base64url') : null })
+          ? Buffer.from(JSON.stringify({ createdAt: last.created_at, id: last.id })).toString('base64url') : null,
+        ...(page.bucketCounts ? { bucketCounts: page.bucketCounts } : {}) })
     } catch (error) {
       const typed = error instanceof H2AReviewError || error instanceof H2AAuthError
       const fallback = isRecheck ? 'Unable to recheck this sample review.' : 'Unable to load sample reviews.'

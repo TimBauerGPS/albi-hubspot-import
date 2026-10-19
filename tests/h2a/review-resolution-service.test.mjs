@@ -4,6 +4,7 @@ import { executeReviewResolution, reconcileReviewResolution, createReviewResolut
   createReviewReconciliationCapabilities } from '../../netlify/functions/_h2a/reviewResolutionService.js'
 import { recheckDryRunReview, createReviewRepositoryCapabilities } from '../../netlify/functions/_h2a/reviewService.js'
 import { ApiError } from '../../netlify/functions/_h2a/http.js'
+import { liveCloseStore } from './live-close-fixture.mjs'
 
 const stamp = '2026-10-13T12:00:00Z'
 const actorId = '00000000-0000-4000-8000-000000000001'
@@ -776,4 +777,126 @@ test('a review cleared as safe to link can save that link now', async () => {
   assert.equal(f.mappings.contacts[0].albi_contact_id, '20')
   const other = fixture(); other.row.status = 'cleared'; other.row.recheck_outcome = 'safe_to_create'
   await assert.rejects(executeReviewResolution(other.deps, { ...input, decision: { action: 'link_existing', candidateId: '20' } }), error => error.statusCode === 409)
+})
+
+// A live row: captured by a live run, closed through the close RPC, never tied to the latest sample.
+function liveFixture({ reason = 'multiple_candidates', conflictType = 'contact_match' } = {}) {
+  const f = fixture()
+  Object.assign(f.row, { review_kind: 'live', run_id: 'live-run', reason, conflict_type: conflictType })
+  const store = liveCloseStore({ review: f.row })
+  Object.assign(f.deps.repository, store.methods, { getReview: async () => f.row })
+  f.deps.dispatchResume = store.dispatchResume
+  f.store = store
+  return f
+}
+const linkLive = { ...input, decision: { action: 'link_existing', candidateId: '20' } }
+const skipLive = { ...input, decision: { action: 'skip_live' } }
+
+test('live link completion closes every linked conflict and enqueues one resume each', async () => {
+  const f = liveFixture()
+  const result = await executeReviewResolution(f.deps, linkLive)
+  assert.equal(result.resolution.status, 'completed')
+  assert.equal(result.resolution.provider_outcome_code, 'linked')
+  assert.deepEqual(f.mappings.contacts.map(row => row.albi_contact_id), ['20'])
+  assert.deepEqual(f.store.state.closeCalls.map(call => [call.outcome, call.resolutionAction]), [['resolved', 'link_existing']])
+  assert.deepEqual(f.store.state.conflicts.map(conflict => [conflict.status, conflict.resolution_action]),
+    [['resolved', 'link_existing'], ['resolved', 'link_existing']])
+  assert.equal(f.store.state.resumes.length, 2)
+  assert.deepEqual(f.store.state.dispatched, ['resume-1', 'resume-2'])
+  assert.equal(f.row.status, 'cleared')
+  assert.deepEqual({ dispatched: result.close.dispatched, pending: result.close.pending }, { dispatched: 2, pending: 0 })
+})
+
+test('live create completion closes as resolved with create_new', async () => {
+  const f = liveFixture(), createInput = asCreate(f)
+  const result = await executeReviewResolution(f.deps, createInput)
+  assert.equal(result.resolution.status, 'completed')
+  assert.deepEqual(f.store.state.closeCalls.map(call => [call.outcome, call.resolutionAction]), [['resolved', 'create_new']])
+  assert.equal(f.store.state.resumes.length, 2)
+})
+
+test('replaying a completed live link does not close twice or insert a second resume', async () => {
+  const f = liveFixture()
+  await executeReviewResolution(f.deps, linkLive)
+  const replay = await executeReviewResolution(f.deps, linkLive)
+  assert.equal(replay.resolution.status, 'completed')
+  assert.equal(f.store.state.resumes.length, 2)
+  assert.equal(f.store.state.dispatched.length, 2)
+  assert.equal(f.calls.filter(call => call === 'mapping').length, 1)
+})
+
+test('a failed close after live completion keeps the resolution and is retried on the next attempt', async () => {
+  const f = liveFixture(); f.store.state.failClose = 1
+  const result = await executeReviewResolution(f.deps, linkLive)
+  assert.equal(result.resolution.status, 'completed')
+  assert.equal(result.close.error, 'close_failed')
+  assert.equal(f.row.status, 'needs_review')
+  assert.equal(f.store.state.resumes.length, 0)
+  // The completed resolution on a still-open live row is the durable marker; a recheck finishes the close.
+  const rechecked = await recheckDryRunReview(f.deps, input)
+  assert.equal(rechecked.review.status, 'cleared')
+  assert.deepEqual(f.store.state.closeCalls.map(call => call.outcome), ['resolved', 'resolved'])
+  assert.equal(f.store.state.resumes.length, 2)
+  assert.equal(f.calls.filter(call => call === 'mapping').length, 1)
+})
+
+test('a failed close is also retried by replaying the same request', async () => {
+  const f = liveFixture(); f.store.state.failClose = 1
+  await executeReviewResolution(f.deps, linkLive)
+  const replay = await executeReviewResolution(f.deps, linkLive)
+  assert.equal(replay.resolution.status, 'completed')
+  assert.equal(f.row.status, 'cleared')
+  assert.equal(f.store.state.resumes.length, 2)
+})
+
+test('skip_live is rejected on sample rows', async () => {
+  const f = fixture()
+  await assert.rejects(executeReviewResolution(f.deps, skipLive), error => error.statusCode === 400)
+  assert.equal(f.intent, null)
+  assert.deepEqual(f.calls, [])
+})
+
+test('skip_live closes conflicts as skipped and writes the skipped ledger', async () => {
+  const f = liveFixture()
+  f.deps.getResolutionClients = () => { throw Error('provider clients are not needed to skip') }
+  const result = await executeReviewResolution(f.deps, skipLive)
+  assert.equal(result.resolution.status, 'completed')
+  assert.equal(result.resolution.action, 'skip_live')
+  assert.equal(result.resolution.provider_outcome_code, 'skipped')
+  assert.deepEqual(f.store.state.closeCalls.map(call => [call.outcome, call.resolutionAction]), [['skipped', 'skip']])
+  assert.deepEqual(f.store.state.conflicts.map(conflict => conflict.status), ['skipped', 'skipped'])
+  assert.deepEqual(f.store.state.conflictEvents.map(event => [event.event_type, event.resolution_action]), [['skipped', 'skip'], ['skipped', 'skip']])
+  assert.equal(f.store.state.resumes.length, 0)
+  assert.equal(f.row.status, 'no_longer_in_scope')
+  // Audited as a resolution event; no provider read or write.
+  assert.deepEqual(f.events.at(-1), { actorId, status: 'completed', eventType: 'completed', providerOutcomeCode: 'skipped',
+    details: { code: 'skipped', outcome: 'skipped' } })
+  assert.equal(f.calls.includes('read-source'), false)
+  assert.deepEqual(mutations(f), [])
+})
+
+test('sample rows still supersede when a newer sample exists', async () => {
+  const f = fixture(); f.row.reason = 'multiple_candidates'; f.row.conflict_type = 'contact_match'
+  const original = f.deps.repository.getMappings
+  f.deps.repository.getMappings = async () => { f.latest = 'new-sample'; return original() }
+  const result = await executeReviewResolution(f.deps, linkLive)
+  assert.equal(result.resolution.status, 'superseded')
+  assert.deepEqual(f.mappings.contacts, [])
+})
+
+test('live rows are not superseded by a newer sample', async () => {
+  const f = liveFixture(); f.latest = 'new-sample'
+  const result = await executeReviewResolution(f.deps, linkLive)
+  assert.equal(result.resolution.status, 'completed')
+  assert.deepEqual(f.mappings.contacts.map(row => row.albi_contact_id), ['20'])
+})
+
+test('a live row closed by another path before the write is superseded, not linked', async () => {
+  const f = liveFixture()
+  const original = f.deps.repository.getMappings
+  f.deps.repository.getMappings = async () => { f.row.status = 'no_longer_in_scope'; return original() }
+  const result = await executeReviewResolution(f.deps, linkLive)
+  assert.equal(result.resolution.status, 'superseded')
+  assert.deepEqual(f.mappings.contacts, [])
+  assert.deepEqual(f.store.state.closeCalls, [])
 })

@@ -12,6 +12,8 @@ const REVIEW_EVENT_COLUMNS = 'id,company_id,review_id,actor_id,event_type,reason
 const CAPTURED_EVENT_INDEX = 'h2a_dry_review_events_captured_once_idx'
 const REVIEW_STATUSES = new Set(['needs_review', 'cleared', 'no_longer_in_scope'])
 const REVIEW_KINDS = new Set(['sample', 'live'])
+const LIVE_CLOSE_OUTCOMES = new Set(['resolved', 'resolved_by_sync', 'skipped', 'source_missing'])
+const LIVE_CLOSE_ACTIONS = new Set(['link_existing', 'create_new', 'skip'])
 const TRIAGE_BUCKETS = ['quick', 'todo', 'decision', 'blocked', 'done']
 const REVIEW_OBJECT_TYPES = new Set(['contacts', 'companies'])
 const REVIEW_EVENT_TYPES = new Set(['captured', 'recheck_started', 'still_needs_review', 'cleared', 'no_longer_in_scope', 'recheck_failed'])
@@ -96,6 +98,11 @@ function reviewQuery(supabase, companyId, runId) {
   requireReviewIdentity(runId)
   return supabase.from('h2a_dry_run_reviews').select(REVIEW_COLUMNS)
     .eq('company_id', companyId).eq('run_id', runId)
+}
+
+function liveReviewQuery(supabase, companyId) {
+  requireReviewIdentity(companyId)
+  return supabase.from('h2a_dry_run_reviews').select(REVIEW_COLUMNS).eq('company_id', companyId)
 }
 
 function reviewSourceIdentity(query, row) {
@@ -340,7 +347,8 @@ export function createH2ARepository(supabase) {
         requireReviewTimestamp(before.createdAt)
         if (typeof before.id !== 'string' || !UUID_SHAPE.test(before.id)) throw new TypeError('Invalid review cursor')
       }
-      let query = reviewQuery(supabase, companyId, runId)
+      // Live rows span every live run that captured them; only sample lists are run-scoped.
+      let query = kind === 'live' && runId === null ? liveReviewQuery(supabase, companyId) : reviewQuery(supabase, companyId, runId)
       if (status !== null) query = query.eq('status', status)
       if (objectType !== null) query = query.eq('object_type', objectType)
       if (reason !== null) query = query.eq('reason', reason)
@@ -356,11 +364,12 @@ export function createH2ARepository(supabase) {
     // Counts for the current kind and run; independent of the page filters so tabs stay stable.
     async countReviewBuckets(companyId, runId, kind = 'sample') {
       requireReviewIdentity(companyId)
-      requireReviewIdentity(runId)
       requireReviewValue(kind, REVIEW_KINDS, 'kind')
+      if (!(kind === 'live' && runId === null)) requireReviewIdentity(runId)
       const entries = await Promise.all(TRIAGE_BUCKETS.map(async triageBucket => {
-        const result = await supabase.from('h2a_dry_run_reviews').select('id', { count: 'exact', head: true })
-          .eq('company_id', companyId).eq('run_id', runId).eq('review_kind', kind).eq('triage_bucket', triageBucket)
+        let query = supabase.from('h2a_dry_run_reviews').select('id', { count: 'exact', head: true }).eq('company_id', companyId)
+        if (runId !== null) query = query.eq('run_id', runId)
+        const result = await query.eq('review_kind', kind).eq('triage_bucket', triageBucket)
         if (result?.error) throw result.error
         if (!Number.isSafeInteger(result?.count) || result.count < 0) throw new Error('Invalid review count')
         return [triageBucket, result.count]
@@ -489,6 +498,14 @@ export function createH2ARepository(supabase) {
       }
       throw new Error('Live review capture did not settle')
     },
+    // One transaction: closes the live row, marks its open conflicts and inserts their resumes.
+    async closeLiveReview(companyId, { reviewId, actorId, outcome, resolutionAction = null } = {}) {
+      for (const value of [companyId, reviewId, actorId]) requireReviewIdentity(value)
+      requireReviewValue(outcome, LIVE_CLOSE_OUTCOMES, 'close outcome')
+      if (resolutionAction !== null) requireReviewValue(resolutionAction, LIVE_CLOSE_ACTIONS, 'close action')
+      return checked(await supabase.rpc('h2a_close_live_review', { p_company_id: companyId, p_review_id: reviewId,
+        p_actor_id: actorId, p_outcome: outcome, p_resolution_action: resolutionAction }))
+    },
     async linkLiveReviewConflict(companyId, reviewId, conflictId) {
       for (const value of [companyId, reviewId, conflictId]) requireReviewIdentity(value)
       const result = await supabase.from('h2a_live_review_conflicts')
@@ -511,13 +528,18 @@ export function createH2ARepository(supabase) {
         safe_to_link: ['cleared', 'cleared'], safe_to_create: ['cleared', 'cleared'],
         source_missing: ['no_longer_in_scope', 'no_longer_in_scope'],
       }
-      if (!Object.hasOwn(terminal, input.outcome) || terminal[input.outcome][0] !== input.status || terminal[input.outcome][1] !== input.eventType) {
+      // A live recheck only refreshes evidence and records its outcome; the row closes through the close RPC.
+      const live = input.kind === 'live'
+      if (!Object.hasOwn(terminal, input.outcome) || (live
+        ? input.status !== 'needs_review' || input.eventType !== 'still_needs_review'
+        : terminal[input.outcome][0] !== input.status || terminal[input.outcome][1] !== input.eventType)) {
         throw new TypeError('Invalid review recheck state')
       }
       const event = reviewEventPayload(companyId, input.reviewId, { eventType: input.eventType, reason: input.reason,
         actorId: input.actorId, details: input.eventDetails, now: input.now })
       const review = await this.getDryRunReview(companyId, input.runId, input.reviewId)
       if (!review) return { error: 'not_found' }
+      if (live !== (review.review_kind === 'live')) return { error: 'stale' }
       requireReviewValue(review.object_type, REVIEW_OBJECT_TYPES, 'object type')
       const evidence = reviewEvidencePayload({ source_snapshot: input.sourceSnapshot, candidate_snapshots: input.candidateSnapshots,
         match_evidence: input.matchEvidence, proposed_changes: input.proposedChanges }, review.object_type)

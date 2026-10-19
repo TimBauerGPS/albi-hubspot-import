@@ -1,7 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createH2ARepository } from '../../netlify/functions/_h2a/repository.js'
-import { captureLiveReview } from '../../netlify/functions/_h2a/liveReview.js'
+import { captureLiveReview, closeLiveReview } from '../../netlify/functions/_h2a/liveReview.js'
+import { dispatchConflictResumes } from '../../netlify/functions/_h2a/conflicts.js'
+import { liveCloseStore } from './live-close-fixture.mjs'
 
 // In-memory double of the two tables, enforcing the real unique keys (including the
 // per-run key that still applies to live rows and the live partial index).
@@ -227,4 +229,76 @@ test('refresh keeps stored merge and blocked knowledge the capture lacks', async
   db.tables.h2a_dry_run_reviews[0].triage_details = { blockedReason: 'salesperson_not_found' }
   await captureLiveReview(deps, { ...base, runId: 'run-4', conflictId: 'conflict-d', createReadiness: { ready: true } })
   assert.deepEqual(db.tables.h2a_dry_run_reviews[0].triage_details, { quickKind: 'create' })
+})
+
+const liveReviewId = '00000000-0000-4000-8000-0000000000aa'
+const closeActor = '00000000-0000-4000-8000-0000000000bb'
+
+test('closing a live review dispatches one resume per resolved conflict and reports counts', async () => {
+  const store = liveCloseStore({ reviewId: liveReviewId })
+  const deps = { repository: store.methods, dispatchResume: store.dispatchResume }
+  const result = await closeLiveReview(deps, { companyId: 'company-1', reviewId: liveReviewId, actorId: closeActor,
+    outcome: 'resolved', resolutionAction: 'link_existing' })
+  assert.deepEqual(result.closedConflictIds, ['c-1', 'c-2'])
+  assert.equal(result.resumeIds.length, 2)
+  assert.equal(result.replayed, false)
+  assert.equal(result.dispatched, 2)
+  assert.equal(result.pending, 0)
+  assert.deepEqual(store.state.dispatched, result.resumeIds)
+  assert.deepEqual(store.state.closeCalls[0], { companyId: 'company-1', reviewId: liveReviewId, actorId: closeActor,
+    outcome: 'resolved', resolutionAction: 'link_existing' })
+})
+
+test('replaying close inserts no second resume', async () => {
+  const store = liveCloseStore({ reviewId: liveReviewId })
+  const deps = { repository: store.methods, dispatchResume: store.dispatchResume }
+  const args = { companyId: 'company-1', reviewId: liveReviewId, actorId: closeActor, outcome: 'resolved', resolutionAction: 'create_new' }
+  await closeLiveReview(deps, args)
+  const replay = await closeLiveReview(deps, args)
+  assert.equal(replay.replayed, true)
+  assert.equal(store.state.resumes.length, 2)
+  assert.equal(store.state.conflictEvents.length, 2)
+  // Already-dispatched resumes are not dispatched again and are not reported as pending.
+  assert.equal(store.state.dispatched.length, 2)
+  assert.equal(replay.dispatched, 2)
+  assert.equal(replay.pending, 0)
+})
+
+test('a resume that cannot be dispatched stays pending for the nightly retry', async () => {
+  const store = liveCloseStore({ reviewId: liveReviewId })
+  const deps = { repository: store.methods, dispatchResume: async () => false }
+  const result = await closeLiveReview(deps, { companyId: 'company-1', reviewId: liveReviewId, actorId: closeActor,
+    outcome: 'resolved_by_sync', resolutionAction: null })
+  assert.equal(result.dispatched, 0)
+  assert.equal(result.pending, 2)
+  assert.deepEqual(store.state.resumes.map(resume => resume.status), ['pending', 'pending'])
+  assert.deepEqual(store.state.conflicts.map(conflict => conflict.resolution_action), ['link_existing', 'link_existing'])
+})
+
+test('dispatchConflictResumes loads each resume and skips unknown ones', async () => {
+  const store = liveCloseStore({ reviewId: liveReviewId })
+  await store.methods.closeLiveReview('company-1', { reviewId: liveReviewId, actorId: closeActor, outcome: 'resolved', resolutionAction: 'link_existing' })
+  const results = await dispatchConflictResumes({ repository: store.methods, dispatchResume: store.dispatchResume }, 'company-1',
+    ['resume-1', 'missing'])
+  assert.deepEqual(results, [{ resumeId: 'resume-1', accepted: true, pending: false }, { resumeId: 'missing', accepted: false, pending: true }])
+})
+
+test('a refused close surfaces as an error and dispatches nothing', async () => {
+  const store = liveCloseStore({ reviewId: liveReviewId, review: { id: 'other', review_kind: 'live', status: 'needs_review' } })
+  await assert.rejects(closeLiveReview({ repository: store.methods, dispatchResume: store.dispatchResume },
+    { companyId: 'company-1', reviewId: liveReviewId, actorId: closeActor, outcome: 'skipped', resolutionAction: 'skip' }),
+  error => error.closeError === 'not_found')
+  assert.deepEqual(store.state.dispatched, [])
+})
+
+test('repository closeLiveReview calls the close RPC with tenant-scoped parameters', async () => {
+  const calls = []
+  const client = { from() { throw Error('unexpected table access') },
+    rpc: async (name, params) => { calls.push([name, params]); return { data: { closedConflictIds: [], resumeIds: [], replayed: false }, error: null } } }
+  const repository = createH2ARepository(client)
+  const result = await repository.closeLiveReview('company-1', { reviewId: liveReviewId, actorId: closeActor, outcome: 'skipped', resolutionAction: 'skip' })
+  assert.deepEqual(result, { closedConflictIds: [], resumeIds: [], replayed: false })
+  assert.deepEqual(calls, [['h2a_close_live_review', { p_company_id: 'company-1', p_review_id: liveReviewId, p_actor_id: closeActor,
+    p_outcome: 'skipped', p_resolution_action: 'skip' }]])
+  await assert.rejects(repository.closeLiveReview('company-1', { reviewId: liveReviewId, actorId: closeActor, outcome: 'merged', resolutionAction: null }), TypeError)
 })

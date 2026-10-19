@@ -208,6 +208,20 @@ export async function dispatchPendingConflictResumes(deps, companyId, limit = 25
   return results
 }
 
+// Delivers specific resumes (e.g. the ones a live review close just inserted). A resume that was
+// already dispatched counts as delivered; one that cannot be delivered stays pending for the nightly retry.
+export async function dispatchConflictResumes(deps, companyId, resumeIds = []) {
+  validCompanyId(companyId)
+  if (!Array.isArray(resumeIds)) fail(400, 'Resume IDs must be a list.')
+  const results = []
+  for (const resumeId of [...new Set(resumeIds)]) {
+    const intent = typeof resumeId === 'string' ? await deps.repository.getConflictResume?.(companyId, resumeId) : null
+    if (intent?.status === 'dispatched') results.push({ resumeId, accepted: true, pending: false })
+    else results.push({ resumeId, ...await deliverResume(deps, companyId, intent ?? null) })
+  }
+  return results
+}
+
 export async function resolveConflict(deps, input) {
   if (!deps?.repository?.resolveConflict) throw new TypeError('Conflict repository is required')
   const request = validateResolution(input)
