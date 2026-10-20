@@ -13,6 +13,9 @@ import { createH2ARepository } from '../netlify/functions/_h2a/repository.js'
 import { ApiError } from '../netlify/functions/_h2a/http.js'
 import { buildReviewResolutionPlan } from '../netlify/functions/_h2a/reviewResolution.js'
 import { executeReviewResolution } from '../netlify/functions/_h2a/reviewResolutionService.js'
+import { runCompanySync } from '../netlify/functions/_h2a/orchestrator.js'
+import { closeLiveReview } from '../netlify/functions/_h2a/liveReview.js'
+import { liveCloseStore } from '../tests/h2a/live-close-fixture.mjs'
 
 const ISOLATION_ACK = 'I_CONFIRM_THIS_IS_AN_ISOLATED_ALBI_SANDBOX'
 const ACTIVITY_CONTRACT_ACK = 'I_VERIFIED_ALBI_ACTIVITY_MARKER_READBACK'
@@ -484,6 +487,204 @@ async function runResolutionSelfTest(log) {
   return summary
 }
 
+
+// Scenario: live new contact -> held -> reviewer creates with referral -> conflict closed -> activity resumed.
+// One shared in-memory world (Albi contacts, mappings, HubSpot) is read and written by the real orchestrator,
+// the real resolution engine, the real live-review close and the real resume dispatch. Only storage and the
+// two providers are fakes.
+export const LIVE_HOLD_SCENARIO = 'live new contact → held → reviewer creates with referral → conflict closed → activity resumed'
+
+function makeLiveHoldWorld() {
+  const stamp = '2026-10-13T12:00:00Z', company = 'c1'
+  const world = { stamp, company, albiContacts: [], items: [], cursors: [], conflicts: [], liveReviews: [], liveLinks: [],
+    createContactCalls: [], createOrganizationCalls: 0, activitiesCreated: [], resolutionCalls: [], events: [], intent: null,
+    mappings: { contacts: [], organizations: [], options: [
+      { mapping_kind: 'default_contact_type', source_key: 'default', albi_id: '12', confirmed: true, confirmed_at: '2026-10-01T00:00:00Z' },
+      { mapping_kind: 'default_organization_type', source_key: 'default', albi_id: '2', confirmed_at: '2026-10-01T00:00:00Z' },
+      { mapping_kind: 'activity_type', source_key: 'calls', albi_id: '3', confirmed_at: '2026-10-01T00:00:00Z' },
+    ] } }
+  const call = { id: '50', objectType: 'calls', occurredAt: '2026-10-02T12:00:00Z', properties: { hs_timestamp: '2026-10-02T12:00:00Z' } }
+  const contact = { id: '10', properties: { firstname: 'First10', lastname: 'Last10', email: '10@example.com' } }
+  world.hubspot = {
+    listActivities: async ({ objectType }) => ({ records: objectType === 'calls' ? [call] : [], after: null }),
+    getActivity: async (type, id) => (type === 'calls' && id === '50' ? structuredClone(call) : null),
+    getAssociations: async ({ objectType, objectIds }) => objectType === 'contacts'
+      ? objectIds.map(id => ({ fromId: id, toObjectType: 'companies', toIds: [] }))
+      : [{ toObjectType: 'contacts', toIds: ['10'] }, { toObjectType: 'companies', toIds: [] }],
+    getContacts: async ids => ids.map(id => ({ ...structuredClone(contact), id })),
+    getCompanies: async () => [],
+    getOwnerId: async () => '900',
+    listOwners: async () => [{ id: '900', firstName: 'Sam', lastName: 'Seller' }],
+  }
+  world.albi = {
+    listContacts: async () => ({ records: structuredClone(world.albiContacts), cursor: null }),
+    listOrganizations: async () => ({ records: [], cursor: null }),
+    listReferralSources: async () => [{ id: '5', label: 'Network' }],
+    listCreateOptions: async () => ({ relationshipTypes: [{ id: '12', label: 'Referrer' }], relationshipStatuses: [{ id: '2', label: 'Active' }],
+      salespeople: [{ id: '70', label: 'Sam Seller' }] }),
+    createContact: async payload => {
+      world.createContactCalls.push(structuredClone(payload))
+      world.albiContacts.push({ id: '30', firstName: payload.firstName, lastName: payload.lastName, email: payload.email, contactTypeIds: payload.contactTypeIds })
+      return { id: '30' }
+    },
+    createOrganization: async () => { world.createOrganizationCalls++; throw Error('no organization is created in this scenario') },
+    createActivity: async () => { world.activitiesCreated.push('300'); return { id: '300' } },
+  }
+  const count = (runId, outcome) => world.items.filter(row => row.run_id === runId && row.outcome === outcome).length
+  world.orchestratorRepository = {
+    claimLease: async () => true, releaseLease: async () => {}, heartbeatLease: async () => true,
+    getConfig: async () => ({ state: 'live', portal_id: '123', selected_start_date: '2026-10-01', preflight_status: 'valid' }),
+    getMappings: async () => world.mappings,
+    startRun: async (_company, input) => (input.resumeId ? { id: 'run-resume', status: 'running' } : { id: 'run1' }),
+    getResumeRun: async () => null, isSkippedItem: async () => false, getCursor: async () => null,
+    getRunCheckpoint: async () => null, saveRunCheckpoint: async (_c, _r, _t, checkpoint) => checkpoint,
+    saveCursor: async (_c, type, cursor) => { world.cursors.push({ type, cursor }) },
+    getItemOutcomes: async (_c, runId, type, id) => world.items.filter(row => row.run_id === runId && row.object_type === type && row.source_id === id),
+    recordItem: async (_c, row) => { world.items.push(row) },
+    saveMapping: async (_c, kind, row) => row,
+    recordConflict: async (_c, row) => {
+      const existing = world.conflicts.find(item => item.status === 'open' && ['portal_id', 'object_type', 'source_id', 'conflict_type', 'reason',
+        'activity_object_type', 'activity_id'].every(key => item[key] === row[key]))
+      if (existing) return { ...existing, inserted: false }
+      const saved = { ...row, id: `conflict-${world.conflicts.length + 1}`, status: 'open' }
+      world.conflicts.push(saved)
+      return { ...saved, inserted: true }
+    },
+    upsertLiveReview: async (_c, row) => {
+      const open = world.liveReviews.find(review => review.status === 'needs_review' && review.object_type === row.object_type && review.source_id === row.source_id)
+      if (open) { Object.assign(open, { ...row, run_id: open.run_id }); return { id: open.id, inserted: false } }
+      const saved = { ...row, id: `review-${world.liveReviews.length + 1}`, company_id: world.company, status: 'needs_review', review_kind: 'live', updated_at: stamp }
+      world.liveReviews.push(saved)
+      return { id: saved.id, inserted: true }
+    },
+    linkLiveReviewConflict: async (_c, reviewId, conflictId) => {
+      if (world.liveLinks.some(link => link.conflictId === conflictId)) return false
+      world.liveLinks.push({ reviewId, conflictId })
+      return true
+    },
+    totals: async (_c, runId) => ({ delivered: count(runId, 'delivered'), conflict: count(runId, 'conflict'), failed: count(runId, 'failed') }),
+    finishRun: async () => {},
+    deliveryStore: () => {
+      const rows = new Map()
+      return {
+        reserve: async ({ identity }) => {
+          const key = `${identity.objectType}:${identity.activityId}:${identity.albiTargetId}`
+          if (rows.has(key)) return { acquired: false, row: rows.get(key) }
+          const row = { id: key, state: 'reserved', attempt_count: 1 }
+          rows.set(key, row)
+          return { acquired: true, isNew: true, row }
+        },
+        transition: async ({ id, patch }) => { const row = { id, ...patch, attempt_count: 1 }; rows.set(id, row); return { updated: true, row } },
+      }
+    },
+  }
+  return world
+}
+
+async function runLiveHoldCreateResumeSelfTest(log) {
+  const world = makeLiveHoldWorld()
+  const actorId = '00000000-0000-4000-8000-000000000001'
+  const syncDeps = { repository: world.orchestratorRepository, hubspot: world.hubspot, albi: world.albi }
+
+  // 1. A live run never creates in Albi: the new contact is held for review and its activity waits.
+  const live = await runCompanySync(syncDeps, { companyId: world.company, mode: 'live', trigger: 'manual' })
+  assert.equal(live.status, 'partially_failed')
+  assert.equal(world.createContactCalls.length, 0, 'live sync never creates an Albi contact')
+  assert.equal(world.createOrganizationCalls, 0)
+  assert.equal(world.activitiesCreated.length, 0, 'the activity waits on its contact')
+  assert.equal(world.cursors.length, 0, 'the cursor does not move past a held activity')
+  const held = world.conflicts.find(conflict => conflict.object_type === 'contacts')
+  assert.equal(held.reason, 'new_record_needs_review')
+  assert.equal(world.liveReviews.length, 1)
+  const review = world.liveReviews[0]
+  assert.deepEqual([review.object_type, review.source_id, review.reason], ['contacts', '10', 'new_record_needs_review'])
+  assert.deepEqual(world.liveLinks, [{ reviewId: review.id, conflictId: held.id }])
+
+  // 2. The reviewer creates it with a chosen referral source through the real resolution engine.
+  const close = liveCloseStore({ review, conflictIds: [held.id] })
+  const resumeRuns = []
+  const dispatchResume = async intent => {
+    // The close RPC copies the held conflict's activity onto the resume; model that copy here.
+    const resume = close.state.resumes.find(item => item.id === intent.id)
+    Object.assign(resume, { company_id: world.company, activity_object_type: held.activity_object_type, activity_id: held.activity_id })
+    const result = await runCompanySync({ ...syncDeps, repository: { ...world.orchestratorRepository, ...close.methods,
+      getConflictResume: async (_company, id) => structuredClone(close.state.resumes.find(item => item.id === id)) } },
+    { companyId: world.company, mode: 'live', trigger: 'conflict_resolution', resumeId: intent.id })
+    resumeRuns.push(result)
+    return result.status === 'completed'
+  }
+  let intent = null
+  const resolutionRepository = {
+    getConfig: async () => ({ portal_id: '123', initial_start_locked_at: stamp(world) }),
+    getReview: async () => review,
+    getDryRunReview: async () => review,
+    getMappings: async () => world.mappings,
+    getCurrentReviewResolution: async () => intent,
+    getReviewResolution: async () => intent,
+    createReviewResolution: async (_company, args) => {
+      if (intent) return { resolution: structuredClone(intent), created: false }
+      assert.equal(args.expectedUpdatedAt, review.updated_at)
+      intent = { id: '00000000-0000-4000-8000-000000000002', company_id: world.company, review_id: review.id, run_id: review.run_id,
+        portal_id: review.portal_id, object_type: review.object_type, source_id: review.source_id, decision: structuredClone(args.decision),
+        action: args.decision.action, expected_review_updated_at: args.expectedUpdatedAt, client_request_id: args.clientRequestId,
+        status: 'pending', execution_phase: null }
+      return { resolution: structuredClone(intent), created: true }
+    },
+    claimReviewResolution: async (_company, _id, owner) => {
+      intent.execution_phase = 'applying'
+      Object.assign(intent, { status: 'applying', lease_owner: owner, lease_expires_at: '2099-10-13T12:00:00Z' })
+      return { resolution: structuredClone(intent) }
+    },
+    finishReviewResolution: async (_company, _id, owner, args) => {
+      assert.equal(owner, intent.lease_owner)
+      Object.assign(intent, { status: args.status, execution_phase: null, lease_owner: null, provider_outcome_code: args.providerOutcomeCode })
+      world.events.push(args)
+      return { resolution: structuredClone(intent) }
+    },
+    appendReviewResolutionEvent: async (_company, _id, args) => { world.events.push(args); return args },
+    listReviewResolutionEvents: async () => world.events.map(args => ({ event_type: args.eventType, sanitized_details: args.details })),
+    saveMapping: async (_company, kind, value) => { assert.equal(kind, 'contact'); world.mappings.contacts.push(structuredClone(value)) },
+    upsertContactOrganizationChoice: async () => ({ choice: null }),
+    ...close.methods,
+  }
+  const result = await executeReviewResolution({ repository: resolutionRepository, hubspotRead: world.hubspot, albiRead: world.albi,
+    hubspotWrite: {}, albiWrite: { createContact: world.albi.createContact, createOrganization: world.albi.createOrganization },
+    dispatchResume, now: () => new Date(stamp(world)), sleep: async () => {} },
+  { companyId: world.company, reviewId: review.id, actorId, expectedUpdatedAt: review.updated_at,
+    clientRequestId: '00000000-0000-4000-8000-000000000004', decision: { action: 'create_albi', referralSourceId: '5' } })
+  assert.equal(result.resolution.status, 'completed')
+  assert.equal(world.createContactCalls.length, 1, 'exactly one Albi create, from the reviewer action')
+  const created = world.createContactCalls[0]
+  assert.equal(created.referralSourceId, '5', 'the create carries the reviewer-chosen referral source')
+  assert.deepEqual(created.contactTypeIds, ['12'], 'Referrer type')
+  assert.equal(created.relationshipStatusId, '2', 'Active status')
+  assert.equal(created.salespersonId, '70', 'the HubSpot owner matched to the Albi salesperson')
+  assert.deepEqual(world.mappings.contacts.map(row => [row.hubspot_id, row.albi_contact_id]), [['10', '30']])
+
+  // 3. Closing the live review resolved its conflict and queued exactly one resume, which delivered the held activity.
+  assert.deepEqual(close.state.closeCalls.map(item => [item.outcome, item.resolutionAction]), [['resolved', 'create_new']])
+  assert.deepEqual(close.state.conflicts.map(item => [item.id, item.status, item.resolution_action]), [[held.id, 'resolved', 'create_new']])
+  assert.equal(review.status, 'cleared')
+  assert.equal(close.state.resumes.length, 1)
+  assert.equal(close.state.resumes[0].status, 'dispatched')
+  assert.deepEqual({ dispatched: result.close.dispatched, pending: result.close.pending }, { dispatched: 1, pending: 0 })
+  assert.deepEqual(resumeRuns.map(run => run.status), ['completed'])
+  assert.deepEqual(world.activitiesCreated, ['300'], 'the held activity is delivered once')
+  assert.equal(world.items.filter(row => row.object_type === 'calls' && row.outcome === 'delivered').length, 1)
+  assert.equal(world.cursors.length, 0, 'a targeted resume does not move the cursor')
+  assert.equal(world.createContactCalls.length, 1)
+
+  // 4. A replayed close neither closes again nor sends a second resume.
+  const replay = await closeLiveReview({ repository: close.methods, dispatchResume },
+    { companyId: world.company, reviewId: review.id, actorId, outcome: 'resolved', resolutionAction: 'create_new' })
+  assert.equal(replay.replayed, true)
+  assert.equal(close.state.resumes.length, 1)
+  assert.deepEqual(world.activitiesCreated, ['300'])
+  log(`H2A live-hold self-test passed (fixtures only): ${LIVE_HOLD_SCENARIO}.`)
+  return { held: held.reason, created: created.referralSourceId, resumes: close.state.resumes.length, activities: world.activitiesCreated.length }
+}
+const stamp = world => world.stamp
+
 export async function runSelfTest({ log = output } = {}) {
   assert.deepEqual(missingSmokeEnvironment({}), REQUIRED_PROVIDER_CREDENTIALS)
   assert.equal(cleanId('123456789'), '6789')
@@ -519,7 +720,7 @@ export async function runSelfTest({ log = output } = {}) {
   }
   log('H2A smoke orchestration self-test passed: read-only plan, guarded create and rerun exactly-once, and zero-transport write-guard ordering.')
   await runReviewSelfTest(log)
-  return { resolution: await runResolutionSelfTest(log) }
+  return { resolution: await runResolutionSelfTest(log), liveHold: await runLiveHoldCreateResumeSelfTest(log) }
 }
 
 function makeRunId(env) {

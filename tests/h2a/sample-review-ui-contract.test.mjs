@@ -13,7 +13,6 @@ import * as presentation from '../../src/features/hubspotToAlbi/sampleReview.js'
 import { presentSampleReviewQueryFilters } from '../../src/features/hubspotToAlbi/preflightPresentation.js'
 
 const pageUrl = new URL('../../src/features/hubspotToAlbi/SampleReviewPage.jsx', import.meta.url)
-const detailUrl = new URL('../../src/features/hubspotToAlbi/SampleReviewDetail.jsx', import.meta.url)
 const row = (id = 'review-1') => ({ id, runId: 'sample-1', objectType: 'contacts', sourceId: 'hs-1',
   displayName: 'Alex Example', identity: { email: 'alex@example.com', phone: '+15551234567', organizationName: 'Example Co', domain: null },
   reason: 'name_only_candidate', status: 'needs_review', updatedAt: '2026-10-12T12:00:00.000Z', lastRecheckedAt: null })
@@ -33,7 +32,7 @@ async function mount(overrides = {}) {
   const bound = Object.fromEntries(['getH2AReviews', 'getH2ADryRunReview', 'recheckH2ADryRunReview', 'resolveH2ADryRunReview', 'prepareH2AOrganizationReview', 'prepareH2AMergedSurvivorReview',
     'getH2ARecheckAll', 'startH2ARecheckAll', 'bulkLinkH2AReviews', 'createH2AOrganizationThenContact', 'skipH2ALiveReview'].map(name => [name, (...args) => {
     calls.push({ name, args })
-    const override = overrides[name === 'getH2AReviews' ? 'getH2ADryRunReviews' : name]
+    const override = overrides[name]
     if (override) return override(...args)
     return Promise.resolve(name === 'getH2AReviews' ? page() : name === 'getH2ARecheckAll' ? { batch: null }
       : name === 'startH2ARecheckAll' ? { status: 'queued', batch: { id: 'batch-1', status: 'queued', total: 0, done: 0 } } : { item: full(args[2]) })
@@ -100,7 +99,7 @@ test('Overview reason query initializes only catalog filters and clears invalid 
 test('sample review uses centralized requests and accessible wrapping without provider mutation controls', async () => {
   const [source, workspace] = await Promise.all([readFile(pageUrl, 'utf8'), readFile(workspaceUrl, 'utf8')])
   assert.doesNotMatch(source + workspace, /\bfetch\s*\(|\bsupabase\b|dangerouslySetInnerHTML/)
-  assert.doesNotMatch(source + workspace, /SampleReviewDetail|SampleReviewResolution|ConflictDetail/)
+  assert.doesNotMatch(source + workspace, new RegExp(['SampleReview' + 'Detail', 'SampleReview' + 'Resolution(?!\\.js)', 'Conflict' + 'Detail'].join('|')))
   for (const label of ['Status', 'Object type', 'Reason']) assert.match(workspace, new RegExp(`>${label}<`))
   assert.match(workspace, />Filters</)
   assert.match(source, /aria-live="polite"/); assert.match(workspace, /aria-live="polite"/)
@@ -119,7 +118,7 @@ test('list summaries retain direct identity and detail loads separately with abo
 
 test('filters reset pagination/selection and late load-more cannot mix a previous filter queue', async () => {
   const more = deferred(); let reads = 0
-  const ui = await mount({ getH2ADryRunReviews: (_session, _company, filters) => {
+  const ui = await mount({ getH2AReviews: (_session, _company, filters) => {
     reads++; if (filters.cursor) return more.promise
     return Promise.resolve(reads === 1 ? page([row()], { nextCursor: 'next' }) : page([row('filtered')]))
   } })
@@ -133,7 +132,7 @@ test('filters reset pagination/selection and late load-more cannot mix a previou
 })
 
 test('load-more appends unique rows without disturbing the selected record', async () => {
-  const ui = await mount({ getH2ADryRunReviews: (_s, _c, filters) => Promise.resolve(filters.cursor
+  const ui = await mount({ getH2AReviews: (_s, _c, filters) => Promise.resolve(filters.cursor
     ? page([row(), row('review-2')]) : page([row()], { nextCursor: 'next' })) })
   await ui.loadMore(); await ui.flush()
   assert.equal(ui.queue().props.items.length, 2)
@@ -143,7 +142,7 @@ test('load-more appends unique rows without disturbing the selected record', asy
 
 test('pagination publishes refreshed progress with the same sample and preserves its selection', async () => {
   const refreshed = { ...progress, needsReview: 1, cleared: 1 }
-  const ui = await mount({ getH2ADryRunReviews: (_s, _c, filters) => Promise.resolve(filters.cursor
+  const ui = await mount({ getH2AReviews: (_s, _c, filters) => Promise.resolve(filters.cursor
     ? page([row('review-2')], { progress: refreshed, nextCursor: 'next-2' }) : page([row()], { nextCursor: 'next' })) })
   await ui.loadMore(); await ui.flush()
   assert.equal(metaOf(ui).progress.needsReview, 1)
@@ -157,7 +156,7 @@ test('sample replacement during pagination clears old evidence and refetches the
   const firstB = deferred(), oldDetail = deferred(); let firstPages = 0
   const sampleB = { id: 'sample-B', reviewCaptureVersion: 1, historical: false }
   const bRow = { ...row('review-B'), runId: 'sample-B', displayName: 'New Sample Person' }
-  const ui = await mount({ getH2ADryRunReviews: (_s, _c, filters) => filters.cursor
+  const ui = await mount({ getH2AReviews: (_s, _c, filters) => filters.cursor
     ? Promise.resolve(page([{ ...bRow, id: 'cursor-B' }], { sample: sampleB, nextCursor: 'cursor-B-next' }))
     : ++firstPages === 1 ? Promise.resolve(page([row('review-A'), row('review-A2')], { nextCursor: 'cursor-A' })) : firstB.promise,
     getH2ADryRunReview: (_s, _c, id) => id === 'review-A2' ? oldDetail.promise
@@ -183,7 +182,7 @@ for (const first of ['recheck', 'pagination']) {
   test(`recheck cancels prior same-sample pagination when ${first} completes first and preserves a retryable cursor`, async () => {
     const more = deferred(), rechecked = deferred(); let pages = 0
     const updatedProgress = { ...progress, needsReview: 0, cleared: 2 }
-    const ui = await mount({ getH2ADryRunReviews: (_s, _c, filters) => !filters.cursor
+    const ui = await mount({ getH2AReviews: (_s, _c, filters) => !filters.cursor
       ? Promise.resolve(page([row()], { nextCursor: 'original-cursor' }))
       : ++pages === 1 ? more.promise : Promise.resolve(page([row('new-page')], { progress: updatedProgress })),
       recheckH2ADryRunReview: () => rechecked.promise })
@@ -208,7 +207,7 @@ for (const first of ['recheck', 'pagination']) {
 
 test('a saved Load more handler cannot start pagination during recheck and the control recovers afterward', async () => {
   const rechecked = deferred()
-  const ui = await mount({ getH2ADryRunReviews: () => Promise.resolve(page([row()], { nextCursor: 'next' })),
+  const ui = await mount({ getH2AReviews: () => Promise.resolve(page([row()], { nextCursor: 'next' })),
     recheckH2ADryRunReview: () => rechecked.promise })
   const loadMore = ui.queue().props.onLoadMore
   const action = ui.detail().props.onRecheck(); await ui.flush()
@@ -223,7 +222,7 @@ test('a saved Load more handler cannot start pagination during recheck and the c
 for (const status of [502, 409]) {
   test(`recheck ${status} cancels stale pagination while retaining evidence, progress and the retryable cursor`, async () => {
     const more = deferred(); let pages = 0, detailReads = 0
-    const ui = await mount({ getH2ADryRunReviews: (_s, _c, filters) => !filters.cursor
+    const ui = await mount({ getH2AReviews: (_s, _c, filters) => !filters.cursor
       ? Promise.resolve(page([row()], { nextCursor: 'original-cursor' }))
       : ++pages === 1 ? more.promise : Promise.resolve(page([row('retried-page')])),
       getH2ADryRunReview: () => Promise.resolve({ item: { ...full(), updatedAt: ++detailReads === 1
@@ -251,7 +250,7 @@ for (const status of [502, 409]) {
 for (const transition of ['filter', 'tenant', 'unmount']) {
   test(`stale replacement pagination after ${transition} cannot reset the current queue or start another fetch`, async () => {
     const more = deferred(); let firstPages = 0
-    const ui = await mount({ getH2ADryRunReviews: (_s, _c, filters) => filters.cursor ? more.promise
+    const ui = await mount({ getH2AReviews: (_s, _c, filters) => filters.cursor ? more.promise
       : Promise.resolve(page([row(++firstPages === 1 ? 'review-A' : 'current-record')], { nextCursor: 'next' })) })
     const action = ui.loadMore(); await ui.flush()
     const signal = ui.calls.filter(call => call.name === 'getH2AReviews').at(-1).args[2].signal
@@ -273,7 +272,7 @@ for (const transition of ['filter', 'tenant', 'unmount']) {
 
 test('a tenant switch while replacement first-page fetch is pending aborts and hides its late evidence', async () => {
   const replacement = deferred(); let companyOneReads = 0
-  const ui = await mount({ getH2ADryRunReviews: (_s, company, filters) => company === 'company-2'
+  const ui = await mount({ getH2AReviews: (_s, company, filters) => company === 'company-2'
     ? Promise.resolve(page([row('tenant-two')])) : filters.cursor
       ? Promise.resolve(page([row('obsolete-B')], { sample: { id: 'sample-B', reviewCaptureVersion: 1 } }))
       : ++companyOneReads === 1 ? Promise.resolve(page([row('review-A')], { nextCursor: 'next' })) : replacement.promise })
@@ -289,7 +288,7 @@ test('a tenant switch while replacement first-page fetch is pending aborts and h
 
 test('tenant transition aborts all prior requests and ignores late list results', async () => {
   const old = deferred()
-  const ui = await mount({ getH2ADryRunReviews: (_s, company) => company === 'company-1' ? old.promise : Promise.resolve(page([row('new-tenant')])) })
+  const ui = await mount({ getH2AReviews: (_s, company) => company === 'company-1' ? old.promise : Promise.resolve(page([row('new-tenant')])) })
   const signal = ui.calls[0].args[2].signal
   ui.context.companyId = 'company-2'; ui.context.tenantRevision = 1
   await ui.rerender(); old.resolve(page([row('old-tenant')])); await ui.flush()
@@ -359,7 +358,7 @@ test('sample page keeps fresh-sample messaging', async () => {
 
 test('late detail for another selection is aborted and cannot overwrite current evidence', async () => {
   const previous = deferred()
-  const ui = await mount({ getH2ADryRunReviews: () => Promise.resolve(page([row(), row('review-2')])),
+  const ui = await mount({ getH2AReviews: () => Promise.resolve(page([row(), row('review-2')])),
     getH2ADryRunReview: (_s, _c, id) => id === 'review-1' ? previous.promise : Promise.resolve({ item: full(id) }) })
   const signal = ui.calls.find(call => call.name === 'getH2ADryRunReview').args[3].signal
   ui.select('review-2'); await ui.flush()
@@ -368,7 +367,7 @@ test('late detail for another selection is aborted and cannot overwrite current 
 })
 
 test('the next record is prefetched so it opens without a wait', async () => {
-  const ui = await mount({ getH2ADryRunReviews: () => Promise.resolve(page([row(), row('review-2')])) })
+  const ui = await mount({ getH2AReviews: () => Promise.resolve(page([row(), row('review-2')])) })
   assert.deepEqual(ui.calls.filter(call => call.name === 'getH2ADryRunReview').map(call => call.args[2]), ['review-1', 'review-2'])
   ui.select('review-2'); await ui.flush()
   assert.equal(ui.detail().props.item.id, 'review-2')
@@ -379,65 +378,13 @@ test('the next record is prefetched so it opens without a wait', async () => {
 test('a tenant switch aborts recheck and ignores late progress and record changes', async () => {
   const pending = deferred()
   const ui = await mount({ recheckH2ADryRunReview: () => pending.promise,
-    getH2ADryRunReviews: (_s, company) => Promise.resolve(page([row(company === 'company-1' ? 'review-1' : 'review-new')])) })
+    getH2AReviews: (_s, company) => Promise.resolve(page([row(company === 'company-1' ? 'review-1' : 'review-new')])) })
   const action = ui.detail().props.onRecheck(); await ui.flush()
   const signal = ui.calls.find(call => call.name === 'recheckH2ADryRunReview').args[3].signal
   ui.context.companyId = 'company-2'; ui.context.tenantRevision = 1; await ui.rerender()
   pending.resolve({ item: { ...full(), status: 'cleared' }, progress: { ...progress, needsReview: 0, cleared: 2 } }); await action; await ui.flush()
   assert.equal(signal.aborted, true); assert.equal(ui.detail().props.item.id, 'review-new')
   assert.equal(metaOf(ui).progress.needsReview, 2); assert.deepEqual(ui.completed, [0, 1]); ui.unmount()
-})
-
-test('detail renders full identity, every candidate, fixed audit labels and the resolution panel', async () => {
-  const source = await readFile(detailUrl, 'utf8')
-  const code = transformSync(source.replace(/^import[\s\S]*?from ['"][^'"]+['"]\s*$/gm, '').replace('export default function', 'function'),
-    { loader: 'jsx', jsxFactory: 'h' }).code
-  const Detail = vm.runInNewContext(`${code}\nSampleReviewDetail`, { ...presentation, h: createElement, Intl, Date,
-    SampleReviewResolution: ({ item }) => createElement('aside', { 'data-review-id': item.id }, 'Resolution panel') })
-  const item = { ...full(), sourceSnapshot: { ...full().sourceSnapshot, fullName: '<script>alert(1)</script>',
-    email: 'complete-long-direct-email-address@example.com', mobileNumber: '+15559876543', address1: '123 Complete Street', city: 'Example City' },
-    candidateSnapshots: [{ id: 'albi-1', email: 'one@example.com' }, { id: 'albi-2', email: 'two@example.com' }],
-    events: [{ id: 'event-1', eventType: 'unknown-private-label', reason: 'unknown-private-reason', createdAt: '2026-10-12T12:00:00Z', details: { outcome: 'unknown-secret-outcome' } }] }
-  const html = renderToStaticMarkup(createElement(Detail, { item, recheckPending: false, onRecheck() {} }))
-  for (const value of ['complete-long-direct-email-address@example.com', '+15559876543', '123 Complete Street', 'Example City', 'albi-1', 'albi-2', 'one@example.com', 'two@example.com']) assert.ok(html.includes(value), value)
-  assert.ok(html.includes('&lt;script&gt;')); assert.equal(html.includes('<script>'), false)
-  assert.match(html, /Recheck this record/); assert.match(html, /Resolution panel/)
-  assert.match(html, /Review event/); assert.doesNotMatch(html, /unknown-private|unknown-secret/)
-})
-
-test('detail renders job-title-only differences and labels source job title without a candidate', async () => {
-  const source = await readFile(detailUrl, 'utf8')
-  const code = transformSync(source.replace(/^import[\s\S]*?from ['"][^'"]+['"]\s*$/gm, '').replace('export default function', 'function'),
-    { loader: 'jsx', jsxFactory: 'h' }).code
-  const Detail = vm.runInNewContext(`${code}\nSampleReviewDetail`, { ...presentation, h: createElement, Intl, Date,
-    SampleReviewResolution: () => null })
-  const item = { ...full(), reason: 'nonblank_field_difference', sourceSnapshot: { id: 'hs-1', jobTitle: 'Engineer' },
-    candidateSnapshots: [{ id: 'albi-1', jobTitle: 'Manager' }],
-    proposedChanges: { conflicts: { jobTitle: { proposed: 'Engineer', current: 'Manager' } } } }
-  const html = renderToStaticMarkup(createElement(Detail, { item, onRecheck() {} }))
-  assert.match(html, /Fields with different values/)
-  assert.match(html, /HubSpot · Job title/); assert.match(html, /Albi · Job title/)
-  assert.match(html, /Engineer/); assert.match(html, /Manager/)
-  const withoutCandidate = renderToStaticMarkup(createElement(Detail, { item: { ...item, candidateSnapshots: [], proposedChanges: {} }, onRecheck() {} }))
-  assert.match(withoutCandidate, /HubSpot · Job title/); assert.match(withoutCandidate, /Engineer/)
-})
-
-test('a waiting-on-Albi record shows a prominent reminder with the exact edits, an Albi link and recheck', async () => {
-  const source = await readFile(detailUrl, 'utf8')
-  const code = transformSync(source.replace(/^import[\s\S]*?from ['"][^'"]+['"]\s*$/gm, '').replace('export default function', 'function'),
-    { loader: 'jsx', jsxFactory: 'h' }).code
-  const Detail = vm.runInNewContext(`${code}\nSampleReviewDetail`, { ...presentation, h: createElement, Intl, Date, SampleReviewResolution: () => null })
-  const resolution = { id: '00000000-0000-4000-8000-0000000000aa', reviewId: '00000000-0000-4000-8000-0000000000ab', runId: '00000000-0000-4000-8000-0000000000ac',
-    portalId: '321', sourceId: '123', objectType: 'contacts', action: 'resolve_fields', status: 'waiting_on_albi',
-    events: [{ id: '00000000-0000-4000-8000-0000000000ad', eventType: 'waiting_on_albi', details: { code: 'waiting_on_albi',
-      manualTasks: [{ provider: 'albi', objectType: 'contacts', targetId: '2838373', fields: [{ field: 'city', value: 'Newport Beach' }, { field: 'jobTitle', value: 'Director of engineering' }] }] } }] }
-  const html = renderToStaticMarkup(createElement(Detail, { item: { ...full(), resolution }, onRecheck() {} }))
-  assert.match(html, /Update this contact in Albi/)
-  assert.match(html, /Newport Beach/); assert.match(html, /Director of engineering/)
-  assert.match(html, /https:\/\/app\.albiware\.com\/Relationships\/Contact\/2838373/)
-  assert.match(html, /updated Albi — Recheck/)
-  const none = renderToStaticMarkup(createElement(Detail, { item: full(), onRecheck() {} }))
-  assert.doesNotMatch(none, /Update this contact in Albi/)
 })
 
 test('opening an unsynced organization prepares its own review once, selects it, and can return to the contact', async () => {

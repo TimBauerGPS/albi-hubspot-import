@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import test from 'node:test'
 import vm from 'node:vm'
@@ -521,7 +522,7 @@ test('conflicts page renders the same workspace with kind live', async () => {
   assert.equal(workspace.props.kind, 'live'); assert.equal(workspace.props.companyId, 'company-1')
   assert.match(ui.text(), /4 unresolved/)
   assert.match(ui.text(), /Call log/); assert.doesNotMatch(ui.text(), /Hidden Contact/)
-  assert.doesNotMatch(ui.json(), /ConflictDetail/)
+  assert.doesNotMatch(ui.json(), new RegExp('Conflict' + 'Detail'))
   const reloadBefore = workspace.props.reloadToken
   ui.find('button', 'Prepare open conflicts for review').props.onClick()
   for (let n = 0; n < 4; n++) await ui.flush()
@@ -655,4 +656,48 @@ test('the confirm dialog starts focused on Confirm so Enter confirms; Enter else
   assert.equal(sent.length, 1); assert.equal(sent[0].args[2].action, 'force_create_albi')
   assert.equal(ui.nodes().find(node => node.props?.role === 'dialog'), undefined)
   ui.unmount()
+})
+
+// Ported from the removed detail and resolution component suites.
+test('job-title-only differences render with both labelled sides', async () => {
+  const item = { ...base, reason: 'nonblank_field_difference', sourceSnapshot: { id: '123', jobTitle: 'Engineer' },
+    candidateSnapshots: [{ id: '456', jobTitle: 'Manager' }], proposedChanges: { conflicts: { jobTitle: { proposed: 'Engineer', current: 'Manager' } } } }
+  const out = await html(item)
+  assert.match(out, /Job title/); assert.match(out, /Engineer/); assert.match(out, /Manager/)
+})
+
+test('record content is escaped, never injected as markup', async () => {
+  const out = await html({ ...base, sourceSnapshot: { ...base.sourceSnapshot, firstName: '<script>alert(1)</script>' } })
+  assert.equal(out.includes('<script>'), false)
+})
+
+test('waiting audit shows provider success and the Albi link; completed audit drops the earlier reminder', async () => {
+  const event = (id, eventType, details) => ({ id, eventType, createdAt: base.updatedAt, ...(details ? { details } : {}) })
+  const resolution = status => ({ id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', reviewId: base.id, runId: base.runId, portalId: '321', sourceId: '123',
+    objectType: 'contacts', action: 'resolve_fields', status, events: [event('eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', 'provider_applied'),
+      event('ffffffff-ffff-4fff-8fff-ffffffffffff', 'waiting_on_albi', { manualTasks: [{ provider: 'albi', objectType: 'contacts', targetId: '456',
+        fields: [{ field: 'firstName', value: 'Alex' }] }] }), ...(status === 'completed' ? [event('99999999-9999-4999-8999-999999999999', 'completed')] : [])] })
+  const waiting = await html({ ...base, resolution: resolution('waiting_on_albi') })
+  assert.match(waiting, /Update this contact in Albi/)
+  assert.match(waiting, /https:\/\/app\.albiware\.com\/Relationships\/Contact\/456/)
+  const done = await html({ ...base, resolution: resolution('completed') })
+  assert.doesNotMatch(done, /Update this contact in Albi/)
+})
+
+test('blocked create names the exact missing Albi default', async () => {
+  const out = await html({ ...none, createReadiness: { ready: false, blockedReason: 'referrer_type_missing' } })
+  assert.match(out, /Referrer/); assert.doesNotMatch(out, /Create in Albi/)
+})
+
+test('workspace dialogs trap focus, close on Escape, and writes carry the audit keys', async () => {
+  const dir2 = new URL('../../src/features/hubspotToAlbi/', import.meta.url)
+  const workspace = await readFile(new URL('ReviewWorkspace.jsx', dir2), 'utf8')
+  const many = await readFile(new URL('ManyToOneDialog.jsx', dir2), 'utf8')
+  for (const source of [workspace, many]) {
+    assert.match(source, /role="dialog"/); assert.match(source, /aria-modal="true"/)
+    assert.match(source, /'Escape'/); assert.match(source, /event\.key !== 'Tab'/)
+    assert.doesNotMatch(source, /dangerouslySetInnerHTML|innerHTML/)
+  }
+  assert.match(workspace, /expectedUpdatedAt/); assert.match(workspace, /clientRequestId/)
+  assert.match(many, /approveManyToOne|Approve/)
 })

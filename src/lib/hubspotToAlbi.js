@@ -233,9 +233,6 @@ export function getH2AReviews(session, companyId, { signal, limit = 100, ...valu
   return request(session, 'h2a-dry-run-reviews', { companyId, query, signal })
 }
 
-// Old name, kept until the review workspace replaces the Sample review page.
-export const getH2ADryRunReviews = getH2AReviews
-
 export function getH2ADryRunReview(session, companyId, reviewId, { signal } = {}) {
   return request(session, 'h2a-dry-run-reviews', { companyId, query: { reviewId }, signal })
 }

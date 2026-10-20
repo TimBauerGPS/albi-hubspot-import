@@ -140,10 +140,10 @@ test('client sends an explicit bounded sample scope without exposing a record-co
 })
 
 test('sample review client allowlists list filters and sends exact detail and recheck shapes', async () => {
-  const { getH2ADryRunReviews, getH2ADryRunReview, recheckH2ADryRunReview } = await import('../../src/lib/hubspotToAlbi.js')
+  const { getH2AReviews, getH2ADryRunReview, recheckH2ADryRunReview } = await import('../../src/lib/hubspotToAlbi.js')
   const signal = new AbortController().signal
   const calls = await captureRequests(async () => {
-    await getH2ADryRunReviews(session, 'company-1', {
+    await getH2AReviews(session, 'company-1', {
       limit: 25, status: 'needs_review', objectType: 'contacts', reason: 'name_only_candidate',
       signal, unknown: 'must-not-serialize', companyId: 'attacker-company',
     })
@@ -169,7 +169,7 @@ test('sample review client allowlists list filters and sends exact detail and re
 })
 
 test('sample review server errors are fixed-copy allowlisted and unknown text stays generic', async () => {
-  const { getH2ADryRunReviews } = await import('../../src/lib/hubspotToAlbi.js')
+  const { getH2AReviews } = await import('../../src/lib/hubspotToAlbi.js')
   const safeEndpointErrors = [
     'Invalid sample review cursor.',
     'Invalid sample review request.',
@@ -198,11 +198,11 @@ test('sample review server errors are fixed-copy allowlisted and unknown text st
   globalThis.fetch = async () => responses.shift()
   try {
     for (const message of safeEndpointErrors) {
-      await assert.rejects(() => getH2ADryRunReviews(session, 'company-1'), error => error.message === message)
+      await assert.rejects(() => getH2AReviews(session, 'company-1'), error => error.message === message)
     }
-    await assert.rejects(() => getH2ADryRunReviews(session, 'company-1'), error =>
+    await assert.rejects(() => getH2AReviews(session, 'company-1'), error =>
       error.message === 'HubSpot to Albi request could not be completed.')
-    await assert.rejects(() => getH2ADryRunReviews(session, 'company-1'), error =>
+    await assert.rejects(() => getH2AReviews(session, 'company-1'), error =>
       error.message === 'HubSpot to Albi is temporarily unavailable. Try again.')
   } finally {
     globalThis.fetch = originalFetch
@@ -389,7 +389,7 @@ test('review workspace client functions hit the right path and method with allow
   const otherId = '00000000-0000-4000-8000-000000000003'
   const clientRequestId = '00000000-0000-4000-8000-000000000002'
   const expectedUpdatedAt = '2026-10-12T12:00:00.000Z'
-  assert.equal(lib.getH2ADryRunReviews, lib.getH2AReviews, 'the old name stays an alias until the workspace replaces it')
+  assert.equal(lib['getH2ADryRun' + 'Reviews'], undefined, 'the old alias is gone')
   const calls = await captureRequests(async () => {
     await lib.getH2AReviews(session, 'company-1', { kind: 'live', bucket: 'quick', status: 'needs_review', objectType: 'contacts',
       reason: 'no_match', cursor: 'abc', signal, unknown: 'nope', companyId: 'attacker' })

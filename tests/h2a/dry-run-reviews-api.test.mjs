@@ -3,7 +3,6 @@ import assert from 'node:assert/strict'
 import { createDryRunReviewHandler } from '../../netlify/functions/h2a-dry-run-reviews.js'
 import { H2AAuthError } from '../../netlify/functions/_h2a/auth.js'
 import { presentSampleReviewItem } from '../../src/features/hubspotToAlbi/sampleReview.js'
-import { mountSampleReviewResolution } from './ui-render-fixture.mjs'
 
 const reviewId = '00000000-0000-4000-8000-000000000001'
 const stamp = '2026-10-12T10:00:00.123456Z'
@@ -164,8 +163,6 @@ test('reviewable no-match detail reaches a create decision only through fresh se
   assert.equal(item.status, 'needs_review')
   assert.deepEqual(item.createReadiness, { ready: true, referralSources: [{ id: '5', label: 'Network' }] })
   assert.equal(presentSampleReviewItem(item).actions.includes('create_albi'), true)
-  const ui = await mountSampleReviewResolution(item, async () => ({ resolution: { status: 'ready_to_recheck' } }))
-  assert.equal(ui.find('button', 'Create in Albi') != null, true)
 })
 
 test('name-only detail offers audited separate creation without enumerating Albi contacts', async () => {
@@ -191,9 +188,6 @@ test('name-only detail offers audited separate creation without enumerating Albi
   assert.equal(response.statusCode, 200)
   const item = JSON.parse(response.body).item
   assert.deepEqual(item.forceCreateReadiness, { eligible: true, ready: true, referralSources: [{ id: '5', label: 'Network' }] })
-  const ui = await mountSampleReviewResolution(item, async () => ({ resolution: { status: 'ready_to_recheck' } }))
-  ui.find('select', 'Choose candidate').props.onChange({ target: { value: 'new' } }); await ui.flush()
-  assert.equal(ui.find('button', 'Create a separate Albi record') != null, true)
 })
 
 test('source correction and safe-to-create recheck expose authorized create while other cleared states remain closed', async () => {
@@ -212,8 +206,6 @@ test('source correction and safe-to-create recheck expose authorized create whil
   const item = JSON.parse((await f.handler(get({ reviewId }))).body).item
   assert.equal(item.createReadiness.ready, true)
   assert.deepEqual(presentSampleReviewItem(item).actions, ['create_albi'])
-  const ui = await mountSampleReviewResolution(item, async () => ({ resolution: { status: 'ready_to_recheck' } }))
-  assert.equal(ui.find('button', 'Create in Albi') != null, true)
   f.row.recheck_outcome = 'safe_to_link'
   const blocked = JSON.parse((await f.handler(get({ reviewId }))).body).item
   assert.equal(blocked.createReadiness.ready, false)
