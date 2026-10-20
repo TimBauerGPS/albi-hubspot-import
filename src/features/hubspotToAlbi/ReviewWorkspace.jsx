@@ -338,23 +338,32 @@ export default function ReviewWorkspace({
     else setRecordErrors(current => ({ ...current, [reviewId]: error?.message || 'The action could not be sent. Try again.' }))
   }
 
+  // The same decision for the same record version always reuses one clientRequestId, so a retry is an idempotent
+  // replay; a changed decision or version gets a new id.
+  const requestIds = useRef(new Map())
+  function requestIdFor(item, decision) {
+    const key = JSON.stringify({ reviewId: item.id, decision, expectedUpdatedAt: item.updatedAt })
+    if (!requestIds.current.has(key)) requestIds.current.set(key, crypto.randomUUID())
+    return requestIds.current.get(key)
+  }
+
   // Each run captures the tenant it was made in, so a flushed send still reaches the right company.
   function resolveRun(item, decision) {
-    const startedFor = tenantKey, auth = session, company = companyId, clientRequestId = crypto.randomUUID()
+    const startedFor = tenantKey, auth = session, company = companyId, clientRequestId = requestIdFor(item, decision)
     return async () => {
       await resolveH2ADryRunReview(auth, company, { reviewId: item.id, expectedUpdatedAt: item.updatedAt, clientRequestId, ...decision })
       await afterWrite(item.id, startedFor, auth, company)
     }
   }
   function skipRun(item) {
-    const startedFor = tenantKey, auth = session, company = companyId, clientRequestId = crypto.randomUUID()
+    const startedFor = tenantKey, auth = session, company = companyId, clientRequestId = requestIdFor(item, { action: 'skip_live' })
     return async () => {
       await skipH2ALiveReview(auth, company, { reviewId: item.id, expectedUpdatedAt: item.updatedAt, clientRequestId })
       await afterWrite(item.id, startedFor, auth, company)
     }
   }
   function orgFirstRun(item, referralSourceId) {
-    const startedFor = tenantKey, auth = session, company = companyId, clientRequestId = crypto.randomUUID()
+    const startedFor = tenantKey, auth = session, company = companyId, clientRequestId = requestIdFor(item, { action: 'create_with_organization', referralSourceId })
     const organizationReviewId = text(item.orgFirstCreate?.organizationReviewId)
     return async () => {
       let organization = {}
