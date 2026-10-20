@@ -7,7 +7,7 @@ const stamp = '2026-10-20T10:00:00.000Z'
 const row = (id, objectType = 'contacts', extra = {}) => ({ id, object_type: objectType, status: 'needs_review', reason: 'no_match',
   candidate_snapshots: [], updated_at: stamp, ...extra })
 
-function fixture({ rows, items, outcomes = {} } = {}) {
+function fixture({ rows, items, outcomes = {}, ...extra } = {}) {
   const calls = [], counts = [], finished = []
   const batch = { id: 'batch-1', company_id: 'c', review_kind: 'sample', requested_by: 'actor', referral_source_id: '5',
     items: items ?? rows.map(item => ({ reviewId: item.id, expectedUpdatedAt: item.updated_at })) }
@@ -22,6 +22,7 @@ function fixture({ rows, items, outcomes = {} } = {}) {
     getResolutionClients: async () => ({ albiRead: {
       listContacts: async () => { calls.push('albi-contacts'); return { records: [{ id: '900', firstName: 'Old', lastName: 'Person' }], cursor: null } },
       listOrganizations: async () => { calls.push('albi-organizations'); return { records: [], cursor: null } } } }),
+    checkReadiness: async item => extra.readiness?.[item.id] ?? { ready: true },
     executeResolution: async (rowDeps, input) => {
       calls.push(['create', input.reviewId, input.decision, rowDeps.albiSnapshot.contacts.length])
       const outcome = outcomes[input.reviewId] ?? 'ready_to_recheck'
@@ -66,4 +67,16 @@ test('a batch that cannot read Albi fails without creating anything', async () =
   const result = await runReviewCreateBatch(f.deps, { companyId: 'c', batchId: 'batch-1' })
   assert.equal(result.status, 'failed')
   assert.equal(f.calls.filter(Array.isArray).length, 0)
+})
+
+test('each record is checked first; blocked ones are skipped with their reason and every outcome is recorded', async () => {
+  const rows = [row('ok'), row('noorg'), row('changed', 'contacts', { updated_at: '2026-10-20T11:00:00.000Z' })]
+  const items = rows.map(item => ({ reviewId: item.id, expectedUpdatedAt: stamp }))
+  const f = fixture({ rows, items, readiness: { noorg: { ready: false, blockedReason: 'organization_not_synced' } } })
+  await runReviewCreateBatch(f.deps, { companyId: 'c', batchId: 'batch-1' })
+  assert.deepEqual(f.calls.filter(Array.isArray).map(call => call[1]), ['ok'])
+  assert.deepEqual(f.finished.at(-1).results, [
+    { reviewId: 'ok', outcome: 'created' },
+    { reviewId: 'noorg', outcome: 'skipped', reason: 'organization_not_synced' },
+    { reviewId: 'changed', outcome: 'skipped', reason: 'changed' }])
 })

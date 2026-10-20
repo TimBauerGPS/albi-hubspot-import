@@ -9,6 +9,20 @@ import AlbiTodo from './AlbiTodo.jsx'
 import ReviewQueue from './ReviewQueue.jsx'
 import ReviewRecord from './ReviewRecord.jsx'
 import ShortcutHelp from './ShortcutHelp.jsx'
+import { blockedReasonCopy } from '../../../shared/h2aBlockedReasons.js'
+
+// Why Create selected left a record alone (the batch's reason codes), in the page's words.
+const CREATE_SKIP_COPY = {
+  changed: 'It changed after it was selected. Open it to see the latest.',
+  has_candidates: 'Albi now has a possible match for it. Open it to decide.',
+  not_open: 'It is no longer waiting to be created.',
+  not_creatable: 'It can’t be created from Quick wins. Open it to see why.',
+  not_found: 'It could not be found.',
+  not_ready: 'Its create checks did not pass. Open it to see why.',
+  create_failed: 'Albi did not confirm the create. Open it to check.',
+  error: 'Creating it failed. Open it and try again.',
+}
+const createSkipCopy = code => blockedReasonCopy(code) ?? CREATE_SKIP_COPY[code] ?? CREATE_SKIP_COPY.not_ready
 
 const UNDO_MS = 5000
 const BULK_CHUNK = 25
@@ -143,6 +157,8 @@ export default function ReviewWorkspace({
   const [checked, setChecked] = useState(() => new Set())
   const [bulk, setBulk] = useState(null)
   const [bulkSummary, setBulkSummary] = useState('')
+  // The records Create selected left alone, shown under its summary (only while that summary is shown).
+  const [createSkips, setCreateSkips] = useState({ summary: '', rows: [] })
   // "Create selected": the open choice dialog, then the running background batch's progress.
   const [createDialog, setCreateDialog] = useState(null)
   const [createProgress, setCreateProgress] = useState(null)
@@ -716,7 +732,7 @@ export default function ReviewWorkspace({
       setCreateDialog({ targets, sources, referralSourceId: '' })
     } catch (cause) { if (same(startedFor)) setActionError(cause.message) }
   }
-  async function pollCreateBatch(startedFor) {
+  async function pollCreateBatch(startedFor, names = new Map()) {
     for (;;) {
       await new Promise(resolve => setTimeout(resolve, createBatchPollMs))
       if (!same(startedFor)) return
@@ -726,9 +742,12 @@ export default function ReviewWorkspace({
       if (batch) setCreateProgress(batch)
       if (batch && ['completed', 'failed'].includes(batch.status)) {
         setCreateProgress(null)
-        setBulkSummary(batch.status === 'completed'
+        const summary = batch.status === 'completed'
           ? `Create selected finished: ${batch.created} created, ${batch.skipped} skipped, ${batch.failed} failed.${batch.created ? ' Recheck them to clear them.' : ''}`
-          : `Create selected stopped early: ${batch.created} created, ${batch.skipped} skipped, ${batch.failed} failed.`)
+          : `Create selected stopped early: ${batch.created} created, ${batch.skipped} skipped, ${batch.failed} failed.`
+        setBulkSummary(summary)
+        setCreateSkips({ summary, rows: list(batch.results).filter(result => result?.outcome !== 'created')
+          .map(result => ({ id: result.reviewId, name: names.get(result.reviewId) ?? 'A selected record', outcome: result.outcome, reason: createSkipCopy(result.reason) })) })
         setRetryToken(value => value + 1)
         return
       }
@@ -746,7 +765,7 @@ export default function ReviewWorkspace({
       setChecked(new Set())
       setCreateProgress(result?.batch ?? { status: 'queued', total: current.targets.length, done: 0 })
       if (result?.status === 'already_running') setNotice('A create batch is already running. Its progress is shown here.')
-      pollCreateBatch(startedFor)
+      pollCreateBatch(startedFor, new Map(current.targets.map(item => [item.id, nameOf(item)])))
     } catch (cause) { if (same(startedFor)) setActionError(cause.message) }
   }
   function openRecheckSelected() {
@@ -858,7 +877,15 @@ export default function ReviewWorkspace({
             <div className="h-full rounded-full bg-brand-600 transition-all" style={{ width: `${bulk.total ? Math.round(bulk.done / bulk.total * 100) : 0}%` }} /></div></div>}
         {visible && createProgress && <p className="rounded-lg border border-brand-200 bg-brand-50 px-4 py-3 text-brand-800" role="status">
           {`Creating in Albi: ${createProgress.done ?? 0} of ${createProgress.total ?? 0} done${createProgress.created ? ` (${createProgress.created} created)` : ''}. Albi is read once; each record is still checked before it is created.`}</p>}
-        {visible && bulkSummary && <p className="rounded-lg border border-gray-200 bg-white px-4 py-3 text-gray-800" role="status">{bulkSummary}</p>}
+        {visible && bulkSummary && <div className="rounded-lg border border-gray-200 bg-white px-4 py-3 text-gray-800" role="status">
+          <p>{bulkSummary}</p>
+          {createSkips.summary === bulkSummary && createSkips.rows.length > 0 && <ul className="mt-2 space-y-1 text-sm">
+            {createSkips.rows.map(row => <li key={row.id}>
+              <button type="button" className="font-medium text-brand-700 hover:underline" onClick={() => selectRecord(row.id)}>{row.name}</button>
+              <span className="text-gray-600"> — {row.outcome === 'failed' ? 'Not created' : 'Skipped'}: {row.reason}</span>
+            </li>)}
+          </ul>}
+        </div>}
         {visible && actionError && <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-red-800" role="alert"><p>{actionError}</p>
           <button type="button" onClick={() => setRetryToken(value => value + 1)} className={`${btn} mt-3`}>Reload queue</button></div>}
       </div>

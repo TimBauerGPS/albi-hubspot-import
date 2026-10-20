@@ -289,6 +289,7 @@ create table public.h2a_review_create_batches (
   skipped integer not null default 0 check (skipped >= 0),
   failed integer not null default 0 check (failed >= 0),
   error_code text check (error_code in ('timeout', 'expired', 'dispatch_failed', 'operation_failed')),
+  results jsonb not null default '[]'::jsonb check (jsonb_typeof(results) = 'array' and jsonb_array_length(results) <= 50),
   heartbeat_at timestamptz not null default now(),
   started_at timestamptz,
   finished_at timestamptz,

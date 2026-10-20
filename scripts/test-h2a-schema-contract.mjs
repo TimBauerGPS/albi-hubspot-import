@@ -789,6 +789,7 @@ test('create batches are service-only, bounded, and one active per company', () 
   for (const source of [sql, readSchema()]) {
     assert.match(source, /create table (?:if not exists )?public\.h2a_review_create_batches/)
     assert.match(source, /jsonb_array_length\(items\) between 1 and 50/)
+    assert.match(source, /results jsonb not null default '\[\]'::jsonb/)
     assert.match(source, /create unique index (?:if not exists )?h2a_review_create_batches_one_active_idx\s+on public\.h2a_review_create_batches \(company_id\)\s+where status in \('queued', 'running'\)/)
     assert.match(source, /alter table public\.h2a_review_create_batches enable row level security;/)
     assert.match(source, /revoke all on table public\.h2a_review_create_batches from public, anon, authenticated, service_role;/)

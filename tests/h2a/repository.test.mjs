@@ -1174,7 +1174,11 @@ test('create batches expire abandoned ones, insert one queued batch, and transit
   assert.equal(await repository.updateReviewCreateBatch('company-1', BATCH_ID, { counts, now: BATCH_TIME }), true)
   assert.deepEqual(calls[3].steps.find(step => step[0] === 'update')[1], { total: 1, done: 1, created: 1, skipped: 0, failed: 0,
     heartbeat_at: BATCH_TIME, updated_at: BATCH_TIME })
-  assert.equal(await repository.finishReviewCreateBatch('company-1', BATCH_ID, { status: 'completed', counts, now: BATCH_TIME }), true)
+  const results = [{ reviewId: items[0].reviewId, outcome: 'skipped', reason: 'organization_not_synced' }]
+  assert.equal(await repository.finishReviewCreateBatch('company-1', BATCH_ID, { status: 'completed', counts, results, now: BATCH_TIME }), true)
+  assert.deepEqual(calls[4].steps.find(step => step[0] === 'update')[1].results, results)
+  await assert.rejects(repository.finishReviewCreateBatch('company-1', BATCH_ID, { status: 'completed', counts,
+    results: [{ reviewId: items[0].reviewId, outcome: 'skipped', reason: 'Not A Code!' }], now: BATCH_TIME }), TypeError)
   for (const bad of [[], [{ reviewId: 'nope', expectedUpdatedAt: BATCH_TIME }], Array.from({ length: 51 }, () => items[0])]) {
     await assert.rejects(repository.createReviewCreateBatch('company-1', { kind: 'sample', items: bad, referralSourceId: '5', actorId: ACTOR_ID, now: BATCH_TIME, staleBefore: BATCH_TIME }))
   }

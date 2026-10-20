@@ -79,7 +79,14 @@ function requireReviewValue(value, allowed, label) {
 }
 
 const CREATE_BATCH_TABLE = 'h2a_review_create_batches'
-const CREATE_BATCH_COLUMNS = 'id,company_id,review_kind,items,referral_source_id,requested_by,status,total,done,created,skipped,failed,error_code,heartbeat_at,started_at,finished_at,created_at,updated_at'
+const CREATE_BATCH_COLUMNS = 'id,company_id,review_kind,items,referral_source_id,requested_by,status,total,done,created,skipped,failed,error_code,results,heartbeat_at,started_at,finished_at,created_at,updated_at'
+function createBatchResults(results) {
+  if (results === undefined) return {}
+  if (!Array.isArray(results) || results.length > MAX_CREATE_BATCH_ITEMS || results.some(item => !item || typeof item !== 'object' ||
+    typeof item.reviewId !== 'string' || !UUID_SHAPE.test(item.reviewId) || !['created', 'skipped', 'failed'].includes(item.outcome) ||
+    item.reason !== undefined && (typeof item.reason !== 'string' || !/^[a-z_]{1,40}$/.test(item.reason)))) throw new TypeError('Invalid create batch results')
+  return { results: results.map(item => ({ reviewId: item.reviewId, outcome: item.outcome, ...(item.reason ? { reason: item.reason } : {}) })) }
+}
 const MAX_CREATE_BATCH_ITEMS = 50
 function createBatchCounts(counts) {
   if (!counts || typeof counts !== 'object') throw new TypeError('Invalid create batch counts')
@@ -697,21 +704,21 @@ export function createH2ARepository(supabase) {
       return checked(await supabase.from(CREATE_BATCH_TABLE).update({ status: 'running', started_at: now, heartbeat_at: now, updated_at: now })
         .eq('company_id', companyId).eq('id', batchId).eq('status', 'queued').select(CREATE_BATCH_COLUMNS).maybeSingle()) ?? null
     },
-    async updateReviewCreateBatch(companyId, batchId, { counts, now = new Date().toISOString() }) {
+    async updateReviewCreateBatch(companyId, batchId, { counts, results, now = new Date().toISOString() }) {
       requireReviewIdentity(companyId)
       requireReviewIdentity(batchId)
       requireReviewTimestamp(now)
-      const rows = checked(await supabase.from(CREATE_BATCH_TABLE).update({ ...createBatchCounts(counts), heartbeat_at: now, updated_at: now })
+      const rows = checked(await supabase.from(CREATE_BATCH_TABLE).update({ ...createBatchCounts(counts), ...createBatchResults(results), heartbeat_at: now, updated_at: now })
         .eq('company_id', companyId).eq('id', batchId).eq('status', 'running').select('id'))
       return Array.isArray(rows) && rows.length === 1
     },
-    async finishReviewCreateBatch(companyId, batchId, { status, errorCode = null, counts, now = new Date().toISOString(), fromStatus = 'running' }) {
+    async finishReviewCreateBatch(companyId, batchId, { status, errorCode = null, counts, results, now = new Date().toISOString(), fromStatus = 'running' }) {
       requireReviewIdentity(companyId)
       requireReviewIdentity(batchId)
       requireReviewTimestamp(now)
       if (!['completed', 'failed'].includes(status) || !['queued', 'running'].includes(fromStatus)) throw new TypeError('Invalid create batch state')
       if (errorCode !== null && !['timeout', 'expired', 'dispatch_failed', 'operation_failed'].includes(errorCode)) throw new TypeError('Invalid create batch error')
-      const rows = checked(await supabase.from(CREATE_BATCH_TABLE).update({ ...createBatchCounts(counts), status, error_code: errorCode,
+      const rows = checked(await supabase.from(CREATE_BATCH_TABLE).update({ ...createBatchCounts(counts), ...createBatchResults(results), status, error_code: errorCode,
         finished_at: now, heartbeat_at: now, updated_at: now }).eq('company_id', companyId).eq('id', batchId).eq('status', fromStatus).select('id'))
       return Array.isArray(rows) && rows.length === 1
     },

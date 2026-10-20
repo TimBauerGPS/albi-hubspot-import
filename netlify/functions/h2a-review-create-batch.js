@@ -6,6 +6,7 @@ import { canResolve, resolutionMode } from './_h2a/resolutionCapability.js'
 import { MAX_CREATE_BATCH_ITEMS, runReviewCreateBatch } from './_h2a/createBatch.js'
 import { defaultDispatchResume } from './h2a-conflict-resolve.js'
 import { ApiError } from './_h2a/http.js'
+import { loadReviewResolutionOptions } from './_h2a/reviewResolutionOptions.js'
 
 // "Create selected": POST queues one batch (selected reviews + one referral source) and hands it to the
 // background function; GET returns the latest batch of a kind plus Albi's referral sources so the page can
@@ -31,6 +32,9 @@ export function projectCreateBatch(row) {
     status: ['queued', 'running', 'completed', 'failed'].includes(row.status) ? row.status : 'failed',
     total: count(row.total), done: count(row.done), created: count(row.created), skipped: count(row.skipped), failed: count(row.failed),
     errorCode: typeof row.error_code === 'string' ? row.error_code : null,
+    results: (Array.isArray(row.results) ? row.results : []).slice(0, MAX_CREATE_BATCH_ITEMS).filter(item => item && typeof item.reviewId === 'string' &&
+      ['created', 'skipped', 'failed'].includes(item.outcome)).map(item => ({ reviewId: item.reviewId, outcome: item.outcome,
+      ...(typeof item.reason === 'string' && /^[a-z_]{1,40}$/.test(item.reason) ? { reason: item.reason } : {}) })),
     createdAt: row.created_at ?? null, startedAt: row.started_at ?? null, finishedAt: row.finished_at ?? null }
 }
 
@@ -109,6 +113,11 @@ async function run({ repository, options, companyId, batchId }) {
     const result = await runReviewCreateBatch({ repository, batchRepository: repository,
       now: options.now, clockMs: options.clockMs, deadlineMs: options.deadlineMs, batchDeadlineMs: options.batchDeadlineMs,
       dispatchResume: options.dispatchResume ?? (intent => defaultDispatchResume(intent, options)),
+      // The record's own create checks (organization linked, owner/type/status, referral sources), read once per record.
+      loadReadiness: async (row, clients) => {
+        const loaded = await loadReviewResolutionOptions({ row: { ...row, company_id: companyId }, repository, reads: clients })
+        return Array.isArray(row.candidate_snapshots) && row.candidate_snapshots.length ? loaded.forceCreateReadiness : loaded.createReadiness
+      },
       getResolutionClients: async (_company, config) => {
         const clients = await makeClients(options, repository, companyId)
         if (!options.makeClients && (await clients.hubspot.getAccountInfo()).portalId !== config.portal_id) throw new ApiError('permission', { code: 'authorization_rejected' })

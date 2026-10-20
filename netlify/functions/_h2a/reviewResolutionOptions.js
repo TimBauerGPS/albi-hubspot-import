@@ -5,6 +5,7 @@ import { resolveContactType } from './options.js'
 import { decideContactMatch, decideOrganizationMatch } from './match.js'
 import { safeReviewSnapshot } from './review.js'
 import { buildCreateReadiness, loadCreateDefaults, safeReferralSources } from './createDefaults.js'
+import { cachedRead } from './readCache.js'
 
 const providerId = value => typeof value === 'string' && /^[1-9]\d{0,99}$/.test(value)
 const record = value => value && typeof value === 'object' && !Array.isArray(value)
@@ -179,9 +180,13 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
         Number.isSafeInteger(Number(type.contactTypeId))
       const baseReady = nameReady && organizationReady && typeReady && !organizationBlock
       const notReadyReason = organizationBlock ? null : !nameReady ? 'missing_name' : !typeReady ? 'default_type_unconfirmed' : null
-      const referralSources = safeReferralSources(baseReady ? await reads.albiRead.listReferralSources() : [])
-      const defaults = baseReady && referralSources.length > 0 ? await loadCreateDefaults({ hubspotRead: hubspot, albiRead: reads.albiRead,
-        objectType: row.object_type, sourceId: row.source_id }) : null
+      // Referral sources and the create defaults load in parallel; Albi's lists are cached per company while warm.
+      const cacheKey = typeof row.company_id === 'string' && row.company_id ? row.company_id : null
+      const [sources, defaults] = baseReady ? await Promise.all([
+        cachedRead(cacheKey && `${cacheKey}:albi-referral-sources`, () => reads.albiRead.listReferralSources()),
+        loadCreateDefaults({ hubspotRead: hubspot, albiRead: reads.albiRead, objectType: row.object_type, sourceId: row.source_id, cacheKey }),
+      ]) : [[], null]
+      const referralSources = safeReferralSources(sources)
       const details = buildCreateReadiness({ baseReady, organizationBlock, referralSources, defaults, notReadyReason })
       return { ...unavailable, ...(forced ? { forceCreateReadiness: { eligible: true, ...details } } : { createReadiness: details }) }
     }

@@ -816,7 +816,8 @@ test('Create selected asks for one referral source, starts a background batch an
     getH2ADryRunReview: async (_s, _c, id) => ({ item: detailOf(id, { updatedAt: '2026-10-12T12:00:00.000Z',
       triageDetails: { quickKind: id === 'c' ? 'link' : 'create' } }) }),
     getH2ACreateBatch: async () => ({ referralSources: [{ id: '5', label: 'Network' }],
-      batch: polls++ === 0 ? null : { id: 'b1', status: 'completed', total: 2, done: 2, created: 1, skipped: 1, failed: 0 } }),
+      batch: polls++ === 0 ? null : { id: 'b1', status: 'completed', total: 2, done: 2, created: 1, skipped: 1, failed: 0,
+        results: [{ reviewId: 'a', outcome: 'created' }, { reviewId: 'b', outcome: 'skipped', reason: 'organization_not_synced' }] } }),
     startH2ACreateBatch: async () => ({ status: 'queued', batch: { id: 'b1', status: 'queued', total: 2, done: 0, created: 0, skipped: 0, failed: 0 } }) },
   { createBatchPollMs: 1 })
   assert.equal(ui.queue().props.createSelectedCount, 2)
@@ -831,6 +832,9 @@ test('Create selected asks for one referral source, starts a background batch an
   assert.match(ui.text(), /Creating in Albi: 0 of 2 done/)
   for (let i = 0; i < 5 && !/Create selected finished/.test(ui.text()); i++) await ui.tick()
   assert.match(ui.text(), /Create selected finished: 1 created, 1 skipped, 0 failed/)
+  // The record it left alone is named, with the reason, and opens on click.
+  assert.match(ui.text(), /Marcus Lee — Skipped: This contact’s HubSpot organization is not in Albi yet/)
+  assert.doesNotMatch(ui.text(), /Jane Doe — /)
   ui.unmount()
 })
 

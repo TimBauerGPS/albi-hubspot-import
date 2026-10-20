@@ -18,6 +18,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/
 const validTime = value => typeof value === 'string' && TIMESTAMP.test(value) && Number.isFinite(Date.parse(value)) &&
   new Date(`${value.slice(0, 10)}T00:00:00Z`).toISOString().slice(0, 10) === value.slice(0, 10)
+// Each advisory read gets this budget; the reads that can run together do, keeping detail well under the gateway limit.
+const DETAIL_BUDGET_MS = 8000
 const providerId = value => typeof value === 'string' && /^[1-9]\d{0,99}$/.test(value)
 const fail = (status, message) => { throw new H2AReviewError(status, message) }
 const reply = (statusCode, body) => ({ statusCode, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store',
@@ -92,80 +94,86 @@ async function detail(repository, companyId, runId, row, auth, options, config) 
   const projected = await currentResolutionProjection(repository, companyId, row.id, row.portal_id)
   const resolutionCapability = projectResolutionCapability(auth, (options.env ?? process.env).H2A_REVIEW_RESOLUTION_MODE, projected.hubspotWrites)
   const actions = getH2AReviewRowActions(row)
+  // One set of portal-verified provider clients for every advisory read below (null when the portal changed).
+  let clientsOnce = null
+  const sharedClients = () => clientsOnce ??= (async () => {
+    const clients = options.makeClients ? await options.makeClients(companyId) : await createH2AProviderClients({
+      companyId, repository, keyring: options.keyring, env: options.env, fetch: options.fetch })
+    if (!options.makeClients && (await clients.hubspot.getAccountInfo()).portalId !== config.portal_id) return null
+    return clients
+  })()
   let resolutionOptions = { organizationOptions: [], createReadiness: { ready: false }, forceCreateReadiness: { eligible: false, ready: false } }, timedOut = false
-  if (resolutionCapability.canResolve && (row.status === 'needs_review' || row.status === 'cleared' && row.recheck_outcome === 'safe_to_create') &&
-    (actions.includes('choose_organization') || actions.includes('create_albi') &&
-      Array.isArray(row.candidate_snapshots) && row.candidate_snapshots.length === 0 ||
-      actions.includes('force_create_albi') && Array.isArray(row.candidate_snapshots) && row.candidate_snapshots.length > 0)) {
-    try {
-      const timeoutMs = Number.isFinite(options.detailDeadlineMs)
-        ? Math.min(10000, Math.max(1, options.detailDeadlineMs)) : 5000
-      const loaded = await advisoryWithin(async () => {
-        const clients = options.makeClients ? await options.makeClients(companyId) : await createH2AProviderClients({
-          companyId, repository, keyring: options.keyring, env: options.env, fetch: options.fetch })
-        const optionsPromise = loadReviewResolutionOptions({ row: { ...row, company_id: companyId }, repository,
-          reads: readOnlyH2ACapabilities(clients) })
-        if (options.makeClients) return optionsPromise
-        const [account, loadedOptions] = await Promise.all([clients.hubspot.getAccountInfo(), optionsPromise])
-        return account.portalId === config.portal_id ? loadedOptions : null
-      }, timeoutMs)
-      if (loaded) resolutionOptions = loaded
-      else timedOut = true
-    } catch { timedOut = true /* The chooser remains disabled when live evidence cannot be read. */ }
-    // Say why creation is off when its checks did not finish, rather than an unexplained "unavailable".
-    if (timedOut) {
-      if (actions.includes('create_albi') && Array.isArray(row.candidate_snapshots) && row.candidate_snapshots.length === 0) {
-        resolutionOptions = { ...resolutionOptions, createReadiness: { ready: false, blockedReason: 'evidence_unavailable' } }
-      }
-      if (actions.includes('force_create_albi') && Array.isArray(row.candidate_snapshots) && row.candidate_snapshots.length > 0) {
-        resolutionOptions = { ...resolutionOptions, forceCreateReadiness: { eligible: true, ready: false, blockedReason: 'evidence_unavailable' } }
+  async function loadReadiness() {
+    if (resolutionCapability.canResolve && (row.status === 'needs_review' || row.status === 'cleared' && row.recheck_outcome === 'safe_to_create') &&
+      (actions.includes('choose_organization') || actions.includes('create_albi') &&
+        Array.isArray(row.candidate_snapshots) && row.candidate_snapshots.length === 0 ||
+        actions.includes('force_create_albi') && Array.isArray(row.candidate_snapshots) && row.candidate_snapshots.length > 0)) {
+      try {
+        const loaded = await advisoryWithin(async () => {
+          const clients = await sharedClients()
+          return clients ? loadReviewResolutionOptions({ row: { ...row, company_id: companyId }, repository, reads: readOnlyH2ACapabilities(clients) }) : null
+        }, Number.isFinite(options.detailDeadlineMs) ? Math.min(10000, Math.max(1, options.detailDeadlineMs)) : DETAIL_BUDGET_MS)
+        if (loaded) resolutionOptions = loaded
+        else timedOut = true
+      } catch { timedOut = true /* The chooser remains disabled when live evidence cannot be read. */ }
+      // Say why creation is off when its checks did not finish, rather than an unexplained "unavailable".
+      if (timedOut) {
+        if (actions.includes('create_albi') && Array.isArray(row.candidate_snapshots) && row.candidate_snapshots.length === 0) {
+          resolutionOptions = { ...resolutionOptions, createReadiness: { ready: false, blockedReason: 'evidence_unavailable' } }
+        }
+        if (actions.includes('force_create_albi') && Array.isArray(row.candidate_snapshots) && row.candidate_snapshots.length > 0) {
+          resolutionOptions = { ...resolutionOptions, forceCreateReadiness: { eligible: true, ready: false, blockedReason: 'evidence_unavailable' } }
+        }
       }
     }
+    }
+    // Live association names (the contact's own snapshot only carries a free-text company property).
+    // null means unknown, [] means HubSpot has none.
+    let hubspotOrganizations = null, mergedInto = null
+  async function loadOrganizations() {
+    if (resolutionCapability.canResolve) {
+      try {
+        const loaded = await advisoryWithin(async () => {
+          const clients = await sharedClients()
+          if (!clients) return null
+          // HubSpot merges move a record to a new ID; follow it so the survivor's data is shown.
+          const survivor = typeof clients.hubspot.getMergedInto === 'function' ? await clients.hubspot.getMergedInto(row.object_type, row.source_id) : null
+          const merge = providerId(survivor) ? await survivorReview(repository, companyId, runId, row, survivor) : null
+          if (row.object_type !== 'contacts') return { organizations: null, merge }
+          const contactId = merge?.sourceId ?? row.source_id
+          const associations = await clients.hubspot.getAssociations({ objectType: 'contacts', objectIds: [contactId], toObjectTypes: ['companies'] })
+          if (!Array.isArray(associations) || associations.length !== 1 || associations[0]?.fromId !== contactId ||
+            associations[0]?.toObjectType !== 'companies' || !Array.isArray(associations[0].toIds)) return { organizations: null, merge }
+          const found = []
+          for (const sourceId of [...new Set(associations[0].toIds)].filter(providerId).slice(0, 5)) {
+            const companies = await clients.hubspot.getCompanies([sourceId])
+            const company = Array.isArray(companies) && companies.length === 1 && companies[0]?.id === sourceId && companies[0]?.archived !== true ? companies[0] : null
+            const name = typeof company?.properties?.name === 'string' ? company.properties.name.trim().slice(0, 200) : ''
+            found.push({ sourceId, name: name || 'Unnamed organization' })
+          }
+          return { organizations: found, merge }
+        }, Number.isFinite(options.detailDeadlineMs) ? Math.min(10000, Math.max(1, options.detailDeadlineMs)) : DETAIL_BUDGET_MS)
+        hubspotOrganizations = loaded?.organizations ?? null
+        mergedInto = loaded?.merge ?? null
+      } catch { hubspotOrganizations = null }
+    }
   }
+  // Readiness and the live organization/merge reads run together; the org-first offer needs readiness first.
+  await Promise.all([loadReadiness(), loadOrganizations()])
   // "Create organization and contact": advisory, so any failure or timeout simply leaves it unavailable.
   let orgFirstCreate = { eligible: false }
   if (resolutionCapability.canResolve && row.object_type === 'contacts' &&
     resolutionOptions.createReadiness?.blockedReason === 'organization_not_synced') {
     try {
       orgFirstCreate = await advisoryWithin(async () => {
-        const clients = options.makeClients ? await options.makeClients(companyId) : await createH2AProviderClients({
-          companyId, repository, keyring: options.keyring, env: options.env, fetch: options.fetch })
-        if (!options.makeClients && (await clients.hubspot.getAccountInfo()).portalId !== config.portal_id) return null
+        const clients = await sharedClients()
+        if (!clients) return null
         return loadOrgFirstCreate({ row: { ...row, company_id: companyId }, readiness: resolutionOptions.createReadiness, repository,
           reads: readOnlyH2ACapabilities(clients) })
-      }, Number.isFinite(options.detailDeadlineMs) ? Math.min(10000, Math.max(1, options.detailDeadlineMs)) : 5000) ?? orgFirstCreate
+      }, Number.isFinite(options.detailDeadlineMs) ? Math.min(10000, Math.max(1, options.detailDeadlineMs)) : DETAIL_BUDGET_MS) ?? orgFirstCreate
     } catch { orgFirstCreate = { eligible: false } }
   }
-  // Live association names (the contact's own snapshot only carries a free-text company property).
-  // null means unknown, [] means HubSpot has none.
-  let hubspotOrganizations = null, mergedInto = null
-  if (resolutionCapability.canResolve) {
-    try {
-      const loaded = await advisoryWithin(async () => {
-        const clients = options.makeClients ? await options.makeClients(companyId) : await createH2AProviderClients({
-          companyId, repository, keyring: options.keyring, env: options.env, fetch: options.fetch })
-        if (!options.makeClients && (await clients.hubspot.getAccountInfo()).portalId !== config.portal_id) return null
-        // HubSpot merges move a record to a new ID; follow it so the survivor's data is shown.
-        const survivor = typeof clients.hubspot.getMergedInto === 'function' ? await clients.hubspot.getMergedInto(row.object_type, row.source_id) : null
-        const merge = providerId(survivor) ? await survivorReview(repository, companyId, runId, row, survivor) : null
-        if (row.object_type !== 'contacts') return { organizations: null, merge }
-        const contactId = merge?.sourceId ?? row.source_id
-        const associations = await clients.hubspot.getAssociations({ objectType: 'contacts', objectIds: [contactId], toObjectTypes: ['companies'] })
-        if (!Array.isArray(associations) || associations.length !== 1 || associations[0]?.fromId !== contactId ||
-          associations[0]?.toObjectType !== 'companies' || !Array.isArray(associations[0].toIds)) return { organizations: null, merge }
-        const found = []
-        for (const sourceId of [...new Set(associations[0].toIds)].filter(providerId).slice(0, 5)) {
-          const companies = await clients.hubspot.getCompanies([sourceId])
-          const company = Array.isArray(companies) && companies.length === 1 && companies[0]?.id === sourceId && companies[0]?.archived !== true ? companies[0] : null
-          const name = typeof company?.properties?.name === 'string' ? company.properties.name.trim().slice(0, 200) : ''
-          found.push({ sourceId, name: name || 'Unnamed organization' })
-        }
-        return { organizations: found, merge }
-      }, Number.isFinite(options.detailDeadlineMs) ? Math.min(10000, Math.max(1, options.detailDeadlineMs)) : 5000)
-      hubspotOrganizations = loaded?.organizations ?? null
-      mergedInto = loaded?.merge ?? null
-    } catch { hubspotOrganizations = null }
-  }
+
   const mappings = row.candidate_snapshots?.length ? await repository.getMappings(companyId).catch(() => null) : null
   // Detail knows the live create readiness and merge state, so refresh the stored bucket (written only when changed).
   const projectedRow = projectReviewRow(row, { detail: true, mappings: mappings ?? [] })

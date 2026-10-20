@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { getH2AReviewActions } from '../../../shared/h2aReviewReasons.js'
+import { getH2AReviewRowActions } from '../../../shared/h2aReviewReasons.js'
 import { executeReviewResolution } from './reviewResolutionService.js'
 import { H2AReviewError } from './reviewService.js'
 
@@ -26,14 +26,16 @@ async function listAll(read) {
   throw new Error('pagination_loop')
 }
 
-// Still a plain create: no candidates, open (or cleared as safe to create), unchanged since it was selected.
-function creatable(row, expectedUpdatedAt) {
-  if (!row) return false
-  if (row.updated_at !== expectedUpdatedAt) return false
-  if (!Array.isArray(row.candidate_snapshots) || row.candidate_snapshots.length) return false
-  if (!(row.status === 'needs_review' || row.status === 'cleared' && row.recheck_outcome === 'safe_to_create')) return false
-  return getH2AReviewActions(row.reason, row.object_type).includes('create_albi')
+// Why a selected row is not a plain create any more (no candidates, open or cleared as safe to create,
+// unchanged since it was selected), or null when it still is.
+function notCreatable(row, expectedUpdatedAt) {
+  if (!row) return 'not_found'
+  if (row.updated_at !== expectedUpdatedAt) return 'changed'
+  if (!Array.isArray(row.candidate_snapshots) || row.candidate_snapshots.length) return 'has_candidates'
+  if (!(row.status === 'needs_review' || row.status === 'cleared' && row.recheck_outcome === 'safe_to_create')) return 'not_open'
+  return getH2AReviewRowActions(row).includes('create_albi') ? null : 'not_creatable'
 }
+const creatable = (row, expectedUpdatedAt) => notCreatable(row, expectedUpdatedAt) === null
 
 export async function runReviewCreateBatch(deps, { companyId, batchId }) {
   const { repository, batchRepository } = deps
@@ -41,8 +43,10 @@ export async function runReviewCreateBatch(deps, { companyId, batchId }) {
   if (!batch) return { status: 'not_claimed' }
   const items = Array.isArray(batch.items) ? batch.items.slice(0, MAX_CREATE_BATCH_ITEMS) : []
   const counts = { total: items.length, done: 0, created: 0, skipped: 0, failed: 0 }
+  // Per record: what happened and, when not created, the named reason (shown by the page).
+  const results = []
   const finish = async (status, errorCode = null) => {
-    await batchRepository.finishReviewCreateBatch(companyId, batchId, { status, errorCode, counts: { ...counts } })
+    await batchRepository.finishReviewCreateBatch(companyId, batchId, { status, errorCode, counts: { ...counts }, results: [...results] })
     return { status, errorCode, counts: { ...counts } }
   }
   const deadline = clock(deps) + Math.min(13 * 60000, Math.max(1, deps.batchDeadlineMs ?? 13 * 60000))
@@ -66,25 +70,35 @@ export async function runReviewCreateBatch(deps, { companyId, batchId }) {
   // Organizations first, so a contact whose organization is created in this batch can be created against it.
   const ordered = [...rows.filter(entry => entry.row?.object_type === 'companies'), ...rows.filter(entry => entry.row?.object_type !== 'companies')]
   const rowDeps = { ...deps, albiSnapshot: snapshot, getResolutionClients: async () => clients }
+  // Readiness reads HubSpot and our mappings (never the Albi lists), so it sees an organization created earlier in this batch.
+  if (!deps.checkReadiness && deps.loadReadiness) deps = { ...deps, checkReadiness: row => deps.loadReadiness(row, clients) }
   for (const { item, row } of ordered) {
     if (clock(deps) >= deadline) return finish('failed', 'timeout')
-    if (!creatable(row, item.expectedUpdatedAt)) counts.skipped++
+    const record = (outcome, reason) => { results.push({ reviewId: item.reviewId, outcome, ...(reason ? { reason } : {}) }); counts[outcome]++ }
+    const reason = notCreatable(row, item.expectedUpdatedAt)
+    if (reason) record('skipped', reason)
     else {
-      try {
-        const result = await execute(rowDeps, { companyId, actorId: batch.requested_by, reviewId: item.reviewId,
-          expectedUpdatedAt: item.expectedUpdatedAt, clientRequestId: randomUUID(),
-          decision: { action: 'create_albi', referralSourceId: batch.referral_source_id } })
-        const status = result?.resolution?.status
-        if (['ready_to_recheck', 'completed', 'waiting_on_albi'].includes(status)) counts.created++
-        else counts.failed++
-      } catch (error) {
-        if (error instanceof H2AReviewError && error.statusCode === 409) counts.skipped++
-        else counts.failed++
+      // The same checks the record shows (organization linked, owner, type, status), so a skip names its reason.
+      let readiness = null
+      try { readiness = deps.checkReadiness ? await deps.checkReadiness(row) : { ready: true } } catch { readiness = { ready: false, blockedReason: 'evidence_unavailable' } }
+      if (readiness?.ready !== true) record('skipped', readiness?.blockedReason ?? 'not_ready')
+      else {
+        try {
+          const result = await execute(rowDeps, { companyId, actorId: batch.requested_by, reviewId: item.reviewId,
+            expectedUpdatedAt: item.expectedUpdatedAt, clientRequestId: randomUUID(),
+            decision: { action: 'create_albi', referralSourceId: batch.referral_source_id } })
+          const status = result?.resolution?.status
+          if (['ready_to_recheck', 'completed', 'waiting_on_albi'].includes(status)) record('created')
+          else record('failed', 'create_failed')
+        } catch (error) {
+          if (error instanceof H2AReviewError && error.statusCode === 409) record('skipped', 'changed')
+          else record('failed', 'error')
+        }
       }
     }
     counts.done++
     // A false heartbeat means the batch row expired or finished elsewhere.
-    if (!await batchRepository.updateReviewCreateBatch(companyId, batchId, { counts: { ...counts } })) return { status: 'lost', counts: { ...counts } }
+    if (!await batchRepository.updateReviewCreateBatch(companyId, batchId, { counts: { ...counts }, results: [...results] })) return { status: 'lost', counts: { ...counts } }
   }
   return finish('completed')
 }

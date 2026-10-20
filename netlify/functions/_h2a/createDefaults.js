@@ -1,5 +1,7 @@
 // Fixed defaults for records created from a review resolution. Values are matched by label against live
 // Albi options and the HubSpot owner's name; nothing here is a user-supplied provider value.
+import { cachedRead } from './readCache.js'
+
 export const CREATE_TYPE_LABEL = 'Referrer'
 export const CREATE_STATUS_LABEL = 'Active'
 
@@ -26,11 +28,14 @@ export function resolveCreateDefaults({ relationshipTypes, relationshipStatuses,
   return { ok: true, typeId, statusId, salespersonId }
 }
 
-// Reads only. Two small HubSpot calls plus three Albi option lists.
-export async function loadCreateDefaults({ hubspotRead, albiRead, objectType, sourceId }) {
-  const options = await albiRead.listCreateOptions()
-  const ownerId = await hubspotRead.getOwnerId(objectType === 'contacts' ? 'contacts' : 'companies', sourceId)
-  const owners = ownerId ? await hubspotRead.listOwners() : []
+// Reads only. The record's owner is read live; Albi's option lists and HubSpot's owners are cached per company
+// (cacheKey) while the function is warm, and the reads run in parallel.
+export async function loadCreateDefaults({ hubspotRead, albiRead, objectType, sourceId, cacheKey = null }) {
+  const [options, ownerId] = await Promise.all([
+    cachedRead(cacheKey && `${cacheKey}:albi-create-options`, () => albiRead.listCreateOptions()),
+    hubspotRead.getOwnerId(objectType === 'contacts' ? 'contacts' : 'companies', sourceId),
+  ])
+  const owners = ownerId ? await cachedRead(cacheKey && `${cacheKey}:hubspot-owners`, () => hubspotRead.listOwners()) : []
   return resolveCreateDefaults({ ...options, ownerId, owners })
 }
 

@@ -55,5 +55,5 @@ test('progress shows the latest batch and the Albi referral sources to choose fr
   const body = JSON.parse((await f.handler({ httpMethod: 'GET', queryStringParameters: { companyId: 'company-1', kind: 'sample' } })).body)
   assert.deepEqual(body.referralSources, [{ id: '5', label: 'Network' }])
   assert.deepEqual(body.batch, projectCreateBatch({ id: BATCH_ID, review_kind: 'sample', status: 'queued', total: 1, done: 0, created: 0, skipped: 0, failed: 0 }))
-  assert.deepEqual(Object.keys(body.batch).sort(), ['created', 'createdAt', 'done', 'errorCode', 'failed', 'finishedAt', 'id', 'kind', 'skipped', 'startedAt', 'status', 'total'])
+  assert.deepEqual(Object.keys(body.batch).sort(), ['created', 'createdAt', 'done', 'errorCode', 'failed', 'finishedAt', 'id', 'kind', 'results', 'skipped', 'startedAt', 'status', 'total'])
 })
