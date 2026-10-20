@@ -13,6 +13,7 @@ export const H2A_BLOCKED_REASONS = Object.freeze({
   organization_mapping_ambiguous: 'This contact’s HubSpot organization is linked to more than one Albi organization. Fix the duplicate link first.',
   organization_missing_in_hubspot: 'This contact’s HubSpot organization could not be read. Check the association in HubSpot, then recheck.',
   evidence_unavailable: 'The checks for creating this record didn’t finish in time. Reload the record or Recheck it.',
+  source_unavailable: 'The HubSpot record could not be read (it may have been deleted, archived or merged). Check it in HubSpot, then recheck.',
 })
 
 export function blockedReasonCopy(code) {

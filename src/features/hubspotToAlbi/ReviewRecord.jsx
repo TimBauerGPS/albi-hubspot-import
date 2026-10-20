@@ -167,9 +167,9 @@ export default function ReviewRecord({
       {!merged && blockedCopy && !orgFirst && canAct && <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-900" role="status">
         <p className="font-semibold">Can’t create yet</p><p className="mt-1 text-xs">{blockedCopy}</p></div>}
       {!merged && canAct && !blockedCopy && !create && !fieldMode && !showOrganizationChoice && !orgGate && !orgFirst && readiness && readiness.ready !== true && (review.actions.includes('create_albi') || review.actions.includes('force_create_albi')) &&
-        <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800" role="status">Creation is unavailable until the candidate and type checks are ready. Recheck this record after correcting them.</p>}
+        <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800" role="status">Creation couldn’t be checked for this record. Reload it, or Recheck it, to check again.</p>}
       {orgGate && organizationFirstCard(unsyncedOrganization)}
-      {create?.kind === 'force' && <p className="text-xs text-red-800">Adding a new record can create a duplicate, so the server rechecks every record before applying it.</p>}
+      {create?.kind === 'force' && !create.unavailable && <p className="text-xs text-gray-600">Note: creating a new record ignores the matches listed above. The server checks Albi again before creating, so a true duplicate is still refused.</p>}
       {orgFirst && canAct && <p className="rounded-lg border border-brand-200 bg-brand-50 px-3 py-2 text-sm text-gray-800">
         {item.orgFirstCreate.organizationName ? `${item.orgFirstCreate.organizationName} is not in Albi yet. ` : 'This contact’s HubSpot organization is not in Albi yet. '}
         Choose a referral source to create the organization and the contact together.</p>}

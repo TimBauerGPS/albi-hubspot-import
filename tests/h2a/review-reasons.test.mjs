@@ -72,7 +72,7 @@ test('new_record_needs_review is a create-capable identity reason', () => {
 
 test('blockedReasonCopy returns copy for every blocked code and null otherwise', () => {
   const codes = ['referrer_type_missing', 'active_status_missing', 'owner_not_found', 'salesperson_not_found', 'source_already_mapped', 'multiple_organizations', 'organization_not_synced',
-    'source_changed', 'missing_name', 'default_type_unconfirmed', 'referral_sources_unavailable', 'organization_mapping_ambiguous', 'organization_missing_in_hubspot', 'evidence_unavailable']
+    'source_changed', 'missing_name', 'default_type_unconfirmed', 'referral_sources_unavailable', 'organization_mapping_ambiguous', 'organization_missing_in_hubspot', 'evidence_unavailable', 'source_unavailable']
   assert.deepEqual(Object.keys(H2A_BLOCKED_REASONS).sort(), [...codes].sort())
   assert.ok(Object.isFrozen(H2A_BLOCKED_REASONS))
   for (const code of codes) assert.ok(blockedReasonCopy(code))

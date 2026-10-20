@@ -271,10 +271,10 @@ test('a non-suggested same_email candidate keeps email-match semantics when link
 
 test('not-ready create without a blocked reason explains itself; force create warns about duplicates', async () => {
   const out = await html({ ...none, createReadiness: { ready: false } })
-  assert.match(out, /Creation is unavailable until the candidate and type checks are ready\. Recheck this record after correcting them\./)
+  assert.match(out, /Creation couldn’t be checked for this record\. Reload it, or Recheck it, to check again\./)
   const forced = await html({ ...base, suggestedCandidateId: null })
-  assert.match(forced, /can create a duplicate, so the server rechecks every record before applying it/)
-  assert.doesNotMatch(await html({ ...none }), /create a duplicate/)
+  assert.match(forced, /creating a new record ignores the matches listed above/)
+  assert.doesNotMatch(await html({ ...none }), /ignores the matches listed above/)
 })
 
 test('force create is not offered when a listed candidate id is invalid', async () => {

@@ -55,7 +55,14 @@ test('create readiness trusts the last recheck (no full Albi scan) and names why
   assert.deepEqual((await load({ reads: { ...currentReads, albiRead: { ...currentReads.albiRead, listReferralSources: async () => [] } } })).createReadiness,
     { ready: false, blockedReason: 'referral_sources_unavailable' })
   const mapped = await load({ mappings: { ...currentMappings, contacts: [{ portal_id: '321', hubspot_id: '123', albi_contact_id: '456' }] } })
-  assert.deepEqual(mapped.createReadiness, { ready: false })
+  assert.deepEqual(mapped.createReadiness, { ready: false, blockedReason: 'source_already_mapped' })
+  const missing = await load({ reads: { ...currentReads, hubspotRead: { ...currentReads.hubspotRead, getContacts: async () => [] } } })
+  assert.deepEqual(missing.createReadiness, { ready: false, blockedReason: 'source_unavailable' })
+  const failing = await load({ reads: { ...currentReads, hubspotRead: { ...currentReads.hubspotRead, getContacts: async () => { throw new Error('down') } } } })
+  assert.deepEqual(failing.createReadiness, { ready: false, blockedReason: 'evidence_unavailable' })
+  const several = await load({ reads: { ...currentReads, hubspotRead: { ...currentReads.hubspotRead,
+    getAssociations: async () => [{ fromId: '123', toObjectType: 'companies', toIds: ['777', '778'] }] } } })
+  assert.deepEqual(several.createReadiness, { ready: false, blockedReason: 'multiple_organizations' })
 })
 
 test('a contact behind a mapped organization is ready without scanning Albi organizations', async () => {

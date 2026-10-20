@@ -48,6 +48,10 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
     !['contacts', 'companies'].includes(row.object_type) || !reads?.hubspotRead || !reads?.albiRead) return unavailable
   const actions = getH2AReviewActions(row.reason, row.object_type)
   if (!actions.includes('choose_organization') && !actions.includes('create_albi') && !actions.includes('force_create_albi')) return unavailable
+  // Every reason creation is off is named, so the record never shows an unexplained "unavailable".
+  const hasCandidates = Array.isArray(row.candidate_snapshots) && row.candidate_snapshots.length > 0
+  const named = reason => ({ ...unavailable, ...(hasCandidates ? { forceCreateReadiness: { eligible: false, ready: false, blockedReason: reason } }
+    : { createReadiness: { ready: false, blockedReason: reason } }) })
   try {
     const hubspot = reads.hubspotRead
     const [mappings, sourceRows, associationRows] = await Promise.all([
@@ -57,11 +61,11 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
         objectType: 'contacts', objectIds: [row.source_id], toObjectTypes: ['companies'],
       }) : Promise.resolve([]),
     ])
-    if (!mappings || !['contacts', 'organizations', 'options'].every(key => Array.isArray(mappings[key]))) return unavailable
+    if (!mappings || !['contacts', 'organizations', 'options'].every(key => Array.isArray(mappings[key]))) return named('evidence_unavailable')
     if (!Array.isArray(sourceRows) || sourceRows.length !== 1 || sourceRows[0]?.id !== row.source_id ||
-      sourceRows[0]?.archived === true || !record(sourceRows[0]?.properties)) return unavailable
+      sourceRows[0]?.archived === true || !record(sourceRows[0]?.properties)) return named('source_unavailable')
     const associated = row.object_type === 'contacts' ? associationIds(associationRows, row.source_id) : []
-    if (associated === null) return unavailable
+    if (associated === null) return named('evidence_unavailable')
 
     if (actions.includes('choose_organization') && row.object_type === 'contacts') {
       // A single associated organization with no tenant mapping must be synced first. Decide that from cheap
@@ -179,7 +183,8 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
       const details = buildCreateReadiness({ baseReady, organizationBlock, referralSources, defaults, notReadyReason })
       return { ...unavailable, ...(forced ? { forceCreateReadiness: { eligible: true, ...details } } : { createReadiness: details }) }
     }
-  } catch { /* A failed read cannot become an actionable projection. */ }
+    if (normal || forced) return named(sourceMapped ? 'source_already_mapped' : associated.length > 1 ? 'multiple_organizations' : 'evidence_unavailable')
+  } catch { return named('evidence_unavailable') /* A failed read cannot become an actionable projection. */ }
   return unavailable
 }
 
