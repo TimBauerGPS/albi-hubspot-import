@@ -513,3 +513,20 @@ test('a link or create is not followed by an automatic recheck (Recheck all sett
   assert.doesNotMatch(ui.text(), /automatic recheck/i)
   ui.unmount()
 })
+
+
+test('an action the gateway timed out reloads the record until the server has saved it', async () => {
+  let details = 0
+  const ui = await mount({ props: { recheckReloadMs: 1 },
+    getH2ADryRunReview: (_s, _c, id) => Promise.resolve({ item: { ...full(id),
+      ...(++details > 3 ? { resolution: { id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', status: 'ready_to_recheck' } } : {}) } }),
+    resolveH2ADryRunReview: () => Promise.reject(Object.assign(new Error('This took too long to answer, but it may still finish. Wait a moment, then reload the record.'),
+      { status: 504, timedOut: true })) })
+  await ui.detail().props.onLink({ id: 'albi-1' }, { approveManyToOne: true })
+  for (let i = 0; i < 8; i++) await ui.flush()
+  assert.match(ui.text(), /still finishing/i)
+  for (let i = 0; i < 8 && /still finishing/i.test(ui.text()); i++) await ui.tick()
+  assert.doesNotMatch(ui.text(), /took too long|still finishing/i)
+  assert.match(ui.text(), /saved/i)
+  ui.unmount()
+})

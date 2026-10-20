@@ -405,6 +405,22 @@ test('a create retried after an earlier attempt got an Albi receipt links that r
   assert.equal(mutations(g).length, 0)
 })
 
+test('a create cleared by a recent recheck skips re-reading all of Albi; an old one reads it', async () => {
+  for (const [hoursAgo, scans] of [[2, 0], [30, 1]]) {
+    const f = fixture(), createInput = asCreate(f)
+    f.row.status = 'cleared'; f.row.recheck_outcome = 'safe_to_create'
+    f.row.last_rechecked_at = new Date(Date.parse(stamp) - hoursAgo * 3600000).toISOString()
+    f.deps.clockMs = () => Date.parse(stamp)
+    let listed = 0
+    const list = f.deps.albiRead.listContacts
+    f.deps.albiRead.listContacts = async args => { listed++; return list(args) }
+    const result = await executeReviewResolution(f.deps, createInput)
+    assert.equal(result.resolution.status, 'ready_to_recheck', `${hoursAgo}h`)
+    assert.equal(listed, scans, `${hoursAgo}h`)
+    assert.equal(f.mappings.contacts[0].albi_contact_id, '30')
+  }
+})
+
 test('successful organization create with name-only evidence maps the receipt target', async () => {
   const f = fixture()
   f.row.object_type = 'companies'; f.row.reason = 'no_match'; f.row.conflict_type = 'organization_match'

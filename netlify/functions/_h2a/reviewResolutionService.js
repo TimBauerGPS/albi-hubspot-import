@@ -123,7 +123,11 @@ async function sourceRead(deps, clients, type, id, deadline) {
   return rows[0] ?? null
 }
 
-async function evidence(deps, clients, row, decision, deadline) {
+// A create that a recheck cleared as safe to create within this window already had all of Albi checked for a
+// duplicate; re-reading every Albi contact before writing took ~30s and drew Albi rate limits.
+const TRUSTED_RECHECK_MS = 24 * 3600000
+
+async function evidence(deps, clients, row, decision, deadline, { live = false } = {}) {
   const source = await sourceRead(deps, clients, row.object_type, row.source_id, deadline)
   if (!source) fail(409, 'The HubSpot source is no longer available. Recheck this review.')
   const mappings = await deps.repository.getMappings(row.company_id)
@@ -155,7 +159,11 @@ async function evidence(deps, clients, row, decision, deadline) {
     Object.values(decision.fieldChoices ?? {}).every(winner => winner === 'hubspot')
   // An email-match link only saves our mapping; it is verified live by the recheck that follows.
   const capturedEmailLink = decision.action === 'link_existing' && (decision.ignoreContactDifferences === true || Array.isArray(decision.ignoredFields))
-  const captured = capturedForceCreate || capturedManualOnly || capturedEmailLink
+  const rechecked = Date.parse(row.last_rechecked_at ?? '')
+  const recentlyClearedCreate = !live && decision.action === 'create_albi' && row.status === 'cleared' &&
+    row.recheck_outcome === 'safe_to_create' && Array.isArray(row.candidate_snapshots) && row.candidate_snapshots.length === 0 &&
+    Number.isFinite(rechecked) && clock(deps) - rechecked >= 0 && clock(deps) - rechecked < TRUSTED_RECHECK_MS
+  const captured = capturedForceCreate || capturedManualOnly || capturedEmailLink || recentlyClearedCreate
   // A batch passes one shared Albi read (deps.albiSnapshot) so each record is checked without re-walking Albi.
   const shared = kind => deps.albiSnapshot && Array.isArray(deps.albiSnapshot[kind]) ? structuredClone(deps.albiSnapshot[kind]) : null
   const contacts = row.object_type === 'contacts'
@@ -597,9 +605,9 @@ async function runClaim(deps, input, saved, context) {
           }
         }
       } catch (error) {
-        // All ambiguous responses are verified by reads. Permission/validation
+        // All ambiguous responses are verified by reads (always live). Permission/validation
         // failures still retain the intent and return a fixed, sanitized outcome.
-        const after = await evidence(deps, clients, row, saved.decision, deadline)
+        const after = await evidence(deps, clients, row, saved.decision, deadline, { live: true })
         createTarget = plan.verification.create ? plan.action === 'force_create_albi'
           ? forcedReceiptTarget(row, after, createReceiptId)
           : exactCreateTarget(row, plan, after, createReceiptId, false) : null

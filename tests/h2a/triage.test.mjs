@@ -13,6 +13,14 @@ test('done when the row is no longer needs_review', () => {
 test('done when the resolution is completed', () => {
   assert.equal(computeTriage({ row: row(), ranking: one, resolutionStatus: 'completed' }).bucket, 'done')
 })
+test('a saved create or link waiting for its recheck is done, not still offered as a create or blocked', () => {
+  const saved = { bucket: 'done', details: { recheckPending: true } }
+  assert.deepEqual(computeTriage({ row: row({ status: 'cleared', recheck_outcome: 'safe_to_create' }), ranking: { candidates: [] },
+    createReadiness: { ready: true }, resolutionStatus: 'ready_to_recheck' }), saved)
+  assert.deepEqual(computeTriage({ row: row(), ranking: { candidates: [] }, createReadiness: { ready: false, blockedReason: 'source_already_mapped' },
+    resolutionStatus: 'ready_to_recheck' }), saved)
+})
+
 test('todo when waiting on Albi', () => {
   assert.equal(computeTriage({ row: row(), ranking: one, resolutionStatus: 'waiting_on_albi' }).bucket, 'todo')
 })

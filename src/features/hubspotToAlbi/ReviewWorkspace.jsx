@@ -352,8 +352,29 @@ export default function ReviewWorkspace({
     return item
   }
 
+  // The gateway gave up but the server usually finishes the write: reload until the saved result shows.
+  async function settleTimedOut(reviewId, startedFor) {
+    setRecordErrors(current => ({ ...current, [reviewId]: 'Still finishing on the server. This record reloads by itself when it’s saved.' }))
+    for (let attempt = 0; attempt < 6; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, recheckReloadMs * 2))
+      if (!same(startedFor)) return
+      let item = null
+      try { item = (await getH2ADryRunReview(session, companyId, reviewId))?.item ?? null } catch { continue }
+      if (!same(startedFor)) return
+      if (['ready_to_recheck', 'completed', 'waiting_on_albi'].includes(item?.resolution?.status)) {
+        await afterWrite(reviewId, startedFor, session, companyId)
+        setRecordErrors(current => without(current, reviewId))
+        setNotice('Saved. The server finished after the page stopped waiting.')
+        return
+      }
+      if (item?.resolution?.status === 'failed') break
+    }
+    if (same(startedFor)) setRecordErrors(current => ({ ...current, [reviewId]: 'This didn’t finish. Reload the record to see where it stands, then try again.' }))
+  }
+
   function handleSendError(reviewId, error, startedFor) {
     if (!same(startedFor)) return
+    if (error?.timedOut) { settleTimedOut(reviewId, startedFor); return }
     if (error?.status === 409) { setRecordErrors(current => ({ ...current, [reviewId]: CHANGED })); refreshRecord(reviewId, startedFor) }
     else setRecordErrors(current => ({ ...current, [reviewId]: error?.message || 'The action could not be sent. Try again.' }))
   }

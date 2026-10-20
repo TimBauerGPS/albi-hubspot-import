@@ -12,6 +12,9 @@ export function computeTriage({ row, ranking, createReadiness, resolutionStatus,
   const candidates = Array.isArray(ranking?.candidates) ? ranking.candidates : []
   // Open Albi work wins over a cleared safe recheck: the reviewer still owes that to-do.
   if (resolutionStatus === 'waiting_on_albi' && ['needs_review', 'cleared'].includes(row?.status)) return { bucket: 'todo', details: {} }
+  // A link or create that saved (Albi written, mapping stored) only needs a recheck to confirm: it is done, so it is
+  // never offered again as a create (a duplicate) or shown as blocked because it is now linked. Recheck all confirms it.
+  if (resolutionStatus === 'ready_to_recheck' && ['needs_review', 'cleared'].includes(row?.status)) return { bucket: 'done', details: { recheckPending: true } }
   if (row?.status === 'cleared' && resolutionStatus !== 'completed' &&
     ['safe_to_link', 'safe_to_create'].includes(row?.recheck_outcome)) {
     // A safe create that is known to be blocked (e.g. its organization must be linked first) is not a quick win.
