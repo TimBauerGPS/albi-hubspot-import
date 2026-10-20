@@ -8,7 +8,7 @@ export const RESOLUTION_FIELDS = Object.freeze({
 const LABELS = Object.freeze({ firstName: 'First name', lastName: 'Last name', email: 'Email', phoneNumber: 'Phone',
   mobileNumber: 'Mobile', jobTitle: 'Job title', address1: 'Address', address2: 'Address line 2', city: 'City',
   state: 'State / region', zipcode: 'Postal code', country: 'Country', name: 'Name', domain: 'Domain', organizationId: 'Organization ID' })
-const ACTION_FIELDS = Object.freeze({ resolve_fields: ['fieldChoices'], link_existing: ['candidateId', 'approveManyToOne', 'ignoreContactDifferences'],
+const ACTION_FIELDS = Object.freeze({ resolve_fields: ['fieldChoices'], link_existing: ['candidateId', 'approveManyToOne', 'ignoreContactDifferences', 'ignoredFields'],
   create_albi: ['referralSourceId'], force_create_albi: ['ignoredCandidateIds', 'referralSourceId'], choose_organization: ['organizationSourceId', 'addHubSpotAssociation'],
   skip_live: [] })
 const STATUS_LABELS = Object.freeze({ pending: 'Pending', applying: 'Applying', waiting_on_albi: 'Waiting on Albi',
@@ -53,6 +53,12 @@ function decision(input) {
   for (const field of ['candidateId', 'organizationSourceId']) if (ACTION_FIELDS[input.action].includes(field)) {
     if (!id(input[field])) fail()
     result[field] = input[field]
+  }
+  if (ACTION_FIELDS[input.action].includes('ignoredFields') && Object.hasOwn(input, 'ignoredFields')) {
+    const fields = input.ignoredFields, allowed = [...RESOLUTION_FIELDS.contacts, ...RESOLUTION_FIELDS.companies]
+    if (!Array.isArray(fields) || !fields.length || fields.length > 20 || new Set(fields).size !== fields.length ||
+      fields.some(field => !allowed.includes(field))) fail()
+    result.ignoredFields = [...fields].sort()
   }
   if (ACTION_FIELDS[input.action].includes('ignoreContactDifferences') && Object.hasOwn(input, 'ignoreContactDifferences')) {
     if (input.ignoreContactDifferences !== true) fail()

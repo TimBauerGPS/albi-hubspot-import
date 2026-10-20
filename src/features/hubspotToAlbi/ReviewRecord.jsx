@@ -32,7 +32,7 @@ function candidateView(ranked, snapshot) {
 export default function ReviewRecord({
   item, kind = 'sample', candidateIndex = 0, onPickCandidate, referralSourceId = '', onReferral, referralRef,
   pending = false, busy = false, readOnly = false,
-  onAccept, onLink, onCreate, onForceCreate, onCreateWithOrganization, onApplyFields, onChooseOrganization,
+  onAccept, onLink, onCreate, onForceCreate, onCreateWithOrganization, onApplyFields, onIgnoreAndLink, onChooseOrganization,
   onSkip, onRecheck, onOpenOrganization, onOpenMergedSurvivor,
 }) {
   const review = presentSampleReviewItem(item)
@@ -206,6 +206,8 @@ export default function ReviewRecord({
 
     {capability.canResolve && <ResolutionBar disabled={disabled} fieldMode={fieldMode} applyDisabled={!allChosen}
       onAllHubSpot={() => setAll('hubspot')} onAllAlbi={() => setAll('albi')}
+      showIgnoreAndLink={fieldMode && review.actions.includes('link_existing') && Boolean(candidates[0]?.id)}
+      onIgnoreAndLink={() => onIgnoreAndLink?.(candidates[0], review.resolutionFields.map(field => field.key).sort())}
       onApplyFields={() => onApplyFields?.(Object.fromEntries(review.resolutionFields.map(field => [field.key, fieldChoices[field.key]])))}
       suggestion={suggestion} onAccept={() => suggestion && requestAccept(suggestion.candidate, suggestion.emailMatch)}
       selectedLink={selectedLink} onLinkSelected={() => selectedLink && requestLink(selectedLink)}

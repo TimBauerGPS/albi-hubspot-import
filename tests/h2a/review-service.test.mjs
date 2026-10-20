@@ -554,3 +554,29 @@ test('a failed live close leaves the rechecked row open so the next recheck retr
   assert.equal(second.review.status, 'no_longer_in_scope')
   assert.equal(f.store.state.resumes.length, 2)
 })
+
+test('a link that ignored chosen differences clears later rechecks of contacts and organizations with only those differences', async () => {
+  const contact = async (decision, extra = {}) => {
+    const albi = { id: '20', firstName: 'A', lastName: 'Person', email: 'a@example.com', jobTitle: 'Tech' }
+    const f = fixture({ contacts: [albi], source: { id: '10', properties: { firstname: 'A', lastname: 'Person', email: 'a@example.com', jobtitle: 'Lead', ...extra } } })
+    f.deps.repository.getMappings = async () => ({ contacts: [{ portal_id: '123', hubspot_id: '10', albi_contact_id: '20' }], organizations: [], options: [] })
+    f.deps.repository.getCurrentReviewResolution = async () => ({ review_id: reviewId, action: 'link_existing', status: 'ready_to_recheck', decision })
+    await recheckDryRunReview(f.deps, input).catch(() => {})
+    return f.applied.at(-1)?.[1]?.outcome
+  }
+  const ignoreTitle = { action: 'link_existing', candidateId: '20', ignoredFields: ['jobTitle'] }
+  assert.equal(await contact(ignoreTitle), 'safe_to_link')
+  assert.equal(await contact(ignoreTitle, { city: 'Elsewhere' }), 'still_needs_review')
+  const organization = async decision => {
+    const albi = { id: '30', name: 'Acme', phoneNumber: '555-000-0000', organizationTypeIds: ['7'] }
+    const f = fixture({ objectType: 'companies', organizations: [albi], options: [{ mapping_kind: 'default_organization_type', source_key: 'default', albi_id: '7', confirmed: true }],
+      source: { id: '10', properties: { name: 'Acme', phone: '5551112222' } } })
+    f.deps.repository.getMappings = async () => ({ contacts: [], organizations: [{ portal_id: '123', hubspot_id: '10', albi_organization_id: '30' }],
+      options: [{ mapping_kind: 'default_organization_type', source_key: 'default', albi_id: '7', confirmed: true }] })
+    f.deps.repository.getCurrentReviewResolution = async () => ({ review_id: reviewId, action: 'link_existing', status: 'ready_to_recheck', decision })
+    await recheckDryRunReview(f.deps, input).catch(() => {})
+    return f.applied.at(-1)?.[1]?.outcome
+  }
+  assert.equal(await organization({ action: 'link_existing', candidateId: '30', ignoredFields: ['phoneNumber'] }), 'safe_to_link')
+  assert.equal(await organization(null), 'still_needs_review')
+})

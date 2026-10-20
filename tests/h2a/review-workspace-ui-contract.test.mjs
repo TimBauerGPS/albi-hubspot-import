@@ -763,3 +763,26 @@ test('with candidates listed, Create new contact in Albi is always shown, disabl
   const organization = await html({ ...base, objectType: 'companies', suggestedCandidateId: null })
   assert.match(organization, /Create new organization in Albi/)
 })
+
+test('field differences can be ignored to just link, for contacts and organizations', async () => {
+  const item = { ...base, reason: 'nonblank_field_difference', proposedChanges: { conflicts: { jobTitle: { proposed: 'Lead', current: 'Analyst' }, city: { proposed: 'A', current: 'B' } } },
+    candidateSnapshots: [{ id: '456', firstName: 'Janet', jobTitle: 'Analyst', city: 'B' }], suggestedCandidateId: null }
+  const calls = []
+  const ui = await mount(item, { onIgnoreAndLink: (target, fields) => calls.push([target.id, fields]) })
+  ui.find('button', 'Link and ignore differences').props.onClick()
+  assert.deepEqual(j(calls), [['456', ['city', 'jobTitle']]])
+  const organization = await html({ ...item, objectType: 'companies', proposedChanges: { conflicts: { phoneNumber: { proposed: '1', current: '2' } } },
+    candidateSnapshots: [{ id: '456', name: 'Acme', phoneNumber: '2' }] })
+  assert.match(organization, /Link and ignore differences/)
+})
+
+test('ignoring differences asks once, listing the fields, then links', async () => {
+  const ui = await mountWorkspace()
+  ui.record().props.onIgnoreAndLink(candidate, ['city', 'jobTitle']); await ui.flush()
+  assert.ok(ui.nodes().find(node => node.props?.role === 'dialog'))
+  assert.match(ui.text(), /City/); assert.match(ui.text(), /Job title/)
+  ui.find('button', 'Link and ignore').props.onClick(); await ui.flush()
+  const sent = ui.calls.filter(call => call.name === 'resolveH2ADryRunReview').at(-1).args[2]
+  assert.equal(sent.action, 'link_existing'); assert.deepEqual(j(sent.ignoredFields), ['city', 'jobTitle']); assert.equal(sent.candidateId, '456')
+  ui.unmount()
+})

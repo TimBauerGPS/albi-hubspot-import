@@ -126,3 +126,9 @@ export function shortcutFor(event, { kind, dialogOpen } = {}) {
   if (action === 'skip' && kind !== 'live') return null
   return action
 }
+
+// Plain labels for field names shown in confirmations.
+const FIELD_LABELS = Object.freeze({ firstName: 'First name', lastName: 'Last name', email: 'Email', phoneNumber: 'Phone',
+  mobileNumber: 'Mobile', jobTitle: 'Job title', address1: 'Address', address2: 'Address line 2', city: 'City',
+  state: 'State / region', zipcode: 'Postal code', country: 'Country', name: 'Name', domain: 'Domain' })
+export const fieldLabel = field => Object.hasOwn(FIELD_LABELS, field) ? FIELD_LABELS[field] : field

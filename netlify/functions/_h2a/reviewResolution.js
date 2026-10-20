@@ -7,7 +7,7 @@ import { normalizePhone } from './normalize.js'
 
 const ACTION_FIELDS = Object.freeze({
   resolve_fields: new Set(['fieldChoices']),
-  link_existing: new Set(['candidateId', 'approveManyToOne', 'ignoreContactDifferences']),
+  link_existing: new Set(['candidateId', 'approveManyToOne', 'ignoreContactDifferences', 'ignoredFields']),
   create_albi: new Set(['referralSourceId']),
   force_create_albi: new Set(['ignoredCandidateIds', 'referralSourceId']),
   choose_organization: new Set(['organizationSourceId', 'addHubSpotAssociation']),
@@ -66,6 +66,12 @@ export function normalizeResolutionDecision(input) {
       if (!isResolutionProviderId(input[field])) throw new TypeError('Invalid resolution provider identity')
       decision[field] = input[field]
     }
+  }
+  if (ACTION_FIELDS[input.action].has('ignoredFields') && Object.hasOwn(input, 'ignoredFields')) {
+    const fields = input.ignoredFields
+    if (!Array.isArray(fields) || !fields.length || fields.length > 20 || new Set(fields).size !== fields.length ||
+      fields.some(field => typeof field !== 'string' || !DECISION_FIELDS.has(field))) throw new TypeError('Invalid ignored fields')
+    decision.ignoredFields = [...fields].sort()
   }
   if (ACTION_FIELDS[input.action].has('ignoreContactDifferences') && Object.hasOwn(input, 'ignoreContactDifferences')) {
     if (input.ignoreContactDifferences !== true) throw new TypeError('Invalid email-match approval')
@@ -265,6 +271,8 @@ export function buildReviewResolutionPlan(input) {
     // Ignoring phone/address differences is only allowed for a contact whose email matches exactly.
     if (decision.ignoreContactDifferences === true && (type !== 'contacts' ||
       !sameH2AEmail(fieldValue(hubspot, ['email'], false), fieldValue(albi, FIELD_METADATA.contacts.email.albi, false)))) invalidPlan()
+    // Ignored differences must be fields this record type has.
+    if (decision.ignoredFields?.some(field => !Object.hasOwn(FIELD_METADATA[type], field))) invalidPlan()
     const mappings = mappingRows(input, portalId)
     if (mappings.some(row => mappingSource(row) === sourceId && mappingTarget(row, type) !== albi.id) ||
       list(input.mappings).some(row => !sameMappingSource(row, sourceId, portalId) && mappingTarget(row, type) === albi.id) && !decision.approveManyToOne) invalidPlan()

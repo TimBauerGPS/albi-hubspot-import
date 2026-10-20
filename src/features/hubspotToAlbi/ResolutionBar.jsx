@@ -8,7 +8,7 @@ export default function ResolutionBar({
   disabled = false, fieldMode = false, applyDisabled = false, onAllHubSpot, onAllAlbi, onApplyFields,
   suggestion = null, onAccept, selectedLink = null, onLinkSelected,
   create = null, referralSources = [], referralSourceId = '', onReferral, referralRef, onCreate,
-  showSkip = false, onSkip, showRecheck = false, onRecheck,
+  showSkip = false, onSkip, showRecheck = false, onRecheck, showIgnoreAndLink = false, onIgnoreAndLink,
 }) {
   const hasOther = Boolean(suggestion || selectedLink)
   return <footer className="sticky bottom-0 flex flex-wrap items-center gap-2 border-t border-gray-200 bg-gray-50 px-5 py-3" aria-label="Resolution actions">
@@ -16,6 +16,8 @@ export default function ResolutionBar({
       <button type="button" className={btn} disabled={disabled} onClick={onAllHubSpot}>All HubSpot</button>
       <button type="button" className={btn} disabled={disabled} onClick={onAllAlbi}>All Albi</button>
       <button type="button" className={primary} disabled={disabled || applyDisabled} onClick={onApplyFields}>Apply field choices</button>
+      {showIgnoreAndLink && <button type="button" className={btn} disabled={disabled} onClick={onIgnoreAndLink}
+        title="Link these records and leave the differing fields as they are">Link and ignore differences</button>}
     </>}
     {suggestion && <button type="button" data-shortcut="accept" className={primary} disabled={disabled} onClick={onAccept}>
       Accept suggestion{suggestion.emailMatch ? ' (emails match)' : ''}<Kbd>Enter</Kbd></button>}

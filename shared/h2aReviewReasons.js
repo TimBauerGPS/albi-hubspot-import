@@ -76,8 +76,9 @@ export function getH2AReviewReason(code) {
 // confirm the link while ignoring phone/address differences when the emails match.
 export function getH2AReviewActions(code, objectType) {
   const entry = getH2AReviewReason(code)
-  return objectType === 'contacts' && entry.category === 'field'
-    ? Object.freeze([...new Set([...entry.actions, 'choose_organization', 'link_existing'])]) : entry.actions
+  if (entry.category !== 'field') return entry.actions
+  // Field reviews can also confirm the link while ignoring chosen differences; contacts can fix their organization.
+  return Object.freeze([...new Set([...entry.actions, ...(objectType === 'contacts' ? ['choose_organization'] : []), 'link_existing'])])
 }
 
 // Differences an email-match link may ignore. Everything else (names, email, title) still needs review.

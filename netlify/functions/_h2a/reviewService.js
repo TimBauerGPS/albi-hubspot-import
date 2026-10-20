@@ -128,23 +128,29 @@ function exactSource(records, sourceId) {
   return records[0]
 }
 
-// A reviewer's email-match link ("ignore phone/address") clears field reviews whose only differences are
-// ignorable, as long as the mapping, the linked Albi record and the exact email match still hold.
-async function acceptedEmailMatch(deps, companyId, row, evaluation, source, candidates, contactMappings, deadline) {
-  if (evaluation.outcome !== 'needs_review' || evaluation.conflictType !== 'contact_fields') return evaluation
+// A reviewer's link that ignored differences ("emails match, ignore phone/address", or an explicit list of
+// fields) clears field reviews whose only differences are those, while the mapping and linked record still hold.
+async function acceptedLinkDifferences(deps, companyId, row, evaluation, source, candidates, mappingRows, deadline) {
+  if (evaluation.outcome !== 'needs_review' || !['contact_fields', 'organization_fields'].includes(evaluation.conflictType)) return evaluation
   const repository = deps.resolutionRepository ?? deps.repository
   if (typeof repository.getCurrentReviewResolution !== 'function') return evaluation
   const accepted = await bounded(deps, () => repository.getCurrentReviewResolution(companyId, row.id), deadline)
   const decision = isRecord(accepted?.decision) ? accepted.decision : {}
-  if (accepted?.action !== 'link_existing' || decision.action !== 'link_existing' || decision.ignoreContactDifferences !== true ||
-    ['failed', 'superseded'].includes(accepted.status)) return evaluation
-  const mapped = contactMappings.filter(item => item?.portal_id === row.portal_id && item?.hubspot_id === row.source_id)
-  if (mapped.length !== 1 || mapped[0].albi_contact_id !== decision.candidateId) return evaluation
+  if (accepted?.action !== 'link_existing' || decision.action !== 'link_existing' || ['failed', 'superseded'].includes(accepted.status)) return evaluation
+  const targetKey = row.object_type === 'contacts' ? 'albi_contact_id' : 'albi_organization_id'
+  const mapped = mappingRows.filter(item => item?.portal_id === row.portal_id && item?.hubspot_id === row.source_id)
+  if (mapped.length !== 1 || mapped[0][targetKey] !== decision.candidateId) return evaluation
   const target = candidates.find(item => item?.id === decision.candidateId)
-  if (!target || !sameH2AEmail(source?.properties?.email, target.email)) return evaluation
+  if (!target) return evaluation
+  let ignorable = null
+  if (Array.isArray(decision.ignoredFields)) ignorable = decision.ignoredFields
+  else if (decision.ignoreContactDifferences === true && row.object_type === 'contacts' && sameH2AEmail(source?.properties?.email, target.email)) {
+    ignorable = H2A_IGNORABLE_CONTACT_FIELDS
+  }
+  if (!ignorable) return evaluation
   const changes = isRecord(evaluation.proposedChanges) ? evaluation.proposedChanges : {}
   const differing = [...Object.keys(isRecord(changes.updates) ? changes.updates : {}), ...Object.keys(isRecord(changes.conflicts) ? changes.conflicts : {})]
-  if (!differing.every(field => H2A_IGNORABLE_CONTACT_FIELDS.includes(field))) return evaluation
+  if (!differing.every(field => ignorable.includes(field))) return evaluation
   return { ...evaluation, outcome: 'safe_to_link', targetId: decision.candidateId }
 }
 
@@ -213,8 +219,11 @@ async function evaluateReviewRow(deps, { companyId, reviewId, actorId, row, conf
       const candidates = await albiRecords(deps, albi, row.object_type === 'contacts' ? 'contacts' : 'organizations', deadline)
       const mappings = await bounded(deps, () => repository.getMappings(companyId), deadline)
       if (!mappings || !['contacts', 'organizations', 'options'].every(key => Array.isArray(mappings[key]))) malformed('review')
-      if (row.object_type === 'companies') evaluation = evaluateOrganizationReview({ source, candidates, portalId: row.portal_id,
-        mappings: mappings.organizations, optionMappings: mappings.options })
+      if (row.object_type === 'companies') {
+        evaluation = evaluateOrganizationReview({ source, candidates, portalId: row.portal_id,
+          mappings: mappings.organizations, optionMappings: mappings.options })
+        evaluation = await acceptedLinkDifferences(deps, companyId, row, evaluation, source, candidates, mappings.organizations, deadline)
+      }
       else {
         let organization = null
         const availableCompanies = []
@@ -237,7 +246,7 @@ async function evaluateReviewRow(deps, { companyId, reviewId, actorId, row, conf
         evaluation = evaluateContactReview({ source, candidates, associatedCompanyIds, organization, organizationChoice, availableCompanies,
           companyId, portalId: row.portal_id,
           mappings: mappings.contacts, optionMappings: mappings.options })
-        evaluation = await acceptedEmailMatch(deps, companyId, row, evaluation, source, candidates, mappings.contacts, deadline)
+        evaluation = await acceptedLinkDifferences(deps, companyId, row, evaluation, source, candidates, mappings.contacts, deadline)
         // Samples may have used activity company context when direct associations
         // were empty. That context is intentionally not retained; only a fresh
         // sample can prove it resolved. Refresh safe evidence without clearing it.

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { bulkLinkH2AReviews, createH2AOrganizationThenContact, getH2ADryRunReview, getH2AReviews, prepareH2AMergedSurvivorReview,
   prepareH2AOrganizationReview, recheckH2ADryRunReview, resolveH2ADryRunReview, skipH2ALiveReview, startH2ARecheckAll } from '../../lib/hubspotToAlbi'
-import { BUCKETS, createDeferredQueue, nextRecordId, shortcutFor } from './reviewWorkspace.js'
+import { BUCKETS, createDeferredQueue, fieldLabel, nextRecordId, shortcutFor } from './reviewWorkspace.js'
 import { presentSampleReviewItem, SAMPLE_REVIEW_REASON_OPTIONS } from './sampleReview.js'
 import { buildResolutionConfirmation } from './sampleReviewResolution.js'
 import { btn, Kbd, primary } from './ResolutionBar.jsx'
@@ -460,6 +460,15 @@ export default function ReviewWorkspace({
         lines: [`${plural(count, 'possible match', 'possible matches')} will be ignored. Albi records can’t be deleted from here, so this may create a duplicate.`,
           `Referral source: ${referralLabel(item, referralSourceId)}`],
         onConfirm: () => runNow(item, resolveRun(item, { action: 'force_create_albi', referralSourceId, ignoredCandidateIds })) })
+    },
+    // Link and keep both systems as they are: the listed differences are recorded as accepted, nothing is written.
+    onIgnoreAndLink: (candidate, fields) => {
+      const ignoredFields = [...new Set(list(fields))].sort()
+      if (!candidate?.id || !ignoredFields.length) return
+      openDialog({ title: 'Link and ignore these differences?', confirmLabel: 'Link and ignore',
+        lines: [`Links to Albi record ${candidate.id}. Nothing changes in HubSpot or Albi.`, `Ignored: ${ignoredFields.map(fieldLabel).join(', ')}`],
+        onConfirm: () => runNow(item, resolveRun(item, { action: 'link_existing', candidateId: candidate.id,
+          approveManyToOne: Number(candidate.linkedElsewhere ?? 0) > 0, ignoredFields })) })
     },
     onApplyFields: fieldChoices => {
       const decision = { action: 'resolve_fields', fieldChoices }

@@ -519,3 +519,15 @@ test('an email-match link may ignore phone/address differences only when the ema
   input.albi.email = 'same@example.com'; input.hubspot.properties.email = ''
   assert.throws(() => plan(input), TypeError)
 })
+
+test('a link may record the exact field differences the reviewer chose to ignore', () => {
+  assert.deepEqual(normalizeResolutionDecision({ action: 'link_existing', candidateId: '1', ignoredFields: ['phoneNumber', 'city'] }),
+    { action: 'link_existing', candidateId: '1', ignoredFields: ['city', 'phoneNumber'] })
+  for (const bad of [[], ['city', 'city'], ['secret'], 'city', Array.from({ length: 21 }, () => 'city')]) {
+    assert.throws(() => normalizeResolutionDecision({ action: 'link_existing', candidateId: '1', ignoredFields: bad }), TypeError)
+  }
+  const contact = fieldsInput(); contact.decision = { action: 'link_existing', candidateId: '2590478', ignoredFields: ['phoneNumber'] }
+  assert.equal(plan(contact).mapping.targetId, '2590478'); assert.deepEqual(plan(contact).manualTasks, [])
+  contact.decision.ignoredFields = ['domain']
+  assert.throws(() => plan(contact), TypeError)
+})

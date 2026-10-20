@@ -53,7 +53,7 @@ test('provider links accept only positive decimal IDs and fixed object types', (
 test('a contact field difference can also correct the organization context; nothing else gains actions', () => {
   for (const reason of ['albi_contact_update_contract_unverified', 'nonblank_field_difference', 'contact_fields_require_review']) {
     assert.deepEqual(getH2AReviewActions(reason, 'contacts'), ['resolve_fields', 'choose_organization', 'link_existing'])
-    assert.deepEqual(getH2AReviewActions(reason, 'companies'), ['resolve_fields'])
+    assert.deepEqual(getH2AReviewActions(reason, 'companies'), ['resolve_fields', 'link_existing'])
   }
   assert.deepEqual(getH2AReviewActions('no_match', 'contacts'), getH2AReviewReason('no_match').actions)
   assert.deepEqual(getH2AReviewActions('organization_unresolved', 'contacts'), ['choose_organization'])
