@@ -24,13 +24,13 @@ export default function FieldDiff({ rows = [], hasCandidate = false, candidateId
         <td className="break-words py-1.5 pr-2">{row.hubspot || <span className="text-gray-400">Blank</span>}</td>
         {hasCandidate && <td className="break-words py-1.5 pr-2">{row.albi || <span className="text-gray-400">Blank</span>}</td>}
         {choosing && <td className="py-1.5">{row.choosable && <span className="flex gap-1" role="group" aria-label={`Keep which ${row.label}`}>
-          {[['hubspot', 'Use HubSpot'], ['albi', 'Use Albi']].map(([value, text]) =>
+          {(row.fillOnly ? [['albi', 'Use Albi']] : [['hubspot', 'Use HubSpot'], ['albi', 'Use Albi']]).map(([value, text]) =>
             <button key={value} type="button" disabled={disabled} aria-pressed={choices[row.key] === value} onClick={() => onChoose?.(row.key, value)}
               className={`rounded border px-2 py-0.5 text-xs font-semibold ${choices[row.key] === value ? 'border-brand-500 bg-brand-50 text-brand-800' : 'border-gray-300 text-gray-700'}`}>{text}</button>)}
         </span>}</td>}
       </tr>)}</tbody></table>}
     {choosing && visible.some(row => row.choosable) && <p className="mt-2 text-xs text-gray-600">
-      Use HubSpot: You’ll update this in Albi. Use Albi: Updates HubSpot now.</p>}
+      Use HubSpot: You’ll update this in Albi. Use Albi: Updates HubSpot now.{visible.some(row => row.fillOnly) ? ' Blank HubSpot fields can be filled from Albi, or left as they are.' : ''}</p>}
     {matching.length > 0 && <button type="button" onClick={onToggleMatching} className={`${btn} mt-2 border-transparent bg-transparent px-0 py-0 text-xs text-brand-700 underline`}>
       {showMatching ? 'Hide' : 'Show'} {matching.length} matching field{matching.length === 1 ? '' : 's'}</button>}
     {showMatching && matching.length > 0 && <p className="mt-1 text-xs text-gray-600">{matching.map(row => `${row.label}: ${row.hubspot}`).join(' · ')}</p>}

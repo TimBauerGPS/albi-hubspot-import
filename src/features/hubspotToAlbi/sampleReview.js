@@ -84,6 +84,14 @@ export function presentSampleReviewItem(item) {
     return hubspot !== undefined && albi !== undefined && hubspot !== albi
       ? [{ key, label: SOURCE_FIELDS.find(([field]) => field === key)[1], hubspot, albi }] : []
   })
+  // Fields HubSpot leaves blank but the one Albi candidate has: these can be filled into HubSpot from Albi.
+  const flagged = new Set(resolutionFields.map(field => field.key))
+  const fillableFields = candidates.length === 1 ? RESOLUTION_FIELDS[objectType].flatMap(key => {
+    const albi = candidates[0].snapshot[key]
+    return !flagged.has(key) && !Object.hasOwn(conflicts, key) && !Object.hasOwn(updates, key) &&
+      (source[key] === undefined || source[key] === '') && typeof albi === 'string' && albi.trim() !== ''
+      ? [{ key, label: SOURCE_FIELDS.find(([field]) => field === key)[1], hubspot: '', albi, fill: true }] : []
+  }) : []
   const portalId = typeof input.portalId === 'string' && /^[1-9]\d{0,99}$/.test(input.portalId) ? input.portalId : null
   return {
     id: safeScalar(input.id), runId: safeScalar(input.runId), objectType,
@@ -94,7 +102,7 @@ export function presentSampleReviewItem(item) {
     displayName: displayName || source.name || 'Not provided', source,
     candidates, matchEvidence: Array.isArray(input.matchEvidence) ? [...new Set(input.matchEvidence.filter(value => EVIDENCE.has(value)))] : [],
     proposedChanges: safeChanges(input.proposedChanges),
-    resolutionFields, actions: input.status === 'needs_review' || input.status === undefined ? [...getH2AReviewActions(input.reason, objectType)]
+    resolutionFields, fillableFields, actions: input.status === 'needs_review' || input.status === undefined ? [...getH2AReviewActions(input.reason, objectType)]
       : input.status === 'cleared' && input.recheckOutcome === 'safe_to_create' && copy.actions.includes('create_albi') ? ['create_albi']
         // Recheck found one safe Albi match; let the reviewer save that link now instead of waiting for a sync.
         : input.status === 'cleared' && input.recheckOutcome === 'safe_to_link' && copy.actions.includes('link_existing') && candidates.length > 0 ? ['link_existing'] : [],

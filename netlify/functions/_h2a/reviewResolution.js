@@ -249,9 +249,16 @@ export function buildReviewResolutionPlan(input) {
     const albi = reviewedAlbi(input, review, type), properties = {}, fields = []
     const changes = record(review.proposedChanges)
     for (const [field, winner] of Object.entries(decision.fieldChoices)) {
-      if (!Object.hasOwn(FIELD_METADATA[type], field) ||
-        !Object.hasOwn(record(changes.conflicts), field) && !Object.hasOwn(record(changes.updates), field)) invalidPlan()
+      if (!Object.hasOwn(FIELD_METADATA[type], field)) invalidPlan()
       const meta = FIELD_METADATA[type][field]
+      // A field the review did not flag can only be filled from Albi where HubSpot is blank; that is a HubSpot write.
+      if (!Object.hasOwn(record(changes.conflicts), field) && !Object.hasOwn(record(changes.updates), field)) {
+        const blank = (fieldValue(hubspot, [meta.hubspot, field], false) ?? '').trim() === ''
+        const fill = fieldValue(albi, meta.albi, false) ?? ''
+        if (winner !== 'albi' || !blank || fill.trim() === '') invalidPlan()
+        properties[meta.hubspot] = fill
+        continue
+      }
       // Review snapshots trim values, so compare and hand off trimmed HubSpot values too.
       const hs = fieldValue(hubspot, [meta.hubspot, field]).trim()
       // When HubSpot wins, an Albi field that is simply not returned is blank for comparison; the write is a manual Albi task.

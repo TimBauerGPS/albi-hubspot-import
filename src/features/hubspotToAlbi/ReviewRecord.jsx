@@ -70,7 +70,8 @@ export default function ReviewRecord({
   const unsyncedOrganization = readiness?.blockedReason === 'organization_not_synced' && idPattern.test(readiness?.organization?.sourceId)
     ? { sourceId: readiness.organization.sourceId, reviewId: typeof readiness.organization.reviewId === 'string' && readiness.organization.reviewId ? readiness.organization.reviewId : null } : null
 
-  const fieldMode = canAct && !merged && review.actions.includes('resolve_fields') && review.resolutionFields.length > 0 && candidates.length === 1
+  const fillable = Array.isArray(review.fillableFields) ? review.fillableFields : []
+  const fieldMode = canAct && !merged && review.actions.includes('resolve_fields') && (review.resolutionFields.length > 0 || fillable.length > 0) && candidates.length === 1
   const identityActions = canAct && !merged && !fieldMode
   const canCreateNew = identityActions && (orgFirst ? review.actions.includes('create_albi') && referralSources.length > 0
     : candidates.length === 0 ? review.actions.includes('create_albi') && readiness?.ready === true && referralSources.length > 0
@@ -100,9 +101,17 @@ export default function ReviewRecord({
     rows = rows.map(row => keys.has(row.key) ? { ...row, kind: 'differs', choosable: true } : row)
     for (const field of review.resolutionFields) if (!rows.some(row => row.key === field.key))
       rows.push({ key: field.key, label: field.label, hubspot: field.hubspot ?? '', albi: field.albi ?? '', kind: 'differs', choosable: true })
+    // HubSpot-blank fields Albi has can only be filled from Albi; they are optional.
+    const fills = new Set(fillable.map(field => field.key))
+    rows = rows.map(row => fills.has(row.key) ? { ...row, choosable: true, fillOnly: true } : row)
+    for (const field of fillable) if (!rows.some(row => row.key === field.key))
+      rows.push({ key: field.key, label: field.label, hubspot: '', albi: field.albi, kind: 'one_side', choosable: true, fillOnly: true })
   }
-  const allChosen = fieldMode && review.resolutionFields.every(field => fieldChoices[field.key] === 'hubspot' || fieldChoices[field.key] === 'albi')
-  const setAll = value => setFieldChoices(Object.fromEntries(review.resolutionFields.map(field => [field.key, value])))
+  const filledChoices = fillable.filter(field => fieldChoices[field.key] === 'albi').map(field => field.key)
+  const allChosen = fieldMode && review.resolutionFields.every(field => fieldChoices[field.key] === 'hubspot' || fieldChoices[field.key] === 'albi') &&
+    (review.resolutionFields.length > 0 || filledChoices.length > 0)
+  const setAll = value => setFieldChoices(Object.fromEntries([...review.resolutionFields.map(field => [field.key, value]),
+    ...(value === 'albi' ? fillable.map(field => [field.key, 'albi']) : [])]))
 
   const emailMatchOf = candidate => candidate.matchReasons.includes('same_email') && !candidate.warnings.includes('different_email')
   function requestLink(candidate) {
@@ -176,7 +185,11 @@ export default function ReviewRecord({
       <CandidateList candidates={candidates} selectedIndex={candidateIndex} suggestedId={suggested?.id ?? null} onPick={onPickCandidate} objectLabel={objectLabel} />
       <FieldDiff rows={rows} hasCandidate={Boolean(selected)} candidateId={selected?.id ?? ''} showMatching={showMatching}
         onToggleMatching={() => setShowMatching(value => !value)} choices={fieldMode ? fieldChoices : null}
-        onChoose={(key, value) => setFieldChoices(current => ({ ...current, [key]: value }))} disabled={disabled} />
+        onChoose={(key, value) => setFieldChoices(current => {
+          // A fill-from-Albi choice toggles off when chosen again; every other field keeps its choice.
+          if (current[key] === value && fillable.some(field => field.key === key)) { const next = { ...current }; delete next[key]; return next }
+          return { ...current, [key]: value }
+        })} disabled={disabled} />
 
       {showOrganizationChoice && <section className="rounded-lg border border-gray-200 p-4" aria-label="Organization context">
         <h3 className="text-sm font-semibold text-gray-900">Organization context</h3>
@@ -208,7 +221,8 @@ export default function ReviewRecord({
       onAllHubSpot={() => setAll('hubspot')} onAllAlbi={() => setAll('albi')}
       showIgnoreAndLink={fieldMode && review.actions.includes('link_existing') && Boolean(candidates[0]?.id)}
       onIgnoreAndLink={() => onIgnoreAndLink?.(candidates[0], review.resolutionFields.map(field => field.key).sort())}
-      onApplyFields={() => onApplyFields?.(Object.fromEntries(review.resolutionFields.map(field => [field.key, fieldChoices[field.key]])))}
+      onApplyFields={() => onApplyFields?.(Object.fromEntries([...review.resolutionFields.map(field => [field.key, fieldChoices[field.key]]),
+        ...filledChoices.map(key => [key, 'albi'])]))}
       suggestion={suggestion} onAccept={() => suggestion && requestAccept(suggestion.candidate, suggestion.emailMatch)}
       selectedLink={selectedLink} onLinkSelected={() => selectedLink && requestLink(selectedLink)}
       create={create} referralSources={referralSources} referralSourceId={referralSourceId} onReferral={onReferral} referralRef={referralRef} onCreate={onCreateClick}

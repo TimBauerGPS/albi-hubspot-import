@@ -786,3 +786,16 @@ test('ignoring differences asks once, listing the fields, then links', async () 
   assert.equal(sent.action, 'link_existing'); assert.deepEqual(j(sent.ignoredFields), ['city', 'jobTitle']); assert.equal(sent.candidateId, '456')
   ui.unmount()
 })
+
+test('a field HubSpot leaves blank offers only Use Albi and can be applied on its own', async () => {
+  const item = { ...base, reason: 'nonblank_field_difference', sourceSnapshot: { id: '123', firstName: 'Jane', lastName: 'Doe' },
+    proposedChanges: {}, candidateSnapshots: [{ id: '456', firstName: 'Jane', lastName: 'Doe', jobTitle: 'Analyst' }], suggestedCandidateId: null }
+  const calls = []
+  const ui = await mount(item, { onApplyFields: value => calls.push(value) })
+  const group = ui.nodes().find(node => node.props?.['aria-label'] === 'Keep which Job title')
+  assert.ok(group)
+  assert.doesNotMatch(JSON.stringify(group.children), /Use HubSpot/)
+  ui.find('button', 'Use Albi').props.onClick(); ui.run()
+  ui.find('button', 'Apply field choices').props.onClick()
+  assert.deepEqual(j(calls), [{ jobTitle: 'albi' }])
+})

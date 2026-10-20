@@ -142,6 +142,13 @@ export function buildResolutionConfirmation({ review, decision: input } = {}) {
     if (candidates.length !== 1 || !id(candidates[0].id)) fail()
     for (const [key, winner] of Object.entries(selected.fieldChoices)) {
       if (!RESOLUTION_FIELDS[review.objectType].includes(key)) fail()
+      const fill = (Array.isArray(review.fillableFields) ? review.fillableFields : []).filter(field => field.key === key)
+      if (fill.length === 1) {
+        // Filling a blank HubSpot field from Albi is only ever a HubSpot write.
+        if (winner !== 'albi') fail()
+        result.hubspotWrites.push({ field: LABELS[key], value: resolutionDisplayValue(fill[0].albi) })
+        continue
+      }
       const changes = (Array.isArray(review.resolutionFields) ? review.resolutionFields : []).filter(field => field.key === key)
       if (changes.length !== 1) fail()
       const field = changes[0], value = resolutionDisplayValue(field[winner])

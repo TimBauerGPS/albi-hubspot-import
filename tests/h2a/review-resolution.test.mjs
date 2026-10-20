@@ -531,3 +531,19 @@ test('a link may record the exact field differences the reviewer chose to ignore
   contact.decision.ignoredFields = ['domain']
   assert.throws(() => plan(contact), TypeError)
 })
+
+test('Albi can fill a field HubSpot leaves blank, written to HubSpot; never for a HubSpot value or a manual task', () => {
+  const input = fieldsInput()
+  input.albi = { ...input.albi, jobTitle: 'Property Manager', city: 'Ontario' }
+  input.decision = { action: 'resolve_fields', fieldChoices: { jobTitle: 'albi' } }
+  const result = plan(input)
+  assert.deepEqual(result.providerOperation, { provider: 'hubspot', operation: 'updateContact', id: '42', properties: { jobtitle: 'Property Manager' } })
+  input.hubspot.properties.jobtitle = 'Engineer'
+  assert.throws(() => plan(input), TypeError)
+  input.hubspot.properties.jobtitle = ''
+  input.decision.fieldChoices = { jobTitle: 'hubspot' }
+  assert.throws(() => plan(input), TypeError)
+  delete input.albi.jobTitle
+  input.decision.fieldChoices = { jobTitle: 'albi' }
+  assert.throws(() => plan(input), TypeError)
+})

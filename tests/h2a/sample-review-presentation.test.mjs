@@ -253,3 +253,16 @@ test('a cleared safe-to-link review offers only linking', () => {
   assert.deepEqual(linkable.actions, ['link_existing'])
   assert.deepEqual(presentSampleReviewItem({ reason: 'no_match', objectType: 'contacts', status: 'cleared', recheckOutcome: 'safe_to_link', candidateSnapshots: [] }).actions, [])
 })
+
+test('fields HubSpot leaves blank but Albi has are offered to fill from Albi', () => {
+  const review = presentSampleReviewItem({ reason: 'nonblank_field_difference', objectType: 'contacts', sourceId: '34', status: 'needs_review',
+    sourceSnapshot: { email: 'hs@example.com' }, candidateSnapshots: [{ id: '2590478', email: 'albi@example.com', jobTitle: 'Manager', city: 'Ontario' }],
+    proposedChanges: { conflicts: { email: { proposed: 'hs@example.com', current: 'albi@example.com' } } } })
+  assert.deepEqual(review.fillableFields.map(field => [field.key, field.albi]), [['jobTitle', 'Manager'], ['city', 'Ontario']])
+  assert.deepEqual(buildResolutionConfirmation({ review, decision: { action: 'resolve_fields', fieldChoices: { city: 'albi' } } }).hubspotWrites,
+    [{ field: 'City', value: 'Ontario' }])
+  assert.throws(() => buildResolutionConfirmation({ review, decision: { action: 'resolve_fields', fieldChoices: { city: 'hubspot' } } }), TypeError)
+  const organization = presentSampleReviewItem({ reason: 'nonblank_field_difference', objectType: 'companies', sourceId: '34', status: 'needs_review',
+    sourceSnapshot: { name: 'Acme' }, candidateSnapshots: [{ id: '9', name: 'Acme', phoneNumber: '555-111-2222' }], proposedChanges: {} })
+  assert.deepEqual(organization.fillableFields.map(field => field.key), ['phoneNumber'])
+})
