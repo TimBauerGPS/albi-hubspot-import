@@ -21,7 +21,11 @@ export default function ResolutionBar({
       Accept suggestion{suggestion.emailMatch ? ' (emails match)' : ''}<Kbd>Enter</Kbd></button>}
     {selectedLink && <button type="button" data-shortcut="link" className={suggestion ? btn : primary} disabled={disabled} onClick={onLinkSelected}>
       Link selected{selectedLink.name ? `: ${selectedLink.name}` : ''}<Kbd>l</Kbd></button>}
-    {create && <span className="flex flex-wrap items-center gap-2">
+    {create?.unavailable && <span className="flex flex-wrap items-center gap-2">
+      <button type="button" data-shortcut="create" className={btn} disabled title={create.unavailable}>{create.label}<Kbd>n</Kbd></button>
+      <span className="text-xs text-gray-600">{create.unavailable}</span>
+    </span>}
+    {create && !create.unavailable && <span className="flex flex-wrap items-center gap-2">
       <select ref={referralRef} value={referralSourceId} disabled={disabled} aria-label="Referral source"
         onChange={event => { onReferral?.(event.target.value); event.target.blur?.() }}
         className={`rounded-lg border bg-white px-2 py-1.5 text-sm ${referralSourceId ? 'border-gray-300' : 'border-amber-400'}`}>

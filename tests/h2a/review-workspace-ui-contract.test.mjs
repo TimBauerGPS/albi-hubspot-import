@@ -189,11 +189,11 @@ test('the referral select blurs after a change and create sends the chosen sourc
   assert.deepEqual(j(calls), [{ referralSourceId: '9' }])
 })
 
-test('add new in Albi instead is the force-create path and passes every ignored candidate', async () => {
+test('create new in Albi is the force-create path and passes every ignored candidate', async () => {
   const calls = []
   const ui = await mount({ ...base, suggestedCandidateId: null }, { referralSourceId: '5', onForceCreate: value => calls.push(value) })
   assert.equal(ui.find('button', 'Create in Albi'), undefined)
-  ui.find('button', 'Add new in Albi instead').props.onClick()
+  ui.find('button', 'Create new contact in Albi').props.onClick()
   assert.deepEqual(j(calls), [{ referralSourceId: '5', ignoredCandidateIds: ['456'] }])
 })
 
@@ -279,7 +279,7 @@ test('not-ready create without a blocked reason explains itself; force create wa
 
 test('force create is not offered when a listed candidate id is invalid', async () => {
   const item = { ...base, suggestedCandidateId: null, rankedCandidates: [...base.rankedCandidates, { id: 'bad', matchReasons: [], warnings: [], strength: 'Weak', linkedElsewhere: 0 }] }
-  assert.doesNotMatch(await html(item), /Add new in Albi instead/)
+  assert.doesNotMatch(await html(item), /Create new contact in Albi/)
 })
 
 test('org-first create is enabled once a source from orgFirstCreate is chosen', async () => {
@@ -749,4 +749,17 @@ test('retrying a failed send of the same decision reuses its clientRequestId', a
   assert.equal(sent[1].clientRequestId, sent[0].clientRequestId, 'same decision and version: same id')
   assert.notEqual(sent[2].clientRequestId, sent[0].clientRequestId, 'a changed decision gets a new id')
   ui.unmount()
+})
+
+test('with candidates listed, Create new contact in Albi is always shown, disabled with the reason when not ready', async () => {
+  const blocked = await mount({ ...base, suggestedCandidateId: null, forceCreateReadiness: { eligible: true, ready: false, blockedReason: 'evidence_unavailable' } }, { referralSourceId: '5' })
+  const button = blocked.find('button', 'Create new contact in Albi')
+  assert.ok(button)
+  assert.equal(button.props.disabled, true)
+  assert.match(blocked.text(), /didn.t finish in time/)
+  const unknown = await mount({ ...base, suggestedCandidateId: null, forceCreateReadiness: { eligible: false, ready: false } }, { referralSourceId: '5' })
+  assert.equal(unknown.find('button', 'Create new contact in Albi').props.disabled, true)
+  assert.match(unknown.text(), /Reload or Recheck this record/)
+  const organization = await html({ ...base, objectType: 'companies', suggestedCandidateId: null })
+  assert.match(organization, /Create new organization in Albi/)
 })

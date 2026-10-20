@@ -75,8 +75,12 @@ export default function ReviewRecord({
   const canCreateNew = identityActions && (orgFirst ? review.actions.includes('create_albi') && referralSources.length > 0
     : candidates.length === 0 ? review.actions.includes('create_albi') && readiness?.ready === true && referralSources.length > 0
       : review.actions.includes('force_create_albi') && allIdsValid && readiness?.ready === true && referralSources.length > 0)
+  const newLabel = `Create new ${objectLabel} in Albi`
+  // With candidates listed, creating a new record is always on offer: disabled with its reason when not ready yet.
+  const forceUnavailable = !canCreateNew && identityActions && candidates.length > 0 && review.actions.includes('force_create_albi') && allIdsValid
   const create = canCreateNew ? { kind: orgFirst ? 'org' : candidates.length ? 'force' : 'create',
-    label: orgFirst ? 'Create organization and contact' : candidates.length ? 'Add new in Albi instead' : 'Create in Albi' } : null
+    label: orgFirst ? 'Create organization and contact' : candidates.length ? newLabel : 'Create in Albi' }
+    : forceUnavailable ? { kind: 'force', label: newLabel, unavailable: blockedCopy ?? 'A new record can’t be created right now. Reload or Recheck this record to check again.' } : null
   const canLink = identityActions && review.actions.includes('link_existing')
   const suggestion = canLink && suggested ? { candidate: suggested, emailMatch: suggested.matchReasons.includes('same_email') && !suggested.warnings.includes('different_email') } : null
   const selectedLink = canLink && selected && (!suggested || selected.id !== suggested.id) ? selected : null
@@ -111,7 +115,7 @@ export default function ReviewRecord({
     else onAccept?.(candidate, { emailMatch })
   }
   function onCreateClick() {
-    if (!referralSourceId) return
+    if (!referralSourceId || create?.unavailable) return
     if (create?.kind === 'org') onCreateWithOrganization?.({ referralSourceId })
     else if (create?.kind === 'force') onForceCreate?.({ referralSourceId, ignoredCandidateIds: candidates.map(candidate => candidate.id) })
     else onCreate?.({ referralSourceId })
