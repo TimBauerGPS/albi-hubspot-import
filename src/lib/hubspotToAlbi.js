@@ -296,7 +296,7 @@ const pick = (input, keys) => Object.fromEntries(keys.filter(key => input?.[key]
 // Links up to 25 exact-match rows, each with its own version and request ID; the server reports each row.
 // "Create selected": the latest create batch of a kind plus Albi's referral sources to choose from.
 export function getH2ACreateBatch(session, companyId, kind = 'sample', { signal } = {}) {
-  return request(session, `h2a-review-create-batch?kind=${encodeURIComponent(kind === 'live' ? 'live' : 'sample')}`, { companyId, signal })
+  return request(session, 'h2a-review-create-batch', { companyId, query: { kind: kind === 'live' ? 'live' : 'sample' }, signal })
 }
 
 // Starts a background batch creating the selected reviewed records in Albi with one referral source.

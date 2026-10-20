@@ -81,6 +81,13 @@ export function getH2AReviewActions(code, objectType) {
   return Object.freeze([...new Set([...entry.actions, ...(objectType === 'contacts' ? ['choose_organization'] : []), 'link_existing'])])
 }
 
+// Actions for a stored review row: its reason's actions plus what a recheck cleared it for.
+export function getH2AReviewRowActions(row) {
+  const base = getH2AReviewActions(row?.reason, row?.object_type)
+  const cleared = row?.status === 'cleared' ? { safe_to_create: 'create_albi', safe_to_link: 'link_existing' }[row?.recheck_outcome] : undefined
+  return cleared && !base.includes(cleared) ? Object.freeze([...base, cleared]) : base
+}
+
 // Differences an email-match link may ignore. Everything else (names, email, title) still needs review.
 export const H2A_IGNORABLE_CONTACT_FIELDS = Object.freeze(['phoneNumber', 'mobileNumber', 'address1', 'address2', 'city', 'state', 'zipcode', 'country'])
 export const sameH2AEmail = (left, right) => typeof left === 'string' && typeof right === 'string' && left.trim() !== '' &&

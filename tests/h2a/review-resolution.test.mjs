@@ -547,3 +547,11 @@ test('Albi can fill a field HubSpot leaves blank, written to HubSpot; never for 
   input.decision.fieldChoices = { jobTitle: 'albi' }
   assert.throws(() => plan(input), TypeError)
 })
+
+test('the planner accepts the action a recheck cleared the review for, even under another captured reason', () => {
+  const input = createInput('contacts')
+  input.review.reason = 'organization_unresolved'
+  assert.throws(() => plan(input), TypeError)
+  input.review.status = 'cleared'; input.review.recheckOutcome = 'safe_to_create'
+  assert.equal(plan(input).providerOperation.operation, 'createContact')
+})

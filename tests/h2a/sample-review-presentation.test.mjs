@@ -266,3 +266,17 @@ test('fields HubSpot leaves blank but Albi has are offered to fill from Albi', (
     sourceSnapshot: { name: 'Acme' }, candidateSnapshots: [{ id: '9', name: 'Acme', phoneNumber: '555-111-2222' }], proposedChanges: {} })
   assert.deepEqual(organization.fillableFields.map(field => field.key), ['phoneNumber'])
 })
+
+test('a review cleared as safe to link can be linked whatever reason it was captured with', () => {
+  for (const objectType of ['companies', 'contacts']) {
+    const review = presentSampleReviewItem({ reason: 'nonblank_field_difference', objectType, status: 'cleared', recheckOutcome: 'safe_to_link',
+      candidateSnapshots: [{ id: '575110', name: 'Mercury Insurance' }] })
+    assert.deepEqual(review.actions, ['link_existing'], objectType)
+  }
+})
+
+test('a review rechecked as safe to create can be created whatever reason it was captured with', () => {
+  const review = presentSampleReviewItem({ reason: 'organization_unresolved', objectType: 'contacts', sourceId: '34', status: 'cleared', recheckOutcome: 'safe_to_create', candidateSnapshots: [] })
+  assert.deepEqual(review.actions, ['create_albi'])
+  assert.deepEqual(buildResolutionConfirmation({ review, decision: { action: 'create_albi', referralSourceId: '5' } }).mapping.createAlbi, true)
+})

@@ -12,7 +12,7 @@ import { projectResolutionCapability } from './_h2a/resolutionCapability.js'
 import { TRIAGE_BUCKETS, createTriageCapabilities, refreshReviewTriage } from './_h2a/triage.js'
 import { prepareOrganizationReview } from './_h2a/organizationReview.js'
 import { loadOrgFirstCreate, loadReviewResolutionOptions } from './_h2a/reviewResolutionOptions.js'
-import { getH2AReviewActions } from '../../shared/h2aReviewReasons.js'
+import { getH2AReviewActions, getH2AReviewRowActions } from '../../shared/h2aReviewReasons.js'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/
@@ -91,7 +91,7 @@ async function detail(repository, companyId, runId, row, auth, options, config) 
   const events = await repository.listDryRunReviewEvents(companyId, runId, row.id)
   const projected = await currentResolutionProjection(repository, companyId, row.id, row.portal_id)
   const resolutionCapability = projectResolutionCapability(auth, (options.env ?? process.env).H2A_REVIEW_RESOLUTION_MODE, projected.hubspotWrites)
-  const actions = getH2AReviewActions(row.reason, row.object_type)
+  const actions = getH2AReviewRowActions(row)
   let resolutionOptions = { organizationOptions: [], createReadiness: { ready: false }, forceCreateReadiness: { eligible: false, ready: false } }, timedOut = false
   if (resolutionCapability.canResolve && (row.status === 'needs_review' || row.status === 'cleared' && row.recheck_outcome === 'safe_to_create') &&
     (actions.includes('choose_organization') || actions.includes('create_albi') &&

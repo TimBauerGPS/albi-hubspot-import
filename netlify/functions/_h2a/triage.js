@@ -14,6 +14,10 @@ export function computeTriage({ row, ranking, createReadiness, resolutionStatus,
   if (resolutionStatus === 'waiting_on_albi' && ['needs_review', 'cleared'].includes(row?.status)) return { bucket: 'todo', details: {} }
   if (row?.status === 'cleared' && resolutionStatus !== 'completed' &&
     ['safe_to_link', 'safe_to_create'].includes(row?.recheck_outcome)) {
+    // A safe create that is known to be blocked (e.g. its organization must be linked first) is not a quick win.
+    if (row.recheck_outcome === 'safe_to_create' && createReadiness && createReadiness.ready !== true) {
+      return { bucket: 'decision', details: createReadiness.blockedReason ? { blockedReason: createReadiness.blockedReason } : {} }
+    }
     return { bucket: 'quick', details: { quickKind: row.recheck_outcome === 'safe_to_link' ? 'link' : 'create' } }
   }
   // A live row whose resolution completed but whose close did not land is still open. It stays in

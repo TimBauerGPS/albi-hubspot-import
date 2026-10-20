@@ -206,7 +206,7 @@ async function evidence(deps, clients, row, decision, deadline) {
 
 function planEvidence(row, decision, current, hubspot, albi) {
   return { review: { objectType: row.object_type, sourceId: row.source_id, portalId: row.portal_id,
-    reason: row.reason, candidateSnapshots: row.candidate_snapshots, proposedChanges: row.proposed_changes },
+    reason: row.reason, status: row.status, recheckOutcome: row.recheck_outcome ?? null, candidateSnapshots: row.candidate_snapshots, proposedChanges: row.proposed_changes },
   hubspot, ...(albi ? { albi } : {}), decision,
   mappings: row.object_type === 'contacts' ? current.mappings.contacts : current.mappings.organizations,
   optionMappings: current.mappings.options, associatedCompanyIds: current.associatedCompanyIds,

@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from 'node:util'
-import { getH2AReviewActions } from '../../../shared/h2aReviewReasons.js'
+import { getH2AReviewActions, getH2AReviewRowActions } from '../../../shared/h2aReviewReasons.js'
 import { buildAlbiRecordUrl } from '../../../shared/h2aProviderLinks.js'
 import { resolveContactType } from './options.js'
 import { decideContactMatch, decideOrganizationMatch } from './match.js'
@@ -46,7 +46,7 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
   const unavailable = { organizationOptions: [], createReadiness: { ready: false }, forceCreateReadiness: { eligible: false, ready: false } }
   if (!record(row) || !providerId(row.source_id) || !providerId(row.portal_id) ||
     !['contacts', 'companies'].includes(row.object_type) || !reads?.hubspotRead || !reads?.albiRead) return unavailable
-  const actions = getH2AReviewActions(row.reason, row.object_type)
+  const actions = getH2AReviewRowActions(row)
   if (!actions.includes('choose_organization') && !actions.includes('create_albi') && !actions.includes('force_create_albi')) return unavailable
   // Every reason creation is off is named, so the record never shows an unexplained "unavailable".
   const hasCandidates = Array.isArray(row.candidate_snapshots) && row.candidate_snapshots.length > 0
@@ -67,7 +67,9 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
     const associated = row.object_type === 'contacts' ? associationIds(associationRows, row.source_id) : []
     if (associated === null) return named('evidence_unavailable')
 
-    if (actions.includes('choose_organization') && row.object_type === 'contacts') {
+    // A contact a recheck cleared as safe to create is offered creation (with its organization gate), not the choice.
+    const clearedToCreate = row.status === 'cleared' && row.recheck_outcome === 'safe_to_create'
+    if (actions.includes('choose_organization') && row.object_type === 'contacts' && !clearedToCreate) {
       // A single associated organization with no tenant mapping must be synced first. Decide that from cheap
       // evidence so the slow full Albi enumeration (which exceeds the detail deadline) is not needed to show it.
       if (associated.length === 1 && !mappings.organizations.some(item => item?.portal_id === row.portal_id && mappedSource(item) === associated[0])) {

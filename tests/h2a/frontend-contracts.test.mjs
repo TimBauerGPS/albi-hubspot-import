@@ -438,3 +438,18 @@ test('review workspace server copy is allowlisted for display', async () => {
     await assert.rejects(() => prepareH2ALiveReviews(session, 'company-1'), error => error.message === 'Unable to prepare open conflicts for review.')
   } finally { globalThis.fetch = originalFetch }
 })
+
+test('create batch requests use one well-formed query and send only the selection', async () => {
+  const lib = await import('../../src/lib/hubspotToAlbi.js')
+  const session = { access_token: 'token' }
+  const reviewId = '00000000-0000-4000-8000-000000000001'
+  const calls = await captureRequests(async () => {
+    await lib.getH2ACreateBatch(session, 'company-1', 'live')
+    await lib.getH2ACreateBatch(session, 'company-1')
+    await lib.startH2ACreateBatch(session, 'company-1', { kind: 'sample', referralSourceId: '5', items: [{ reviewId, expectedUpdatedAt: '2026-10-12T12:00:00.000Z', extra: 'drop' }] })
+  })
+  assert.deepEqual(calls.map(call => call.url), ['/.netlify/functions/h2a-review-create-batch?companyId=company-1&kind=live',
+    '/.netlify/functions/h2a-review-create-batch?companyId=company-1&kind=sample', '/.netlify/functions/h2a-review-create-batch'])
+  assert.deepEqual(JSON.parse(calls[2].options.body), { kind: 'sample', referralSourceId: '5',
+    items: [{ reviewId, expectedUpdatedAt: '2026-10-12T12:00:00.000Z' }], companyId: 'company-1' })
+})

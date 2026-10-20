@@ -137,3 +137,11 @@ test('a stored survivor id is carried with the merge block and an unknown surviv
   assert.equal(writes.length, 1, 'a legacy merge block without a survivor id is unchanged')
   assert.deepEqual(computeTriage({ row: row(), ranking: one, mergedInto: { sourceId: 'not-an-id' } }).details, { merged: true })
 })
+
+test('a contact cleared as safe to create but blocked (e.g. its organization is not linked) needs a decision, not a quick win', () => {
+  const row = { status: 'cleared', recheck_outcome: 'safe_to_create', reason: 'no_match' }
+  assert.deepEqual(computeTriage({ row, ranking: { candidates: [] }, createReadiness: { ready: false, blockedReason: 'organization_not_synced' } }),
+    { bucket: 'decision', details: { blockedReason: 'organization_not_synced' } })
+  assert.deepEqual(computeTriage({ row, ranking: { candidates: [] }, createReadiness: { ready: true } }), { bucket: 'quick', details: { quickKind: 'create' } })
+  assert.deepEqual(computeTriage({ row, ranking: { candidates: [] } }), { bucket: 'quick', details: { quickKind: 'create' } })
+})

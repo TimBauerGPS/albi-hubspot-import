@@ -235,7 +235,9 @@ export function buildReviewResolutionPlan(input) {
     'optionMappings', 'associatedCompanyIds', 'organizations', 'portalId', 'createDefaults'].includes(key))) invalidPlan()
   const decision = normalizeResolutionDecision(input.decision)
   const review = record(input.review), type = review.objectType
-  if (!['contacts', 'companies'].includes(type) || !getH2AReviewActions(review.reason, type).includes(decision.action)) invalidPlan()
+  // A recheck's verdict is authoritative: a review cleared as safe to create/link allows that action under any captured reason.
+  const clearedFor = review.status === 'cleared' ? { safe_to_create: 'create_albi', safe_to_link: 'link_existing' }[review.recheckOutcome] : undefined
+  if (!['contacts', 'companies'].includes(type) || !getH2AReviewActions(review.reason, type).includes(decision.action) && clearedFor !== decision.action) invalidPlan()
   const sourceId = positiveId(review.sourceId)
   const portalId = input.portalId ?? review.portalId ?? null
   if (portalId !== null) positiveId(portalId)

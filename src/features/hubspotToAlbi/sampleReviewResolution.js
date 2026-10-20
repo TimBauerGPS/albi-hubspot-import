@@ -135,7 +135,9 @@ export function presentReviewResolution(item) {
 export function buildResolutionConfirmation({ review, decision: input } = {}) {
   if (!object(review) || !ownMember(RESOLUTION_FIELDS, review.objectType)) fail()
   const selected = decision(input)
-  if (!getH2AReviewActions(review.reason, review.objectType).includes(selected.action)) fail()
+  // The presented actions already include what a recheck cleared the review for.
+  const allowed = Array.isArray(review.actions) ? review.actions : getH2AReviewActions(review.reason, review.objectType)
+  if (!allowed.includes(selected.action)) fail()
   const result = { hubspotWrites: [], albiTasks: [], mapping: null, association: null }
   if (selected.action === 'resolve_fields') {
     const candidates = Array.isArray(review.candidates) ? review.candidates : []

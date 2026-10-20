@@ -292,3 +292,14 @@ test('orgFirstCreate is eligible only for a blocked contact whose organization i
   assert.deepEqual(await loadOrgFirstCreate({ row: contact, readiness: { ...readiness, blockedReason: 'x' }, repository, reads: {}, load }), { eligible: false })
   assert.deepEqual(await loadOrgFirstCreate({ row: contact, readiness, repository: { findOpenLiveReviewBySource: async () => ({ ...org, candidate_snapshots: [{ id: '1' }] }) }, reads: {}, load }), { eligible: false })
 })
+
+test('a contact rechecked as safe to create under an organization reason still reports create readiness and its organization gate', async () => {
+  const createRow = { ...row, company_id: 'c', run_id: 'r', reason: 'organization_unresolved', status: 'cleared', recheck_outcome: 'safe_to_create',
+    candidate_snapshots: [], source_snapshot: { id: '123', firstName: 'Jack', lastName: 'Gove' } }
+  const result = await loadReviewResolutionOptions({ row: createRow,
+    repository: { getMappings: async () => ({ ...mappings, contacts: [], organizations: [], options: [{ mapping_kind: 'default_contact_type', albi_id: '12', confirmed: true }] }),
+      findDryRunReviewBySource: async () => ({ id: '00000000-0000-4000-8000-0000000000dd' }) },
+    reads: { ...reads, hubspotRead: { ...reads.hubspotRead, getContacts: async () => [{ id: '123', properties: { firstname: 'Jack', lastname: 'Gove' } }] } } })
+  assert.equal(result.createReadiness.blockedReason, 'organization_not_synced')
+  assert.deepEqual(result.createReadiness.organization, { sourceId: '777', reviewId: '00000000-0000-4000-8000-0000000000dd' })
+})
