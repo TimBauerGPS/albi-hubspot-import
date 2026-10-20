@@ -148,12 +148,18 @@ function safeErrorMessage(code, message, status) {
   return SAFE_STATUS_MESSAGES[status] ?? FALLBACK_ERROR_MESSAGE
 }
 
+const TIMED_OUT_MESSAGE = 'This took too long to answer, but it may still finish. Wait a moment, then reload the record.'
+
 async function parseJson(response) {
   const text = await response.text()
   if (!text) return {}
   try {
     return JSON.parse(text)
   } catch {
+    // Netlify's gateway answers a slow function with an HTML "Inactivity Timeout" page; the function may still finish.
+    if (response.status === 504 || /inactivity timeout/i.test(text.slice(0, 2000))) {
+      throw Object.assign(new H2ARequestError(TIMED_OUT_MESSAGE, response.status), { timedOut: true })
+    }
     throw new H2ARequestError('HubSpot to Albi returned an invalid response.', response.status)
   }
 }

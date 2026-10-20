@@ -478,9 +478,10 @@ test('Albi validationErrors are reduced to field names and redacted messages', a
 test('Albi create options load types, statuses and salespeople by name', async () => {
   const f = transport([accessibleCompany,
     [{ id: 12, name: 'Referrer' }], [{ id: 2, name: 'Active' }],
-    [{ id: 70, name: 'Ali Brown' }, { id: 71, firstName: 'Sam', lastName: 'Green' }]])
+    [{ id: 70, name: 'Ali Brown' }, { id: 71, firstName: 'Sam', lastName: 'Green' }, { id: 72, name: '' }, { id: 73, firstName: 'Solo' }]])
   const options = await new AlbiClient({ apiKey: 'k', fetch: f.fetch }).listCreateOptions()
-  assert.deepEqual(options.salespeople, [{ id: '70', label: 'Ali Brown' }, { id: '71', label: 'Sam Green' }])
+  // An unnamed salesperson can never be matched by name, so it is left out instead of failing the whole list.
+  assert.deepEqual(options.salespeople, [{ id: '70', label: 'Ali Brown' }, { id: '71', label: 'Sam Green' }, { id: '73', label: 'Solo' }])
   assert.deepEqual(options.relationshipTypes, [{ id: '12', label: 'Referrer' }])
   assert.deepEqual(options.relationshipStatuses, [{ id: '2', label: 'Active' }])
   assert.deepEqual(f.calls.slice(1).map(call => call.url.pathname.split('/').at(-1)), ['relationship-types', 'relationship-statuses', 'salespeople'])
@@ -532,4 +533,10 @@ test('a merged-away HubSpot ID resolves to its surviving record only when HubSpo
   assert.equal(await c.getMergedInto('contacts', '42'), null)
   assert.equal(await c.getMergedInto('companies', '7'), null)
   assert.equal(f.calls[0].url.searchParams.get('properties'), 'hs_merged_object_ids')
+})
+
+test('an owner without a first or last name does not fail the owner list', async () => {
+  const f = transport([{ results: [{ id: '42', firstName: 'Ana', lastName: 'Ruiz' }, { id: '43', email: 'x@y.test' }, { id: '44', firstName: 'Cher', lastName: null }] }])
+  const owners = await new HubSpotClient({ token: 'token', fetch: f.fetch }).listOwners()
+  assert.deepEqual(owners.map(owner => [owner.id, owner.firstName, owner.lastName]), [['42', 'Ana', 'Ruiz'], ['43', '', ''], ['44', 'Cher', '']])
 })

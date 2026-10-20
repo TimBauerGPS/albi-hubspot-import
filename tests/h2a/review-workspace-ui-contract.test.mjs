@@ -126,6 +126,17 @@ test('blocked record shows named blocked copy', async () => {
   assert.doesNotMatch(out, /Create in Albi/)
 })
 
+test('a check that failed or ran out of time names the read it stopped at', async () => {
+  const failed = await html({ ...none, createReadiness: { ready: false, blockedReason: 'evidence_unavailable',
+    evidence: { step: 'hubspot_owners', code: 'malformed_response', operation: 'listOwners', status: 200 } } })
+  assert.match(failed, /Stopped at: reading HubSpot’s owner list \(malformed_response, HTTP 200\)/)
+  const slow = await mount({ ...base, suggestedCandidateId: null, forceCreateReadiness: { eligible: true, ready: false, blockedReason: 'evidence_unavailable',
+    evidence: { step: 'albi_create_options', code: 'timeout' } } }, { referralSourceId: '5' })
+  assert.match(slow.text(), /Stopped at: reading Albi’s types, statuses and salespeople \(timeout\)/)
+  const odd = await html({ ...none, createReadiness: { ready: false, blockedReason: 'evidence_unavailable', evidence: { step: '<b>x</b>', code: 'x y' } } })
+  assert.doesNotMatch(odd, /Stopped at/)
+})
+
 test('waiting_on_albi shows the update-in-Albi reminder with copy buttons', async () => {
   const out = await html({ ...base, resolution: { id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', reviewId: base.id, runId: base.runId, portalId: '321', sourceId: '123',
     objectType: 'contacts', action: 'resolve_fields', status: 'waiting_on_albi', events: [{ id: 'ffffffff-ffff-4fff-8fff-ffffffffffff', eventType: 'waiting_on_albi', createdAt: base.updatedAt,

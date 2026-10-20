@@ -113,7 +113,8 @@ test('detail returns safe JSON when advisory provider evidence exceeds its deadl
   assert.equal(response.headers['Content-Type'], 'application/json')
   const item = JSON.parse(response.body).item
   // Running out of time names itself instead of silently hiding creation.
-  assert.deepEqual(item.forceCreateReadiness, { eligible: true, ready: false, blockedReason: 'evidence_unavailable' })
+  assert.deepEqual(item.forceCreateReadiness, { eligible: true, ready: false, blockedReason: 'evidence_unavailable',
+    evidence: { step: 'hubspot_associations', code: 'timeout' } })
   assert.equal(item.resolutionCapability.canResolve, true)
 })
 
@@ -707,5 +708,5 @@ test('a create-eligible record whose readiness check runs out of time says so', 
   f.options.makeClients = async () => ({ hubspot: { getContacts: () => new Promise(() => {}), getCompanies: async () => [], getAssociations: () => new Promise(() => {}) },
     albi: { listContacts: () => new Promise(() => {}), listOrganizations: () => new Promise(() => {}) } })
   const item = JSON.parse((await createDryRunReviewHandler(f.options)(get({ reviewId }))).body).item
-  assert.deepEqual(item.createReadiness, { ready: false, blockedReason: 'evidence_unavailable' })
+  assert.deepEqual(item.createReadiness, { ready: false, blockedReason: 'evidence_unavailable', evidence: { step: 'hubspot_associations', code: 'timeout' } })
 })

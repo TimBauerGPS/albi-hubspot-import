@@ -40,7 +40,7 @@ async function mount(overrides = {}) {
   const render = label => meta => { metas.push(meta); return { type: 'section', props: { 'data-slot': label }, children: [`${label}:${JSON.stringify(meta?.progress ?? null)}`] } }
   const props = { kind: 'sample', session: { access_token: 'token' }, companyId: 'company-1', tenantRevision: 0, isAdmin: true,
     completeTenantTransition: revision => completed.push(revision), initialFilters: overrides.initialFilters,
-    renderHeader: render('header'), renderGate: overrides.renderGate ?? (() => null) }
+    renderHeader: render('header'), renderGate: overrides.renderGate ?? (() => null), ...overrides.props }
   const ui = await mountComponent('ReviewWorkspace.jsx', { props, bindings: { ...bound, ...workspaceHelpers, ...presentation, buildResolutionConfirmation, blockedReasonCopy,
     ReviewRecord: stub('ReviewRecord'), ReviewQueue: stub('ReviewQueue'), AlbiTodo: stub('AlbiTodo'), ShortcutHelp: stub('ShortcutHelp') } })
   const context = { get companyId() { return props.companyId }, set companyId(value) { props.companyId = value },
@@ -336,6 +336,25 @@ test('an invalid recheck response reloads detail and recognizes a server-complet
   assert.equal(ui.detail().props.item.lastRecheckedAt, '2026-10-12T12:01:59.000Z')
   assert.match(ui.text(), /Recheck complete/)
   assert.doesNotMatch(ui.text(), /Recheck failed\. /)
+  ui.unmount()
+})
+
+test('a recheck the gateway timed out keeps reloading until the server finishes it', async () => {
+  let details = 0
+  const ui = await mount({ props: { recheckReloadMs: 1 },
+    getH2ADryRunReview: (_s, _c, id) => Promise.resolve({ item: { ...full(id),
+      updatedAt: ++details <= 3 ? '2026-10-12T12:00:00.000Z' : '2026-10-12T12:02:00.000Z',
+      lastRecheckedAt: details <= 3 ? null : '2026-10-12T12:01:59.000Z' } }),
+    recheckH2ADryRunReview: () => Promise.reject(Object.assign(new Error('This took too long to answer, but it may still finish. Wait a moment, then reload the record.'),
+      { status: 504, timedOut: true })),
+  })
+  const pending = ui.detail().props.onRecheck(); await ui.flush()
+  assert.match(ui.text(), /still finishing/)
+  assert.doesNotMatch(ui.text(), /Recheck failed\. |didn’t finish in time/)
+  for (let i = 0; i < 6 && !/Recheck complete/.test(ui.text()); i++) await ui.tick()
+  await pending
+  assert.equal(ui.detail().props.item.lastRecheckedAt, '2026-10-12T12:01:59.000Z')
+  assert.match(ui.text(), /Recheck complete/)
   ui.unmount()
 })
 

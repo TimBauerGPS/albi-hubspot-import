@@ -59,7 +59,7 @@ test('create readiness trusts the last recheck (no full Albi scan) and names why
   const missing = await load({ reads: { ...currentReads, hubspotRead: { ...currentReads.hubspotRead, getContacts: async () => [] } } })
   assert.deepEqual(missing.createReadiness, { ready: false, blockedReason: 'source_unavailable' })
   const failing = await load({ reads: { ...currentReads, hubspotRead: { ...currentReads.hubspotRead, getContacts: async () => { throw new Error('down') } } } })
-  assert.deepEqual(failing.createReadiness, { ready: false, blockedReason: 'evidence_unavailable' })
+  assert.deepEqual(failing.createReadiness, { ready: false, blockedReason: 'evidence_unavailable', evidence: { step: 'hubspot_record' } })
   const several = await load({ reads: { ...currentReads, hubspotRead: { ...currentReads.hubspotRead,
     getAssociations: async () => [{ fromId: '123', toObjectType: 'companies', toIds: ['777', '778'] }] } } })
   assert.deepEqual(several.createReadiness, { ready: false, blockedReason: 'multiple_organizations' })
@@ -302,4 +302,22 @@ test('a contact rechecked as safe to create under an organization reason still r
     reads: { ...reads, hubspotRead: { ...reads.hubspotRead, getContacts: async () => [{ id: '123', properties: { firstname: 'Jack', lastname: 'Gove' } }] } } })
   assert.equal(result.createReadiness.blockedReason, 'organization_not_synced')
   assert.deepEqual(result.createReadiness.organization, { sourceId: '777', reviewId: '00000000-0000-4000-8000-0000000000dd' })
+})
+
+test('a failed check names the read that failed and the provider error code', async () => {
+  const { ApiError } = await import('../../netlify/functions/_h2a/http.js')
+  const forcedRow = { ...row, reason: 'duplicate_candidates', recheck_outcome: 'still_needs_review', candidate_snapshots: [{ id: '456' }],
+    source_snapshot: { id: '123', firstName: 'Alex', lastName: 'Stone' } }
+  const load = hubspotRead => loadReviewResolutionOptions({ row: forcedRow,
+    repository: { getMappings: async () => ({ ...mappings, contacts: [], options: [{ mapping_kind: 'default_contact_type', albi_id: '12', confirmed: true }] }) },
+    reads: { ...reads, hubspotRead: { ...reads.hubspotRead, getContacts: async () => [{ id: '123', properties: { firstname: 'Alex', lastname: 'Stone' } }],
+      getOwnerId: async () => '99', ...hubspotRead } } })
+  const owners = await load({ listOwners: async () => { throw new ApiError('validation', { operation: 'listOwners', code: 'malformed_response', status: 200 }) } })
+  assert.deepEqual(owners.forceCreateReadiness, { eligible: false, ready: false, blockedReason: 'evidence_unavailable',
+    evidence: { step: 'hubspot_owners', code: 'malformed_response', operation: 'listOwners', status: 200 } })
+  const owner = await load({ getOwnerId: async () => { throw new ApiError('rate_limit', { operation: 'getOwnerId', status: 429 }) } })
+  assert.deepEqual(owner.forceCreateReadiness.evidence, { step: 'hubspot_owner', code: 'rate_limit', operation: 'getOwnerId', status: 429 })
+  // A plain error message is never copied into the projection.
+  const plain = await load({ getOwnerId: async () => { throw new Error('secret token abc in message') } })
+  assert.deepEqual(plain.forceCreateReadiness.evidence, { step: 'hubspot_owner' })
 })

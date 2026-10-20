@@ -28,14 +28,32 @@ export function resolveCreateDefaults({ relationshipTypes, relationshipStatuses,
   return { ok: true, typeId, statusId, salespersonId }
 }
 
+// Names the read a failure came from (and, while running, the read in progress) without copying any message.
+export async function stepped(step, run, progress = null) {
+  if (progress) progress.step = step
+  try { return await run() } catch (error) {
+    if (error && typeof error === 'object' && !error.h2aStep) { try { error.h2aStep = step } catch { /* frozen */ } }
+    throw error
+  }
+}
+const TAG = /^[a-z][a-z0-9_:]{0,39}$/i
+// Sanitized: the step and, for a provider error, its category code, operation and HTTP status. Never a message.
+export function evidenceOf(error) {
+  const status = error?.name === 'ApiError' && Number.isInteger(error.status) && error.status >= 100 && error.status <= 599 ? error.status : null
+  return { ...(TAG.test(error?.h2aStep ?? '') ? { step: error.h2aStep } : {}),
+    ...(error?.name === 'ApiError' && TAG.test(error.code ?? '') ? { code: error.code } : {}),
+    ...(error?.name === 'ApiError' && TAG.test(error.operation ?? '') ? { operation: error.operation } : {}),
+    ...(status ? { status } : {}) }
+}
+
 // Reads only. The record's owner is read live; Albi's option lists and HubSpot's owners are cached per company
 // (cacheKey) while the function is warm, and the reads run in parallel.
 export async function loadCreateDefaults({ hubspotRead, albiRead, objectType, sourceId, cacheKey = null }) {
   const [options, ownerId] = await Promise.all([
-    cachedRead(cacheKey && `${cacheKey}:albi-create-options`, () => albiRead.listCreateOptions()),
-    hubspotRead.getOwnerId(objectType === 'contacts' ? 'contacts' : 'companies', sourceId),
+    stepped('albi_create_options', () => cachedRead(cacheKey && `${cacheKey}:albi-create-options`, () => albiRead.listCreateOptions())),
+    stepped('hubspot_owner', () => hubspotRead.getOwnerId(objectType === 'contacts' ? 'contacts' : 'companies', sourceId)),
   ])
-  const owners = ownerId ? await cachedRead(cacheKey && `${cacheKey}:hubspot-owners`, () => hubspotRead.listOwners()) : []
+  const owners = ownerId ? await stepped('hubspot_owners', () => cachedRead(cacheKey && `${cacheKey}:hubspot-owners`, () => hubspotRead.listOwners())) : []
   return resolveCreateDefaults({ ...options, ownerId, owners })
 }
 

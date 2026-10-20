@@ -29,6 +29,23 @@ function candidateView(ranked, snapshot) {
     linkedElsewhere: Number.isSafeInteger(ranked.linkedElsewhere) && ranked.linkedElsewhere > 0 ? ranked.linkedElsewhere : 0 }
 }
 
+// The read a failed or timed-out create check stopped at (sanitized server tags only), in plain words.
+const EVIDENCE_STEPS = {
+  provider_clients: 'connecting to HubSpot and Albi', mappings: 'reading saved links', hubspot_record: 'reading the HubSpot record',
+  hubspot_associations: 'reading the HubSpot organization link', hubspot_organization: 'reading the HubSpot organization',
+  organization_review: 'finding the organization’s review', albi_contacts: 'reading Albi contacts', albi_organizations: 'reading Albi organizations',
+  albi_referral_sources: 'reading Albi’s referral sources', albi_create_options: 'reading Albi’s types, statuses and salespeople',
+  hubspot_owner: 'reading the record’s HubSpot owner', hubspot_owners: 'reading HubSpot’s owner list', create_defaults: 'reading the create defaults',
+}
+const EVIDENCE_TAG = /^[a-z][a-z0-9_:]{0,39}$/i
+function withEvidence(copy, evidence) {
+  if (!copy || !evidence || !Object.hasOwn(EVIDENCE_STEPS, evidence.step)) return copy
+  const code = EVIDENCE_TAG.test(evidence.code ?? '') ? evidence.code : null
+  const status = Number.isInteger(evidence.status) && evidence.status >= 100 && evidence.status <= 599 ? `HTTP ${evidence.status}` : null
+  const extra = [code, status].filter(Boolean).join(', ')
+  return `${copy} Stopped at: ${EVIDENCE_STEPS[evidence.step]}${extra ? ` (${extra})` : ''}.`
+}
+
 export default function ReviewRecord({
   item, kind = 'sample', candidateIndex = 0, onPickCandidate, referralSourceId = '', onReferral, referralRef,
   pending = false, busy = false, readOnly = false,
@@ -66,7 +83,7 @@ export default function ReviewRecord({
   // The org-first create is blocked on the contact's own readiness, so its sources may ride on orgFirstCreate.
   const sourceList = orgFirst ? item?.orgFirstCreate?.referralSources ?? readiness?.referralSources : readiness?.referralSources
   const referralSources = (Array.isArray(sourceList) ? sourceList : []).filter(source => idPattern.test(source?.id) && typeof source?.label === 'string' && source.label.trim() !== '').slice(0, 100)
-  const blockedCopy = blockedReasonCopy(readiness?.blockedReason)
+  const blockedCopy = withEvidence(blockedReasonCopy(readiness?.blockedReason), readiness?.evidence)
   const unsyncedOrganization = readiness?.blockedReason === 'organization_not_synced' && idPattern.test(readiness?.organization?.sourceId)
     ? { sourceId: readiness.organization.sourceId, reviewId: typeof readiness.organization.reviewId === 'string' && readiness.organization.reviewId ? readiness.organization.reviewId : null } : null
 

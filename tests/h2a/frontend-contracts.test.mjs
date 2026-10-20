@@ -45,6 +45,18 @@ test('resolution errors expose fixed actionable copy and never expose provider d
   } finally { globalThis.fetch = originalFetch }
 })
 
+test('a gateway timeout page becomes plain copy that says the work may still finish', async () => {
+  const { recheckH2ADryRunReview } = await import('../../src/lib/hubspotToAlbi.js')
+  const originalFetch = globalThis.fetch
+  try {
+    for (const status of [200, 500, 502, 504]) {
+      globalThis.fetch = async () => response('<HTML><HEAD><TITLE>Inactivity Timeout</TITLE></HEAD><BODY>Too much time</BODY>', { status, contentType: 'text/html' })
+      await assert.rejects(() => recheckH2ADryRunReview(session, 'company-1', { reviewId: '00000000-0000-4000-8000-000000000001', expectedUpdatedAt: '2026-10-12T12:00:00Z' }),
+        error => error.message === 'This took too long to answer, but it may still finish. Wait a moment, then reload the record.' && error.timedOut === true)
+    }
+  } finally { globalThis.fetch = originalFetch }
+})
+
 function response(body, { status = 200, contentType = 'application/json' } = {}) {
   return new Response(typeof body === 'string' ? body : JSON.stringify(body), {
     status,

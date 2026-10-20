@@ -103,6 +103,8 @@ async function detail(repository, companyId, runId, row, auth, options, config) 
     return clients
   })()
   let resolutionOptions = { organizationOptions: [], createReadiness: { ready: false }, forceCreateReadiness: { eligible: false, ready: false } }, timedOut = false
+  // The read still running when the checks run out of time, named on the record.
+  const progress = { step: 'provider_clients' }
   async function loadReadiness() {
     if (resolutionCapability.canResolve && (row.status === 'needs_review' || row.status === 'cleared' && row.recheck_outcome === 'safe_to_create') &&
       (actions.includes('choose_organization') || actions.includes('create_albi') &&
@@ -111,7 +113,7 @@ async function detail(repository, companyId, runId, row, auth, options, config) 
       try {
         const loaded = await advisoryWithin(async () => {
           const clients = await sharedClients()
-          return clients ? loadReviewResolutionOptions({ row: { ...row, company_id: companyId }, repository, reads: readOnlyH2ACapabilities(clients) }) : null
+          return clients ? loadReviewResolutionOptions({ row: { ...row, company_id: companyId }, repository, reads: readOnlyH2ACapabilities(clients), progress }) : null
         }, Number.isFinite(options.detailDeadlineMs) ? Math.min(10000, Math.max(1, options.detailDeadlineMs)) : DETAIL_BUDGET_MS)
         if (loaded) resolutionOptions = loaded
         else timedOut = true
@@ -119,10 +121,10 @@ async function detail(repository, companyId, runId, row, auth, options, config) 
       // Say why creation is off when its checks did not finish, rather than an unexplained "unavailable".
       if (timedOut) {
         if (actions.includes('create_albi') && Array.isArray(row.candidate_snapshots) && row.candidate_snapshots.length === 0) {
-          resolutionOptions = { ...resolutionOptions, createReadiness: { ready: false, blockedReason: 'evidence_unavailable' } }
+          resolutionOptions = { ...resolutionOptions, createReadiness: { ready: false, blockedReason: 'evidence_unavailable', evidence: { step: progress.step, code: 'timeout' } } }
         }
         if (actions.includes('force_create_albi') && Array.isArray(row.candidate_snapshots) && row.candidate_snapshots.length > 0) {
-          resolutionOptions = { ...resolutionOptions, forceCreateReadiness: { eligible: true, ready: false, blockedReason: 'evidence_unavailable' } }
+          resolutionOptions = { ...resolutionOptions, forceCreateReadiness: { eligible: true, ready: false, blockedReason: 'evidence_unavailable', evidence: { step: progress.step, code: 'timeout' } } }
         }
       }
     }

@@ -97,7 +97,7 @@ function UndoToasts({ entries, onUndo, onSendNow }) {
 // One review workspace for both queues: kind "sample" (dry-run sample rows) and kind "live" (Conflicts).
 export default function ReviewWorkspace({
   kind = 'sample', session, companyId, tenantRevision = 0, completeTenantTransition, isAdmin = false, readOnly = !isAdmin,
-  initialFilters, reloadToken = 0, renderHeader, renderBeforeQueue, renderGate, renderFooter, onBatchStarted, createBatchPollMs = 3000,
+  initialFilters, reloadToken = 0, renderHeader, renderBeforeQueue, renderGate, renderFooter, onBatchStarted, createBatchPollMs = 3000, recheckReloadMs = 5000,
 }) {
   const tenantKey = `${companyId ?? 'none'}:${tenantRevision}`
   const tenantKeyRef = useRef(tenantKey)
@@ -586,15 +586,27 @@ export default function ReviewWorkspace({
           setActionError('The queue may have changed. Reload the queue to review the latest records.')
         }
       } else {
-        // A gateway may lose the response after the server has already committed the atomic recheck. Reload once before reporting a failure.
+        // A gateway may lose the response after the server has already committed the atomic recheck. Reload before
+        // reporting a failure; when the gateway timed out (the server is likely still working), keep reloading for a while.
         try {
-          const fresh = await getH2ADryRunReview(session, companyId, reviewId, { signal: controller.signal })
-          if (!current()) return
-          const item = fresh?.item
           const priorRecheck = prior.lastRecheckedAt ? Date.parse(prior.lastRecheckedAt) : NaN
-          const currentRecheck = item?.lastRecheckedAt ? Date.parse(item.lastRecheckedAt) : NaN
-          const completed = item?.updatedAt && item.updatedAt !== prior.updatedAt && Number.isFinite(currentRecheck) &&
-            (!Number.isFinite(priorRecheck) || currentRecheck > priorRecheck)
+          const isDone = item => {
+            const currentRecheck = item?.lastRecheckedAt ? Date.parse(item.lastRecheckedAt) : NaN
+            return Boolean(item?.updatedAt && item.updatedAt !== prior.updatedAt && Number.isFinite(currentRecheck) &&
+              (!Number.isFinite(priorRecheck) || currentRecheck > priorRecheck))
+          }
+          let item = null, completed = false
+          const attempts = cause?.timedOut ? 6 : 1
+          if (cause?.timedOut) setNotice('Recheck is still finishing on the server. This record reloads by itself when it’s done.')
+          for (let attempt = 0; attempt < attempts && !completed; attempt++) {
+            if (attempt > 0) await new Promise(resolve => setTimeout(resolve, recheckReloadMs))
+            if (!current()) return
+            const fresh = await getH2ADryRunReview(session, companyId, reviewId, { signal: controller.signal })
+            if (!current()) return
+            item = fresh?.item
+            completed = isDone(item)
+          }
+          if (cause?.timedOut) setNotice('')
           if (completed) {
             replaceItem(item); writeDetail(item, true)
             setMeta(previous => {
@@ -606,7 +618,8 @@ export default function ReviewWorkspace({
               return { ...previous, progress: { ...progress, [from]: Math.max(0, Number(progress[from] ?? 0) - 1), [to]: Number(progress[to] ?? 0) + 1 } }
             })
             setNotice('Recheck complete. The record and review progress are up to date.')
-          } else setActionError(`Recheck failed. ${cause.message} Your previous evidence is unchanged. Try Recheck again.`)
+          } else setActionError(cause?.timedOut ? 'Recheck didn’t finish in time. Reload the record in a minute; if it still hasn’t changed, Recheck it again.'
+            : `Recheck failed. ${cause.message} Your previous evidence is unchanged. Try Recheck again.`)
         } catch (refreshCause) {
           if (current() && refreshCause?.name !== 'AbortError') setActionError(`Recheck failed. ${cause.message} Your previous evidence is unchanged. Try Recheck again.`)
         }

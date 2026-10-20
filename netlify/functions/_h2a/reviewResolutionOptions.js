@@ -4,7 +4,7 @@ import { buildAlbiRecordUrl } from '../../../shared/h2aProviderLinks.js'
 import { resolveContactType } from './options.js'
 import { decideContactMatch, decideOrganizationMatch } from './match.js'
 import { safeReviewSnapshot } from './review.js'
-import { buildCreateReadiness, loadCreateDefaults, safeReferralSources } from './createDefaults.js'
+import { buildCreateReadiness, evidenceOf, loadCreateDefaults, safeReferralSources, stepped } from './createDefaults.js'
 import { cachedRead } from './readCache.js'
 
 const providerId = value => typeof value === 'string' && /^[1-9]\d{0,99}$/.test(value)
@@ -43,7 +43,8 @@ function associationIds(rows, sourceId) {
 
 // Projection is advisory UI evidence only. The POST service repeats all reads
 // and validates the tenant, portal, review version and provider state.
-export async function loadReviewResolutionOptions({ row, repository, reads }) {
+// progress (optional) is told the read in progress, so a caller that gives up on time can say where.
+export async function loadReviewResolutionOptions({ row, repository, reads, progress = null }) {
   const unavailable = { organizationOptions: [], createReadiness: { ready: false }, forceCreateReadiness: { eligible: false, ready: false } }
   if (!record(row) || !providerId(row.source_id) || !providerId(row.portal_id) ||
     !['contacts', 'companies'].includes(row.object_type) || !reads?.hubspotRead || !reads?.albiRead) return unavailable
@@ -51,16 +52,20 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
   if (!actions.includes('choose_organization') && !actions.includes('create_albi') && !actions.includes('force_create_albi')) return unavailable
   // Every reason creation is off is named, so the record never shows an unexplained "unavailable".
   const hasCandidates = Array.isArray(row.candidate_snapshots) && row.candidate_snapshots.length > 0
-  const named = reason => ({ ...unavailable, ...(hasCandidates ? { forceCreateReadiness: { eligible: false, ready: false, blockedReason: reason } }
-    : { createReadiness: { ready: false, blockedReason: reason } }) })
+  const named = (reason, evidence = null) => {
+    const extra = evidence && Object.keys(evidence).length ? { evidence } : {}
+    return { ...unavailable, ...(hasCandidates ? { forceCreateReadiness: { eligible: false, ready: false, blockedReason: reason, ...extra } }
+      : { createReadiness: { ready: false, blockedReason: reason, ...extra } }) }
+  }
+  const step = (name, run) => stepped(name, run, progress)
   try {
     const hubspot = reads.hubspotRead
     const [mappings, sourceRows, associationRows] = await Promise.all([
-      repository.getMappings(row.company_id),
-      row.object_type === 'contacts' ? hubspot.getContacts([row.source_id]) : hubspot.getCompanies([row.source_id]),
-      row.object_type === 'contacts' ? hubspot.getAssociations({
+      step('mappings', () => repository.getMappings(row.company_id)),
+      step('hubspot_record', () => row.object_type === 'contacts' ? hubspot.getContacts([row.source_id]) : hubspot.getCompanies([row.source_id])),
+      row.object_type === 'contacts' ? step('hubspot_associations', () => hubspot.getAssociations({
         objectType: 'contacts', objectIds: [row.source_id], toObjectTypes: ['companies'],
-      }) : Promise.resolve([]),
+      })) : Promise.resolve([]),
     ])
     if (!mappings || !['contacts', 'organizations', 'options'].every(key => Array.isArray(mappings[key]))) return named('evidence_unavailable')
     if (!Array.isArray(sourceRows) || sourceRows.length !== 1 || sourceRows[0]?.id !== row.source_id ||
@@ -84,8 +89,8 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
         }
         return unavailable
       }
-      const contacts = await all(args => reads.albiRead.listContacts(args))
-      const organizations = await all(args => reads.albiRead.listOrganizations(args))
+      const contacts = await step('albi_contacts', () => all(args => reads.albiRead.listContacts(args)))
+      const organizations = await step('albi_organizations', () => all(args => reads.albiRead.listOrganizations(args)))
       if (!contacts || !organizations) return unavailable
       const contactMappings = mappings.contacts.filter(item => item?.portal_id === row.portal_id && mappedSource(item) === row.source_id)
       if (contactMappings.length > 1) return unavailable
@@ -158,7 +163,7 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
         const associationMappings = mappings.organizations.filter(item => item?.portal_id === row.portal_id && mappedSource(item) === sourceId)
         if (associationMappings.length > 1) return blocked('organization_mapping_ambiguous')
         const targetId = exactMapping(mappings.organizations, row.portal_id, sourceId, 'companies')
-        const companies = await hubspot.getCompanies([sourceId])
+        const companies = await step('hubspot_organization', () => hubspot.getCompanies([sourceId]))
         const companyReady = Array.isArray(companies) && companies.length === 1 && companies[0]?.id === sourceId &&
           companies[0]?.archived !== true && record(companies[0]?.properties)
         if (!companyReady) return blocked('organization_missing_in_hubspot')
@@ -167,7 +172,7 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
         if (companyReady && associationMappings.length === 0) {
           // The organization must be synced first; point at its own audited review when one exists.
           const found = typeof repository.findDryRunReviewBySource === 'function'
-            ? await repository.findDryRunReviewBySource(row.company_id, row.run_id, 'companies', sourceId) : null
+            ? await step('organization_review', () => repository.findDryRunReviewBySource(row.company_id, row.run_id, 'companies', sourceId)) : null
           organizationBlock = { sourceId, reviewId: typeof found?.id === 'string' ? found.id : null }
         }
       }
@@ -183,15 +188,15 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
       // Referral sources and the create defaults load in parallel; Albi's lists are cached per company while warm.
       const cacheKey = typeof row.company_id === 'string' && row.company_id ? row.company_id : null
       const [sources, defaults] = baseReady ? await Promise.all([
-        cachedRead(cacheKey && `${cacheKey}:albi-referral-sources`, () => reads.albiRead.listReferralSources()),
-        loadCreateDefaults({ hubspotRead: hubspot, albiRead: reads.albiRead, objectType: row.object_type, sourceId: row.source_id, cacheKey }),
+        step('albi_referral_sources', () => cachedRead(cacheKey && `${cacheKey}:albi-referral-sources`, () => reads.albiRead.listReferralSources())),
+        step('create_defaults', () => loadCreateDefaults({ hubspotRead: hubspot, albiRead: reads.albiRead, objectType: row.object_type, sourceId: row.source_id, cacheKey })),
       ]) : [[], null]
       const referralSources = safeReferralSources(sources)
       const details = buildCreateReadiness({ baseReady, organizationBlock, referralSources, defaults, notReadyReason })
       return { ...unavailable, ...(forced ? { forceCreateReadiness: { eligible: true, ...details } } : { createReadiness: details }) }
     }
     if (normal || forced) return named(sourceMapped ? 'source_already_mapped' : associated.length > 1 ? 'multiple_organizations' : 'evidence_unavailable')
-  } catch { return named('evidence_unavailable') /* A failed read cannot become an actionable projection. */ }
+  } catch (error) { return named('evidence_unavailable', evidenceOf(error)) /* A failed read cannot become an actionable projection. */ }
   return unavailable
 }
 

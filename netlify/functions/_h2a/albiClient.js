@@ -165,17 +165,18 @@ export class AlbiClient {
   }
   // Salesperson options are matched by name only; accept either a name or first/last name pair.
   async listCreateOptions() {
-    const relationshipTypes = optionList(await this.#scopedRequest(await this.#path('options/relationship-types'),
-      { operation: 'listRelationshipTypes' }, SCOPES.listRelationshipTypes))
-    const relationshipStatuses = optionList(await this.#scopedRequest(await this.#path('options/relationship-statuses'),
-      { operation: 'listRelationshipStatuses' }, SCOPES.listRelationshipStatuses))
-    const raw = await this.#scopedRequest(await this.#path('options/salespeople'),
-      { operation: 'listSalespeople' }, SCOPES.listSalespeople)
+    // The three lists are independent, so they are read together.
+    const [types, statuses, raw] = await Promise.all([
+      (async () => this.#scopedRequest(await this.#path('options/relationship-types'), { operation: 'listRelationshipTypes' }, SCOPES.listRelationshipTypes))(),
+      (async () => this.#scopedRequest(await this.#path('options/relationship-statuses'), { operation: 'listRelationshipStatuses' }, SCOPES.listRelationshipStatuses))(),
+      (async () => this.#scopedRequest(await this.#path('options/salespeople'), { operation: 'listSalespeople' }, SCOPES.listSalespeople))(),
+    ])
+    const relationshipTypes = optionList(types), relationshipStatuses = optionList(statuses)
     if (!Array.isArray(raw)) malformed('listSalespeople')
-    const salespeople = raw.map(value => {
-      const name = text(value?.name) ? value.name : text(value?.firstName) && text(value?.lastName) ? `${value.firstName} ${value.lastName}` : null
-      if (!name) malformed('listSalespeople')
-      return { id: responseId(value?.id, 'listSalespeople'), label: name.trim() }
+    // A salesperson with no name can never be matched by name, so it is left out rather than failing every create.
+    const salespeople = raw.flatMap(value => {
+      const name = text(value?.name) ? value.name : [value?.firstName, value?.lastName].filter(text).join(' ')
+      return name.trim() ? [{ id: responseId(value?.id, 'listSalespeople'), label: name.trim() }] : []
     })
     return { relationshipTypes, relationshipStatuses, salespeople }
   }

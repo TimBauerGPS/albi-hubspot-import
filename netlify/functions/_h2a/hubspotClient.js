@@ -101,8 +101,10 @@ export class HubSpotClient {
       if (after) query.set('after', after)
       const data = page(await this.#request(`/crm/owners/${HUBSPOT_API_VERSION}?${query}`, { operation: 'listOwners' }), 'listOwners')
       for (const value of data.results) {
-        if (!isRecord(value) || !['firstName', 'lastName'].every(key => typeof value[key] === 'string')) malformed('listOwners')
-        owners.push({ id: responseId(value.id, 'listOwners'), firstName: value.firstName, lastName: value.lastName, archived: value.archived === true })
+        if (!isRecord(value)) malformed('listOwners')
+        // HubSpot leaves names off some owners (for example, email-only users); such an owner just matches no salesperson.
+        const name = key => typeof value[key] === 'string' ? value[key] : ''
+        owners.push({ id: responseId(value.id, 'listOwners'), firstName: name('firstName'), lastName: name('lastName'), archived: value.archived === true })
       }
       after = data.after
       cursorSeen(seen, after)
