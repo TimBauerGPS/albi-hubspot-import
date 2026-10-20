@@ -39,7 +39,7 @@ export async function mountComponent(file, { bindings = {}, props = {}, context 
   const sandbox = { btn: 'btn', primary: 'primary', Kbd: stub('Kbd'), ...bindings, h, Fragment: 'fragment', useState, useRef, useEffect, useCallback, useMemo: callback => callback(),
     useOutletContext: () => context, AbortController, Intl, Date, Set, Map, Object, Array, JSON, Math, Number, String, Promise, URLSearchParams,
     setTimeout: callback => { timers.set(++timerId, callback); return timerId }, clearTimeout: id => { timers.delete(id) },
-    window, document: { activeElement: null }, crypto: { randomUUID: () => `00000000-0000-4000-8000-${String(++ids).padStart(12, '0')}` },
+    window, document: bindings.document ?? { activeElement: null }, crypto: { randomUUID: () => `00000000-0000-4000-8000-${String(++ids).padStart(12, '0')}` },
     localStorage: { getItem: key => storage.has(key) ? storage.get(key) : null, setItem: (key, value) => storage.set(key, String(value)) },
     navigator: { clipboard: { writeText: value => { clipboard.push(value); return Promise.resolve() } } },
     IntersectionObserver: undefined }
@@ -60,7 +60,9 @@ export async function mountComponent(file, { bindings = {}, props = {}, context 
     tick: async () => { const due = [...timers.values()]; timers.clear(); due.forEach(callback => callback()); return flush() },
     find: (type, label) => nodes().find(node => node.type === type && (label === undefined || flat(node).includes(label) || JSON.stringify(node.children).includes(label))),
     all: type => nodes().filter(node => node.type === type),
-    unmount: () => effects.forEach(effect => effect?.cleanup?.()) }
+    unmount: () => effects.forEach(effect => effect?.cleanup?.()),
+    // React StrictMode's dev double-mount: every effect cleans up, then every effect sets up again; refs and state survive.
+    strictRemount: () => { effects.forEach(effect => effect?.cleanup?.()); effects.length = 0; dirty = true; return flush() } }
 }
 
 export const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no }); return { promise, resolve, reject } }

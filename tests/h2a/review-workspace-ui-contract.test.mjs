@@ -306,7 +306,7 @@ const listRow = (id, name, extra = {}) => ({ id, objectType: 'contacts', sourceI
 const detailOf = (id, extra = {}) => ({ ...base, id, updatedAt: `2026-10-12T12:00:0${id.length % 10}.000Z`,
   sourceSnapshot: { ...base.sourceSnapshot, fullName: `Name ${id}` }, triageBucket: 'quick', triageDetails: { quickKind: 'link' }, ...extra })
 
-async function mountWorkspace({ rows, ...overrides } = {}, props = {}) {
+async function mountWorkspace({ rows, document, ...overrides } = {}, props = {}) {
   const calls = []
   const bound = clients(overrides, calls, (name, _s, _c, arg) => name === 'getH2AReviews'
     ? { items: rows ?? [listRow('review-1', 'Jane Doe'), listRow('review-2', 'Marcus Lee')], nextCursor: null,
@@ -314,7 +314,8 @@ async function mountWorkspace({ rows, ...overrides } = {}, props = {}) {
     : name === 'getH2ADryRunReview' ? { item: detailOf(arg) } : name === 'getH2ARecheckAll' ? { batch: null } : {})
   const ui = await mountComponent('ReviewWorkspace.jsx', {
     bindings: { ...bound, ...workspaceHelpers, ...sampleReview, buildResolutionConfirmation, blockedReasonCopy,
-      ReviewRecord: stub('ReviewRecord'), ReviewQueue: stub('ReviewQueue'), AlbiTodo: stub('AlbiTodo'), ShortcutHelp: stub('ShortcutHelp') },
+      ReviewRecord: stub('ReviewRecord'), ReviewQueue: stub('ReviewQueue'), AlbiTodo: stub('AlbiTodo'), ShortcutHelp: stub('ShortcutHelp'),
+      ...(document ? { document } : {}) },
     props: { kind: 'sample', session: { access_token: 'token' }, companyId: 'company-1', tenantRevision: 0, completeTenantTransition() {}, isAdmin: true, ...props } })
   return { ...ui, calls, record: () => ui.find('ReviewRecord'), queue: () => ui.find('ReviewQueue') }
 }
@@ -532,4 +533,126 @@ test('conflicts page renders the same workspace with kind live', async () => {
     context: { session: { access_token: 'token' }, companyId: 'company-1', isAdmin: false, tenantRevision: 0, completeTenantTransition() {} } })
   assert.equal(member.find('button', 'Prepare open conflicts for review'), undefined)
   member.unmount()
+})
+
+// ---- Task 14 fix round 1 ----
+
+const key = (k, extra = {}) => ({ key: k, target: null, repeat: false, defaultPrevented: false, preventDefault() { this.defaultPrevented = true }, ...extra })
+const press = (ui, k, extra) => { for (const fn of ui.listeners.keydown ?? []) fn(key(k, extra)) }
+
+test('after a StrictMode double mount, deferred sends still apply their result and the 409 message', async () => {
+  let reject = true
+  const moved = new Set()
+  const ui = await mountWorkspace({
+    resolveH2ADryRunReview: (_s, _c, input) => { if (reject) return Promise.reject(Object.assign(new Error('Changed'), { status: 409 })); moved.add(input.reviewId); return Promise.resolve({}) },
+    getH2ADryRunReview: (_s, _c, id) => Promise.resolve({ item: detailOf(id, moved.has(id) ? { triageBucket: 'done' } : {}) }),
+  })
+  await ui.strictRemount()
+  assert.equal(ui.record().props.item.id, 'review-1')
+  ui.record().props.onAccept(candidate, { emailMatch: false }); await ui.flush()
+  await ui.tick(); await ui.flush(); await ui.flush()
+  assert.equal(ui.queue().props.errors['review-1'], 'This record changed; review it again.')
+  reject = false
+  ui.queue().props.onSelect('review-2'); await ui.flush()
+  ui.record().props.onAccept(candidate, { emailMatch: false }); await ui.flush()
+  await ui.tick(); await ui.flush(); await ui.flush()
+  assert.ok(!ui.queue().props.items.some(item => item.id === 'review-2'), 'afterWrite moves the record out of its bucket')
+  ui.unmount()
+})
+
+test('a tenant change clears the previous company bucket counts and any open dialog', async () => {
+  const ui = await mountWorkspace({ getH2AReviews: (_s, company) => company === 'company-2' ? Promise.reject(new Error('Service unavailable'))
+    : Promise.resolve({ items: [listRow('review-1', 'Jane Doe')], nextCursor: null, bucketCounts: { quick: 7, todo: 3, decision: 1, blocked: 0, done: 0 } }) })
+  assert.match(ui.text(), /Quick wins7/)
+  ui.record().props.onForceCreate({ referralSourceId: '9', ignoredCandidateIds: ['456'] }); await ui.flush()
+  assert.ok(ui.nodes().find(node => node.props?.role === 'dialog'))
+  await ui.rerender({ companyId: 'company-2', tenantRevision: 1 }); await ui.flush()
+  assert.match(ui.text(), /Service unavailable/)
+  assert.doesNotMatch(ui.text(), /Quick wins7|Albi to-do3/)
+  assert.match(ui.text(), /Quick wins—/)
+  assert.equal(ui.nodes().find(node => node.props?.role === 'dialog'), undefined)
+  ui.unmount()
+})
+
+test('albi to-do drops the previous company groups and ticks on a tenant change', async () => {
+  const calls = []
+  const task = { provider: 'albi', objectType: 'contacts', targetId: '456', fields: [{ field: 'phoneNumber', value: '612-555-0101' }] }
+  const item = { ...base, id: 'a', resolution: { id: 'aaaaaaaa-0000-4000-8000-000000000001', status: 'waiting_on_albi', action: 'resolve_fields', objectType: 'contacts',
+    events: [{ id: 'bbbbbbbb-0000-4000-8000-000000000001', eventType: 'waiting_on_albi', details: { manualTasks: [task] } }] } }
+  const bound = clients({ getH2AReviews: (_s, company, query) => company === 'company-2' ? Promise.reject(new Error('Service unavailable'))
+    : Promise.resolve({ items: query.kind === 'sample' ? [listRow('a', 'Ann')] : [], nextCursor: null }) },
+  calls, name => name === 'getH2ADryRunReview' ? { item } : {})
+  const ui = await mountComponent('AlbiTodo.jsx', { bindings: { ...bound, ...sampleReview },
+    props: { session: { access_token: 'token' }, companyId: 'company-1', tenantKey: 'company-1:0' },
+    storage: { 'h2a.albiTodo.company-2': JSON.stringify(['other:tick']) } })
+  await ui.flush()
+  assert.match(ui.text(), /612-555-0101/)
+  ui.all('input').find(node => node.props.type === 'checkbox').props.onChange({ target: { checked: true } }); await ui.flush()
+  await ui.rerender({ companyId: 'company-2', tenantKey: 'company-2:1' }); await ui.flush()
+  assert.match(ui.text(), /Service unavailable/)
+  assert.doesNotMatch(ui.text(), /612-555-0101|Open in Albi/)
+  assert.match(ui.text(), /Recheck done \(0\)/)
+  ui.unmount()
+})
+
+test('workspace shortcuts are ignored while another modal (the many-to-one approval) is open', async () => {
+  let modalOpen = true
+  const document = { activeElement: null, querySelector: selector => modalOpen && selector.includes('aria-modal') ? {} : null }
+  const ui = await mountWorkspace({ document })
+  press(ui, 'j'); press(ui, 't'); await ui.flush()
+  assert.equal(ui.record().props.item.id, 'review-1')
+  assert.equal(ui.find('AlbiTodo'), undefined)
+  press(ui, 'j', { target: { closest: selector => selector.includes('dialog') ? {} : null } }); modalOpen = false; await ui.flush()
+  assert.equal(ui.record().props.item.id, 'review-1', 'a key from inside a dialog is ignored too')
+  press(ui, 'j'); await ui.flush()
+  assert.equal(ui.record().props.item.id, 'review-2')
+  ui.unmount()
+})
+
+test('bulk rows whose detail cannot be loaded count as failed, not skipped', async () => {
+  const rows = [listRow('r1', 'Person 1'), listRow('r2', 'Person 2')]
+  const ui = await mountWorkspace({ rows, getH2ADryRunReview: (_s, _c, id) => id === 'r2' ? Promise.reject(new Error('Network down')) : Promise.resolve({ item: detailOf(id) }),
+    bulkLinkH2AReviews: (_s, _c, items) => Promise.resolve({ results: items.map(item => ({ reviewId: item.reviewId, status: 'done' })) }) })
+  ui.queue().props.onBulkLink(); await ui.flush()
+  ui.find('button', 'Link 2').props.onClick(); for (let n = 0; n < 4; n++) await ui.flush()
+  const sent = ui.calls.filter(call => call.name === 'bulkLinkH2AReviews')
+  assert.deepEqual(j(sent.map(call => call.args[2].map(item => item.reviewId))), [['r1']])
+  assert.match(ui.text(), /1 linked, 0 skipped, 1 failed/)
+  assert.doesNotMatch(ui.text(), /no longer an exact match/)
+  ui.unmount()
+})
+
+test('members get a read-only workspace: no mutation controls, no writing shortcuts, no bulk', async () => {
+  const ui = await mountWorkspace({}, { isAdmin: false, readOnly: true })
+  const record = ui.record().props
+  assert.equal(record.readOnly, true)
+  for (const handler of ['onAccept', 'onLink', 'onCreate', 'onForceCreate', 'onCreateWithOrganization', 'onApplyFields', 'onChooseOrganization', 'onSkip']) assert.equal(record[handler], undefined, handler)
+  assert.equal(ui.queue().props.bulkEnabled, false)
+  await record.onRecheck(); press(ui, 'r'); press(ui, 'x'); await ui.flush()
+  assert.equal(ui.calls.filter(call => call.name === 'recheckH2ADryRunReview').length, 0)
+  assert.equal(ui.queue().props.checked.size, 0)
+  press(ui, 'j'); await ui.flush()
+  assert.equal(ui.record().props.item.id, 'review-2', 'navigation still works')
+  ui.unmount()
+  const out = await html(base, { readOnly: true })
+  assert.doesNotMatch(out, /Accept suggestion|Link selected|Create in Albi|Referral source…/)
+  assert.match(out, /read-only for your role/)
+  const { readFile } = await import('node:fs/promises')
+  const source = file => readFile(new URL(`../../src/features/hubspotToAlbi/${file}`, import.meta.url), 'utf8')
+  const page = await source('SampleReviewPage.jsx'), conflicts = await source('ConflictsPage.jsx')
+  assert.match(page, /readOnly=\{!isAdmin\}/); assert.match(conflicts, /readOnly=\{!isAdmin\}/)
+})
+
+test('the confirm dialog starts focused on Confirm so Enter confirms; Enter elsewhere in it confirms through the window handler', async () => {
+  const ui = await mountWorkspace()
+  ui.record().props.onForceCreate({ referralSourceId: '9', ignoredCandidateIds: ['456'] }); await ui.flush()
+  const confirm = ui.all('button').find(node => node.props['data-dialog-confirm'])
+  assert.match(textOf(confirm), /Create separate record/)
+  assert.ok(confirm.props.ref, 'Confirm holds the initial-focus ref')
+  assert.ok(!ui.all('button').some(node => textOf(node).startsWith('Cancel') && node.props.ref), 'Cancel is not the initial focus')
+  press(ui, 'Enter'); await ui.flush()
+  const sent = ui.calls.filter(call => call.name === 'resolveH2ADryRunReview')
+  assert.equal(sent.length, 1); assert.equal(sent[0].args[2].action, 'force_create_albi')
+  assert.equal(ui.nodes().find(node => node.props?.role === 'dialog'), undefined)
+  ui.unmount()
 })

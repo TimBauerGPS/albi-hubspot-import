@@ -144,7 +144,7 @@ export default function ConflictsPage() {
     </section>}
 
     <ReviewWorkspace kind="live" session={session} companyId={companyId} tenantRevision={tenantRevision}
-      completeTenantTransition={completeTenantTransition} isAdmin={isAdmin} reloadToken={reloadToken} />
+      completeTenantTransition={completeTenantTransition} isAdmin={isAdmin} readOnly={!isAdmin} reloadToken={reloadToken} />
 
     {(activityItems.length > 0 || activityCursor || activityError) && <section className="overflow-hidden rounded-xl border border-gray-200 bg-white" aria-labelledby="conflicts-activity-title">
       <div className="border-b border-gray-200 px-4 py-3">

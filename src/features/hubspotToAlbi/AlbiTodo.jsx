@@ -55,7 +55,7 @@ function groupTasks(loaded) {
   return [...groups.values()]
 }
 
-export default function AlbiTodo({ session, companyId, tenantKey }) {
+export default function AlbiTodo({ session, companyId, tenantKey, readOnly = false }) {
   const tenantRef = useRef(tenantKey)
   tenantRef.current = tenantKey
   const [groups, setGroups] = useState([])
@@ -70,7 +70,8 @@ export default function AlbiTodo({ session, companyId, tenantKey }) {
     const controller = new AbortController()
     const startedFor = tenantKey
     const current = () => !controller.signal.aborted && tenantRef.current === startedFor
-    setLoading(true); setError('')
+    // A different company starts from its own list and its own ticks; nothing from the previous one lingers.
+    setLoading(true); setError(''); setGroups([]); setTicks(readTicks(companyId))
     async function load() {
       try {
         const pages = await Promise.all(KINDS.map(kind => getH2AReviews(session, companyId, { kind, bucket: 'todo', limit: 100, signal: controller.signal })
@@ -97,6 +98,8 @@ export default function AlbiTodo({ session, companyId, tenantKey }) {
     if (companyId) load(); else { setLoading(false); setError('Select a company to load the Albi to-do.') }
     return () => controller.abort()
   }, [session, companyId, tenantKey, reload])
+
+  useEffect(() => { setRecheck(null) }, [tenantKey])
 
   // After "Recheck done", poll each started batch and reload the list once all of them have finished.
   useEffect(() => {
@@ -125,7 +128,7 @@ export default function AlbiTodo({ session, companyId, tenantKey }) {
   const tickedReviews = [...new Map(tickedEntries.map(entry => [entry.reviewId, entry])).values()]
 
   async function recheckDone() {
-    if (!tickedReviews.length || recheck) return
+    if (readOnly || !tickedReviews.length || recheck) return
     const startedFor = tenantKey
     setError('')
     const kinds = KINDS.filter(kind => tickedReviews.some(entry => entry.kind === kind))
@@ -146,7 +149,7 @@ export default function AlbiTodo({ session, companyId, tenantKey }) {
         <h3 id="albi-todo-title" className="text-lg font-semibold text-gray-900">Albi to-do</h3>
         <p className="text-xs leading-5 text-gray-600">Albi’s API can’t edit existing records. Make these edits in Albi, tick them, then recheck once. A tick is a reminder; the recheck verifies.</p>
       </div>
-      <button type="button" className={primary} disabled={!tickedReviews.length || Boolean(recheck) || loading} onClick={recheckDone}>
+      <button type="button" className={primary} disabled={readOnly || !tickedReviews.length || Boolean(recheck) || loading} onClick={recheckDone}>
         {recheck ? 'Rechecking…' : `Recheck done (${tickedReviews.length})`}</button>
     </header>
     <div aria-live="polite" className="text-sm">

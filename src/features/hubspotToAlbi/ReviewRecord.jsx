@@ -31,12 +31,13 @@ function candidateView(ranked, snapshot) {
 
 export default function ReviewRecord({
   item, kind = 'sample', candidateIndex = 0, onPickCandidate, referralSourceId = '', onReferral, referralRef,
-  pending = false, busy = false,
+  pending = false, busy = false, readOnly = false,
   onAccept, onLink, onCreate, onForceCreate, onCreateWithOrganization, onApplyFields, onChooseOrganization,
   onSkip, onRecheck, onOpenOrganization, onOpenMergedSurvivor,
 }) {
   const review = presentSampleReviewItem(item)
-  const capability = review.resolutionCapability
+  // Members see the evidence only: no mutation controls, whatever the server capability says.
+  const capability = readOnly ? { ...review.resolutionCapability, canResolve: false } : review.resolutionCapability
   const resolution = review.resolution
   const [showMatching, setShowMatching] = useState(false)
   const [fieldChoices, setFieldChoices] = useState({})

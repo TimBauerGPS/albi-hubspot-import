@@ -21,6 +21,9 @@ const SKIP_REASONS = { changed: 'changed since you looked', linked_elsewhere: 'l
 const blankFilters = { status: '', objectType: '', reason: '' }
 const selectClass = 'mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500'
 const danger = 'rounded-lg bg-red-600 px-3 py-1.5 text-sm font-semibold text-white transition hover:bg-red-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50'
+// Keys that write; members (read-only) get navigation, picking, help and the Albi to-do only.
+const WRITE_KEYS = new Set(['accept', 'link', 'create', 'skip', 'recheck', 'toggle'])
+const inside = (target, selector) => !!target && typeof target.closest === 'function' && !!target.closest(selector)
 const text = value => typeof value === 'string' && value.trim() ? value.trim() : ''
 const list = value => Array.isArray(value) ? value : []
 const without = (record, key) => { if (!Object.hasOwn(record, key)) return record; const next = { ...record }; delete next[key]; return next }
@@ -37,7 +40,7 @@ async function mapLimit(values, limit, run) {
 }
 
 // Risky-action confirmation with a focus trap. The workspace moves focus in and back out.
-function ConfirmDialog({ dialog, panelRef, cancelRef, onConfirm, onCancel }) {
+function ConfirmDialog({ dialog, panelRef, confirmRef, onConfirm, onCancel }) {
   function onKeyDown(event) {
     if (event.key === 'Escape') { event.stopPropagation(); event.preventDefault(); onCancel(); return }
     if (event.key !== 'Tab') return
@@ -54,8 +57,8 @@ function ConfirmDialog({ dialog, panelRef, cancelRef, onConfirm, onCancel }) {
       <h3 id="review-confirm-title" className="text-lg font-semibold text-gray-900">{dialog.title}</h3>
       <ul className="mt-3 space-y-1 break-words text-sm text-gray-700">{dialog.lines.map((line, index) => <li key={index}>{line}</li>)}</ul>
       <div className="mt-5 flex flex-row-reverse flex-wrap gap-2">
-        <button type="button" className={dialog.danger ? danger : primary} onClick={onConfirm}>{dialog.confirmLabel}<Kbd>Enter</Kbd></button>
-        <button ref={cancelRef} type="button" className={btn} onClick={onCancel}>Cancel<Kbd>Esc</Kbd></button>
+        <button ref={confirmRef} type="button" data-dialog-confirm="true" className={dialog.danger ? danger : primary} onClick={onConfirm}>{dialog.confirmLabel}<Kbd>Enter</Kbd></button>
+        <button type="button" className={btn} onClick={onCancel}>Cancel<Kbd>Esc</Kbd></button>
       </div>
     </div>
   </div>
@@ -79,7 +82,7 @@ function UndoToasts({ entries, onUndo, onSendNow }) {
 
 // One review workspace for both queues: kind "sample" (dry-run sample rows) and kind "live" (Conflicts).
 export default function ReviewWorkspace({
-  kind = 'sample', session, companyId, tenantRevision = 0, completeTenantTransition, isAdmin = false,
+  kind = 'sample', session, companyId, tenantRevision = 0, completeTenantTransition, isAdmin = false, readOnly = !isAdmin,
   initialFilters, reloadToken = 0, renderHeader, renderBeforeQueue, renderGate, renderFooter, onBatchStarted,
 }) {
   const tenantKey = `${companyId ?? 'none'}:${tenantRevision}`
@@ -98,7 +101,7 @@ export default function ReviewWorkspace({
   const rootRef = useRef(null)
   const referralRef = useRef(null)
   const dialogPanelRef = useRef(null)
-  const dialogCancelRef = useRef(null)
+  const dialogConfirmRef = useRef(null)
   const previousFocus = useRef(null)
   const keyHandler = useRef(null)
   const [stateTenant, setStateTenant] = useState(tenantKey)
@@ -155,7 +158,8 @@ export default function ReviewWorkspace({
   }, [])
   const pendingIds = () => new Set((queueRef.current?.pending() ?? []).map(entry => entry.id))
 
-  useEffect(() => () => { mountedRef.current = false }, [])
+  // StrictMode runs cleanup then setup again on mount, so setup must restore the flag.
+  useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false } }, [])
 
   // One deferred queue per tenant. Leaving the page or switching company sends what is still waiting.
   useEffect(() => {
@@ -190,7 +194,7 @@ export default function ReviewWorkspace({
     if (loadedTenant.current !== startedFor) {
       loadedTenant.current = startedFor
       autoPicked.current = false
-      setReferrals({}); setRecordErrors({}); setBulkSummary(''); setReturnToId(null)
+      setReferrals({}); setRecordErrors({}); setBulkSummary(''); setReturnToId(null); setBucketCounts(null); setDialog(null); setHelp(false)
     }
     setStateTenant(startedFor)
     setItems([]); setMeta({ sample: null, progress: null }); setSelectedId(null); setDetails({}); setNextCursor(null); setChecked(new Set())
@@ -278,7 +282,7 @@ export default function ReviewWorkspace({
   useEffect(() => {
     if (!dialog) return undefined
     previousFocus.current = document.activeElement
-    dialogCancelRef.current?.focus?.()
+    dialogConfirmRef.current?.focus?.()
     return () => { const target = previousFocus.current; if (target?.isConnected) target.focus() }
   }, [Boolean(dialog)]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -488,6 +492,7 @@ export default function ReviewWorkspace({
   }
 
   async function handleRecheck() {
+    if (readOnly) return
     if (!detail?.updatedAt || detail.id !== selectedId || recheckLock.current) return
     // Recheck owns a new generation so prior pages cannot restore stale progress. Keep the queue and cursor for a later pagination retry.
     const request = ++requestRevision.current
@@ -563,6 +568,8 @@ export default function ReviewWorkspace({
     const contactId = detail.id
     let reviewId = typeof target?.reviewId === 'string' && target.reviewId ? target.reviewId : null
     if (!reviewId) {
+      // Preparing a related review is an admin write; members can only open one that already exists.
+      if (readOnly) { setActionError('Only an admin can prepare this related record for review.'); return }
       const controller = new AbortController()
       controllers.current.add(controller)
       recheckLock.current = controller
@@ -610,14 +617,16 @@ export default function ReviewWorkspace({
           if (!item) {
             try { item = (await getH2ADryRunReview(auth, company, row.id, { signal: controller.signal }))?.item ?? null } catch (cause) {
               if (cause?.name === 'AbortError') throw cause
+              return { row, item: null, loadFailed: true }
             }
           }
           return { row, item }
         })
         if (!alive()) return
         const sendable = []
-        for (const { row, item } of prepared) {
-          if (item?.suggestedCandidateId && item.updatedAt) sendable.push({ row, request: { reviewId: row.id, candidateId: item.suggestedCandidateId,
+        for (const { row, item, loadFailed } of prepared) {
+          if (loadFailed) summary.failed += 1
+          else if (item?.suggestedCandidateId && item.updatedAt) sendable.push({ row, request: { reviewId: row.id, candidateId: item.suggestedCandidateId,
             expectedUpdatedAt: item.updatedAt, clientRequestId: crypto.randomUUID() } })
           else summary.skipped.push({ name: nameOf(row), reason: 'not_eligible' })
         }
@@ -683,6 +692,8 @@ export default function ReviewWorkspace({
   // One key handler that always reads the latest render. Keys reuse the record's own buttons so they follow the same rules.
   keyHandler.current = event => {
     if (event.defaultPrevented) return
+    // Another modal (the record's many-to-one approval) owns the keyboard while it is open.
+    if (!dialog && !help && (inside(event.target, '[role="dialog"]') || document.querySelector?.('[role="dialog"][aria-modal="true"]'))) return
     const action = shortcutFor(event, { kind, dialogOpen: Boolean(dialog) })
     if (!action) return
     if (action === 'dialogConfirm') { event.preventDefault(); confirmDialog(); return }
@@ -692,6 +703,7 @@ export default function ReviewWorkspace({
     if (action === 'escape') return
     if (action === 'todo') { selectView('todo'); return }
     if (action === 'undo') { doUndo(); return }
+    if (readOnly && WRITE_KEYS.has(action)) return
     if (view === 'todo' || !detail) return
     if (action === 'next' || action === 'prev') {
       event.preventDefault()
@@ -719,7 +731,7 @@ export default function ReviewWorkspace({
   const setFilter = (key, value) => setFilters(current => ({ ...current, [key]: value }))
   const activeFilters = Object.values(filters).filter(Boolean).length
   const prefix = kind === 'live' ? 'live' : 'sample'
-  const handlers = detail ? recordHandlers(detail) : null
+  const handlers = detail && !readOnly ? recordHandlers(detail) : null
 
   return <div ref={rootRef} className="space-y-4">
     {renderHeader?.(slotMeta)}
@@ -759,14 +771,14 @@ export default function ReviewWorkspace({
           <button type="button" onClick={() => setRetryToken(value => value + 1)} className={`${btn} mt-3`}>Reload queue</button></div>}
       </div>
 
-      {view === 'todo' ? <AlbiTodo session={session} companyId={companyId} tenantKey={tenantKey} />
+      {view === 'todo' ? <AlbiTodo session={session} companyId={companyId} tenantKey={tenantKey} readOnly={readOnly} />
         : loading || !visible ? <section className="rounded-xl border border-gray-200 bg-white px-5 py-10 text-sm text-gray-600" role="status">Loading reviews…</section>
           : loadError ? <section className="rounded-xl border border-red-200 bg-red-50 px-5 py-6" role="alert">
             <h3 className="font-semibold text-red-900">Reviews could not be loaded</h3><p className="mt-1 text-sm text-red-800">{loadError}</p>
             <button type="button" className={`${btn} mt-4`} onClick={() => setRetryToken(value => value + 1)}>Try again</button></section>
             : <div className="grid gap-4 lg:grid-cols-[20rem_minmax(0,1fr)] lg:items-start">
               <ReviewQueue items={items} bucket={view} selectedId={selectedId} pendingIds={pendingSet} sendingIds={sendingSet} errors={recordErrors} checked={checked}
-                bulkEnabled={isAdmin} onSelect={selectRecord} onToggle={toggle} onSelectAll={selectAll} bulkLinkCount={bulkTargets.length}
+                bulkEnabled={!readOnly} onSelect={selectRecord} onToggle={toggle} onSelectAll={selectAll} bulkLinkCount={bulkTargets.length}
                 onBulkLink={openBulkLink} onRecheckSelected={openRecheckSelected} busy={Boolean(bulk)}
                 nextCursor={nextCursor} loadingMore={loadingMore} loadMoreDisabled={Boolean(busyId) || Boolean(bulk)} onLoadMore={loadMore} />
               <div className="min-w-0 space-y-3">
@@ -776,7 +788,7 @@ export default function ReviewWorkspace({
                 {selectedId && recordErrors[selectedId] && <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800" role="alert">{recordErrors[selectedId]}</p>}
                 {detail ? <ReviewRecord item={detail} kind={kind} candidateIndex={candidateIndex} onPickCandidate={setCandidateIndex}
                   referralSourceId={referrals[detail.id] ?? ''} onReferral={value => setReferrals(current => ({ ...current, [detail.id]: value }))} referralRef={referralRef}
-                  pending={pendingSet.has(detail.id)} busy={busyId === detail.id || Boolean(bulk)} {...handlers}
+                  readOnly={readOnly} pending={pendingSet.has(detail.id)} busy={busyId === detail.id || Boolean(bulk)} {...handlers}
                   onRecheck={handleRecheck}
                   onOpenOrganization={target => openRelatedReview(target, prepareH2AOrganizationReview, result => result?.organization?.reviewId)}
                   onOpenMergedSurvivor={target => openRelatedReview(target, prepareH2AMergedSurvivorReview, result => result?.survivor?.reviewId)} />
@@ -792,7 +804,7 @@ export default function ReviewWorkspace({
 
     <UndoToasts entries={pending} onUndo={doUndo} onSendNow={sendNow} />
     <style>{'@keyframes h2a-undo { from { width: 100% } to { width: 0% } }'}</style>
-    {dialog && <ConfirmDialog dialog={dialog} panelRef={dialogPanelRef} cancelRef={dialogCancelRef} onConfirm={confirmDialog} onCancel={closeDialog} />}
+    {dialog && <ConfirmDialog dialog={dialog} panelRef={dialogPanelRef} confirmRef={dialogConfirmRef} onConfirm={confirmDialog} onCancel={closeDialog} />}
     <ShortcutHelp open={help} kind={kind} onClose={() => setHelp(false)} />
   </div>
 }

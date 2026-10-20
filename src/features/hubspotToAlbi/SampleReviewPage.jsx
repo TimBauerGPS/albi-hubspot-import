@@ -71,7 +71,7 @@ export default function SampleReviewPage() {
   }
 
   async function startRecheckAll() {
-    if (recheckAllStarting || !companyId) return
+    if (!isAdmin || recheckAllStarting || !companyId) return
     const startedFor = tenantKey
     setRecheckAllStarting(true); setRecheckAllError('')
     try {
@@ -128,7 +128,7 @@ export default function SampleReviewPage() {
             <p className="mt-1 max-w-2xl text-sm leading-6 text-gray-600">After correcting records in Albi or HubSpot, recheck every open record at once. Albi is read once for the whole batch, and nothing is written to Albi or HubSpot.</p>
           </div>
           <button type="button" className={`${secondaryButton} shrink-0`} onClick={startRecheckAll}
-            disabled={Boolean(meta?.loading) || recheckAllStarting || batchActive || Boolean(meta?.busy) || !progress?.needsReview}>
+            disabled={!isAdmin || Boolean(meta?.loading) || recheckAllStarting || batchActive || Boolean(meta?.busy) || !progress?.needsReview}>
             {batchActive ? 'Rechecking…' : recheckAllStarting ? 'Starting…' : 'Recheck all'}
           </button>
         </div>
@@ -148,7 +148,7 @@ export default function SampleReviewPage() {
     ? <p className="text-xs leading-5 text-gray-600">Review progress reflects individual rechecks. Original sample run totals remain unchanged.</p> : null
 
   return <ReviewWorkspace kind="sample" session={session} companyId={companyId} tenantRevision={tenantRevision}
-    completeTenantTransition={completeTenantTransition} isAdmin={isAdmin} initialFilters={initialQuery.current.filters} reloadToken={reloadToken}
+    completeTenantTransition={completeTenantTransition} isAdmin={isAdmin} readOnly={!isAdmin} initialFilters={initialQuery.current.filters} reloadToken={reloadToken}
     renderHeader={renderHeader} renderGate={renderGate} renderBeforeQueue={renderBeforeQueue} renderFooter={renderFooter}
     onBatchStarted={batch => watchBatch(batch, tenantKey)} />
 }
