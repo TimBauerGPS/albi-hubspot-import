@@ -833,3 +833,15 @@ test('Create selected asks for one referral source, starts a background batch an
   assert.match(ui.text(), /Create selected finished: 1 created, 1 skipped, 0 failed/)
   ui.unmount()
 })
+
+test('an organization whose only differences are HubSpot blanks can fill from Albi or just link', async () => {
+  const item = { ...base, objectType: 'companies', reason: 'nonblank_field_difference', proposedChanges: {},
+    sourceSnapshot: { id: '123', name: 'Mercury Insurance', phoneNumber: '(800) 503-3724' },
+    candidateSnapshots: [{ id: '575110', name: 'Mercury Insurance', phoneNumber: '(800) 503-3724', city: 'Santa Ana', zipcode: '92702', country: 'USA' }],
+    rankedCandidates: [{ id: '575110', matchReasons: ['same_name', 'same_phone'], warnings: [], strength: 'Likely', linkedElsewhere: 0 }], suggestedCandidateId: null }
+  const calls = []
+  const ui = await mount(item, { onIgnoreAndLink: (target, fields) => calls.push([target.id, fields]) })
+  assert.ok(ui.find('button', 'Use Albi'))
+  ui.find('button', 'Link and ignore differences').props.onClick()
+  assert.deepEqual(j(calls), [['575110', ['city', 'country', 'zipcode']]])
+})

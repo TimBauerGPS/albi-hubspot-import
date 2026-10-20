@@ -220,7 +220,7 @@ export default function ReviewRecord({
     {capability.canResolve && <ResolutionBar disabled={disabled} fieldMode={fieldMode} applyDisabled={!allChosen}
       onAllHubSpot={() => setAll('hubspot')} onAllAlbi={() => setAll('albi')}
       showIgnoreAndLink={fieldMode && review.actions.includes('link_existing') && Boolean(candidates[0]?.id)}
-      onIgnoreAndLink={() => onIgnoreAndLink?.(candidates[0], review.resolutionFields.map(field => field.key).sort())}
+      onIgnoreAndLink={() => onIgnoreAndLink?.(candidates[0], [...new Set([...review.resolutionFields, ...fillable].map(field => field.key))].sort())}
       onApplyFields={() => onApplyFields?.(Object.fromEntries([...review.resolutionFields.map(field => [field.key, fieldChoices[field.key]]),
         ...filledChoices.map(key => [key, 'albi'])]))}
       suggestion={suggestion} onAccept={() => suggestion && requestAccept(suggestion.candidate, suggestion.emailMatch)}
