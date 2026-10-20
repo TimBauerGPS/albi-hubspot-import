@@ -172,11 +172,14 @@ export class AlbiClient {
       (async () => this.#scopedRequest(await this.#path('options/salespeople'), { operation: 'listSalespeople' }, SCOPES.listSalespeople))(),
     ])
     const relationshipTypes = optionList(types), relationshipStatuses = optionList(statuses)
-    if (!Array.isArray(raw)) malformed('listSalespeople')
-    // A salesperson with no name can never be matched by name, so it is left out rather than failing every create.
-    const salespeople = raw.flatMap(value => {
-      const name = text(value?.name) ? value.name : [value?.firstName, value?.lastName].filter(text).join(' ')
-      return name.trim() ? [{ id: responseId(value?.id, 'listSalespeople'), label: name.trim() }] : []
+    const list = Array.isArray(raw) ? raw : isRecord(raw) && Array.isArray(raw.data) ? raw.data : isRecord(raw) && Array.isArray(raw.items) ? raw.items : null
+    if (!list) malformed('listSalespeople', 'salespeople_not_list')
+    // A salesperson with no name or no usable id can never be matched or sent (Albi's create takes an integer
+    // salesperson id), so it is left out rather than failing every create.
+    const salespeople = list.flatMap(value => {
+      if (!isRecord(value) || !/^[1-9][0-9]*$/.test(String(value.id ?? ''))) return []
+      const name = text(value.name) ? value.name : [value.firstName, value.lastName].filter(text).join(' ')
+      return name.trim() ? [{ id: String(value.id), label: name.trim() }] : []
     })
     return { relationshipTypes, relationshipStatuses, salespeople }
   }

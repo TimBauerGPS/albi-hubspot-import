@@ -42,7 +42,8 @@ function withEvidence(copy, evidence) {
   if (!copy || !evidence || !Object.hasOwn(EVIDENCE_STEPS, evidence.step)) return copy
   const code = EVIDENCE_TAG.test(evidence.code ?? '') ? evidence.code : null
   const status = Number.isInteger(evidence.status) && evidence.status >= 100 && evidence.status <= 599 ? `HTTP ${evidence.status}` : null
-  const extra = [code, status].filter(Boolean).join(', ')
+  const issue = EVIDENCE_TAG.test(evidence.issue ?? '') ? evidence.issue : null
+  const extra = [code, issue, status].filter(Boolean).join(', ')
   return `${copy} Stopped at: ${EVIDENCE_STEPS[evidence.step]}${extra ? ` (${extra})` : ''}.`
 }
 

@@ -43,6 +43,7 @@ export function evidenceOf(error) {
   return { ...(TAG.test(error?.h2aStep ?? '') ? { step: error.h2aStep } : {}),
     ...(error?.name === 'ApiError' && TAG.test(error.code ?? '') ? { code: error.code } : {}),
     ...(error?.name === 'ApiError' && TAG.test(error.operation ?? '') ? { operation: error.operation } : {}),
+    ...(error?.name === 'ApiError' && TAG.test(error.protocolIssue ?? '') ? { issue: error.protocolIssue } : {}),
     ...(status ? { status } : {}) }
 }
 

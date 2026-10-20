@@ -312,9 +312,9 @@ test('a failed check names the read that failed and the provider error code', as
     repository: { getMappings: async () => ({ ...mappings, contacts: [], options: [{ mapping_kind: 'default_contact_type', albi_id: '12', confirmed: true }] }) },
     reads: { ...reads, hubspotRead: { ...reads.hubspotRead, getContacts: async () => [{ id: '123', properties: { firstname: 'Alex', lastname: 'Stone' } }],
       getOwnerId: async () => '99', ...hubspotRead } } })
-  const owners = await load({ listOwners: async () => { throw new ApiError('validation', { operation: 'listOwners', code: 'malformed_response', status: 200 }) } })
+  const owners = await load({ listOwners: async () => { throw new ApiError('validation', { operation: 'listOwners', code: 'malformed_response', status: 200, protocolIssue: 'data_invalid' }) } })
   assert.deepEqual(owners.forceCreateReadiness, { eligible: false, ready: false, blockedReason: 'evidence_unavailable',
-    evidence: { step: 'hubspot_owners', code: 'malformed_response', operation: 'listOwners', status: 200 } })
+    evidence: { step: 'hubspot_owners', code: 'malformed_response', operation: 'listOwners', issue: 'data_invalid', status: 200 } })
   const owner = await load({ getOwnerId: async () => { throw new ApiError('rate_limit', { operation: 'getOwnerId', status: 429 }) } })
   assert.deepEqual(owner.forceCreateReadiness.evidence, { step: 'hubspot_owner', code: 'rate_limit', operation: 'getOwnerId', status: 429 })
   // A plain error message is never copied into the projection.

@@ -128,8 +128,8 @@ test('blocked record shows named blocked copy', async () => {
 
 test('a check that failed or ran out of time names the read it stopped at', async () => {
   const failed = await html({ ...none, createReadiness: { ready: false, blockedReason: 'evidence_unavailable',
-    evidence: { step: 'hubspot_owners', code: 'malformed_response', operation: 'listOwners', status: 200 } } })
-  assert.match(failed, /Stopped at: reading HubSpot’s owner list \(malformed_response, HTTP 200\)/)
+    evidence: { step: 'hubspot_owners', code: 'malformed_response', operation: 'listOwners', issue: 'data_invalid', status: 200 } } })
+  assert.match(failed, /Stopped at: reading HubSpot’s owner list \(malformed_response, data_invalid, HTTP 200\)/)
   const slow = await mount({ ...base, suggestedCandidateId: null, forceCreateReadiness: { eligible: true, ready: false, blockedReason: 'evidence_unavailable',
     evidence: { step: 'albi_create_options', code: 'timeout' } } }, { referralSourceId: '5' })
   assert.match(slow.text(), /Stopped at: reading Albi’s types, statuses and salespeople \(timeout\)/)

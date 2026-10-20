@@ -482,6 +482,12 @@ test('Albi create options load types, statuses and salespeople by name', async (
   const options = await new AlbiClient({ apiKey: 'k', fetch: f.fetch }).listCreateOptions()
   // An unnamed salesperson can never be matched by name, so it is left out instead of failing the whole list.
   assert.deepEqual(options.salespeople, [{ id: '70', label: 'Ali Brown' }, { id: '71', label: 'Sam Green' }, { id: '73', label: 'Solo' }])
+  // Entries without a usable id (Albi's create takes an integer salesperson id) are left out; a wrapped list is read.
+  const g = transport([accessibleCompany, [{ id: 12, name: 'Referrer' }], [{ id: 2, name: 'Active' }],
+    { data: [{ id: null, name: 'Unassigned' }, { id: 0, name: 'Nobody' }, 'x', { id: 'a1b2', name: 'Guid Person' }, { id: 74, name: 'Real Person' }] }])
+  assert.deepEqual((await new AlbiClient({ apiKey: 'k', fetch: g.fetch }).listCreateOptions()).salespeople, [{ id: '74', label: 'Real Person' }])
+  const h = transport([accessibleCompany, [{ id: 12, name: 'Referrer' }], [{ id: 2, name: 'Active' }], { unexpected: true }])
+  await assert.rejects(new AlbiClient({ apiKey: 'k', fetch: h.fetch }).listCreateOptions(), { code: 'malformed_response', protocolIssue: 'salespeople_not_list' })
   assert.deepEqual(options.relationshipTypes, [{ id: '12', label: 'Referrer' }])
   assert.deepEqual(options.relationshipStatuses, [{ id: '2', label: 'Active' }])
   assert.deepEqual(f.calls.slice(1).map(call => call.url.pathname.split('/').at(-1)), ['relationship-types', 'relationship-statuses', 'salespeople'])
