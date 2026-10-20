@@ -485,3 +485,27 @@ test('reviewing a merge survivor captures its review once and selects it', async
   assert.equal(known.detail().props.item.id, 'known-survivor')
   known.unmount()
 })
+
+test('a link that leaves the record ready to recheck rechecks it automatically, once', async () => {
+  const flush = async ui => { for (let i = 0; i < 6; i++) await ui.flush() }
+  const ui = await mount({ resolveH2ADryRunReview: () => Promise.resolve({ resolution: { status: 'ready_to_recheck' } }),
+    recheckH2ADryRunReview: (_session, _company, input) => Promise.resolve({ item: { ...full(input.reviewId), status: 'cleared' } }) })
+  await ui.detail().props.onLink({ id: 'albi-1' }, { approveManyToOne: true }); await flush(ui)
+  const rechecks = ui.calls.filter(call => call.name === 'recheckH2ADryRunReview')
+  assert.equal(rechecks.length, 1)
+  assert.equal(rechecks[0].args[2].reviewId, 'review-1')
+  ui.unmount()
+  const waiting = await mount({ resolveH2ADryRunReview: () => Promise.resolve({ resolution: { status: 'waiting_on_albi' } }) })
+  await waiting.detail().props.onLink({ id: 'albi-1' }, { approveManyToOne: true }); await flush(waiting)
+  assert.equal(waiting.calls.filter(call => call.name === 'recheckH2ADryRunReview').length, 0)
+  waiting.unmount()
+})
+
+test('a failed automatic recheck keeps the link and asks for a manual recheck', async () => {
+  const flush = async ui => { for (let i = 0; i < 6; i++) await ui.flush() }
+  const ui = await mount({ resolveH2ADryRunReview: () => Promise.resolve({ resolution: { status: 'ready_to_recheck' } }),
+    recheckH2ADryRunReview: () => Promise.reject(Object.assign(new Error('Unable to recheck this sample review.'), { status: 502 })) })
+  await ui.detail().props.onLink({ id: 'albi-1' }, { approveManyToOne: true }); await flush(ui)
+  assert.match(ui.text(), /automatic recheck didn.t finish/i)
+  ui.unmount()
+})

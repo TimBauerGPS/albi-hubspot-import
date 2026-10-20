@@ -321,7 +321,7 @@ export default function ReviewWorkspace({
       if (same(startedFor)) setNotice('The action was saved, but the record could not be reloaded. Reload the queue to see its current state.')
       return
     }
-    if (!same(startedFor) || !item) return
+    if (!same(startedFor) || !item) return item
     writeDetail(item, true)
     const bucket = viewRef.current
     if (item.triageBucket && item.triageBucket !== bucket) {
@@ -330,6 +330,21 @@ export default function ReviewWorkspace({
         [item.triageBucket]: Number(counts[item.triageBucket] ?? 0) + 1 } : counts)
       setChecked(current => { if (!current.has(reviewId)) return current; const next = new Set(current); next.delete(reviewId); return next })
     } else replaceItem(item)
+    return item
+  }
+
+  // A link or create that leaves the record ready to recheck is rechecked in the background, so the record settles
+  // without a second visit. Failures keep the saved action and only ask for a manual recheck.
+  async function autoRecheck(reviewId, expectedUpdatedAt, startedFor, auth, company) {
+    if (!expectedUpdatedAt) return
+    try {
+      await recheckH2ADryRunReview(auth, company, { reviewId, expectedUpdatedAt })
+      await afterWrite(reviewId, startedFor, auth, company)
+    } catch (error) {
+      if (!same(startedFor) || error?.name === 'AbortError') return
+      if (error?.status === 409) { refreshRecord(reviewId, startedFor); return }
+      setRecordErrors(current => ({ ...current, [reviewId]: 'Saved. The automatic recheck didn’t finish; Recheck this record to confirm it.' }))
+    }
   }
 
   function handleSendError(reviewId, error, startedFor) {
@@ -351,8 +366,9 @@ export default function ReviewWorkspace({
   function resolveRun(item, decision) {
     const startedFor = tenantKey, auth = session, company = companyId, clientRequestId = requestIdFor(item, decision)
     return async () => {
-      await resolveH2ADryRunReview(auth, company, { reviewId: item.id, expectedUpdatedAt: item.updatedAt, clientRequestId, ...decision })
-      await afterWrite(item.id, startedFor, auth, company)
+      const result = await resolveH2ADryRunReview(auth, company, { reviewId: item.id, expectedUpdatedAt: item.updatedAt, clientRequestId, ...decision })
+      const fresh = await afterWrite(item.id, startedFor, auth, company)
+      if (result?.resolution?.status === 'ready_to_recheck') autoRecheck(item.id, fresh?.updatedAt ?? item.updatedAt, startedFor, auth, company)
     }
   }
   function skipRun(item) {
@@ -381,7 +397,10 @@ export default function ReviewWorkspace({
         await refreshRecord(item.id, startedFor)
         return
       }
-      await afterWrite(item.id, startedFor, auth, company)
+      const fresh = await afterWrite(item.id, startedFor, auth, company)
+      if (result?.contact?.resolution?.status === 'ready_to_recheck' || result?.resolution?.status === 'ready_to_recheck') {
+        autoRecheck(item.id, fresh?.updatedAt ?? item.updatedAt, startedFor, auth, company)
+      }
     }
   }
 
