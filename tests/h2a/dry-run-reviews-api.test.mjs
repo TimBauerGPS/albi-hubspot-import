@@ -26,7 +26,7 @@ function fixture() {
     getMappings: async () => ({ contacts: [], organizations: [], options: [] }),
     applyDryRunRecheck: async () => ({ review: { ...row, status: 'no_longer_in_scope', recheck_outcome: 'source_missing' } }),
   }
-  const options = { repository, requireRequest: async (_event, auth) => { calls.push(['auth', auth]); return { companyId: 'authorized-company', userId: '00000000-0000-4000-8000-000000000002' } },
+  const options = { repository, requireRequest: async (_event, auth) => { calls.push(['auth', auth]); return { companyId: 'authorized-company', userId: '00000000-0000-4000-8000-000000000002', role: 'admin', isSuperAdmin: false } },
     makeClients: async company => { calls.push(['clients', company]); return { hubspot: { getContacts: async () => [], getCompanies: async () => [], getAssociations: async () => [] }, albi: { listReferralSources: async () => [{ id: '5', label: 'Network' }], listCreateOptions: async () => ({ relationshipTypes: [{ id: '12', label: 'Referrer' }], relationshipStatuses: [{ id: '2', label: 'Active' }], salespeople: [] }), listContacts: async () => {}, listOrganizations: async () => {} } } } }
   return { calls, row, repository, options, handler: createDryRunReviewHandler(options) }
 }
@@ -620,4 +620,79 @@ test('a live survivor without an open row is a clear waiting state, not an error
   const stale = liveMergedFixture()
   stale.repository.getReview = async () => liveRow({ updated_at: '2026-10-12T11:00:00.000Z' })
   assert.equal((await prepareSurvivor(stale)).statusCode, 409)
+})
+
+// Conflicts is member-reachable for read-only inspection (the legacy conflicts GET allowed members):
+// live list and detail need no admin and write nothing; the sample queue and every POST stay admin-only.
+function memberFixture() {
+  const f = fixture()
+  const writes = []
+  f.options.env = { H2A_REVIEW_RESOLUTION_MODE: 'admins' }
+  f.options.requireRequest = async (_event, auth) => {
+    f.calls.push(['auth', auth])
+    if (auth.requireAdmin) throw new H2AAuthError(403, 'Administrator access is required.')
+    return { companyId: 'authorized-company', userId: '00000000-0000-4000-8000-000000000003', role: 'member', isSuperAdmin: false }
+  }
+  const row = liveRow()
+  f.repository.getReview = async () => row
+  f.repository.listDryRunReviews = async (...args) => { f.calls.push(['list', ...args]); return { items: [row], hasMore: false, bucketCounts: { quick: 1, todo: 0, decision: 0, blocked: 0, done: 0 } } }
+  // A completed resolution left open would be closed, and the stale 'quick' bucket refreshed, for an admin.
+  f.repository.getCurrentReviewResolution = async () => ({ id: reviewId, company_id: 'authorized-company', portal_id: '123', review_id: reviewId,
+    action: 'link_existing', status: 'completed' })
+  f.repository.listReviewResolutionEvents = async () => []
+  f.repository.setReviewTriage = async (...args) => { writes.push(['triage', ...args]) }
+  f.repository.closeLiveReview = async (...args) => { writes.push(['close', ...args]); return { closedConflictIds: [], resumeIds: [], replayed: false } }
+  f.repository.appendDryRunReviewEvent = async (...args) => { writes.push(['event', ...args]); return { id: 'event' } }
+  return { ...f, writes, liveReview: row }
+}
+
+test('a member can read the live list and a live detail, with no writes and no provider reads', async () => {
+  const f = memberFixture()
+  const list = await f.handler(get({ kind: 'live' }))
+  assert.equal(list.statusCode, 200)
+  assert.equal(JSON.parse(list.body).items[0].reviewKind, 'live')
+  const detail = await f.handler(get({ reviewId }))
+  assert.equal(detail.statusCode, 200)
+  const item = JSON.parse(detail.body).item
+  assert.equal(item.reviewKind, 'live')
+  assert.equal(item.resolutionCapability.canResolve, false)
+  assert.deepEqual(f.writes, [])
+  assert.equal(f.calls.some(call => call[0] === 'clients'), false)
+  assert.ok(f.calls.filter(call => call[0] === 'auth').every(call => call[1].requireAdmin === false))
+})
+
+test('the same live detail refreshes triage and settles the close for an admin', async () => {
+  const f = memberFixture()
+  f.options.requireRequest = async () => ({ companyId: 'authorized-company', userId: '00000000-0000-4000-8000-000000000002', role: 'admin', isSuperAdmin: false })
+  assert.equal((await f.handler(get({ reviewId }))).statusCode, 200)
+  assert.ok(f.writes.some(write => write[0] === 'close'))
+})
+
+test('a member cannot read the sample queue or a sample detail, and every POST stays admin-only', async () => {
+  const f = memberFixture()
+  const list = await f.handler(get({}))
+  assert.equal(list.statusCode, 403)
+  assert.equal(JSON.parse(list.body).error, 'Administrator access is required.')
+  f.repository.getReview = async () => ({ ...f.row, review_kind: 'sample' })
+  const detail = await f.handler(get({ reviewId }))
+  assert.equal(detail.statusCode, 403)
+  assert.equal(f.calls.some(call => ['detail', 'events', 'sample'].includes(call[0])), false)
+  f.repository.getReview = async () => f.liveReview
+  const post = await f.handler({ httpMethod: 'POST', body: JSON.stringify({ companyId: 'selected', reviewId, expectedUpdatedAt: stamp }) })
+  assert.equal(post.statusCode, 403)
+  assert.deepEqual(f.writes, [])
+  assert.equal(f.calls.filter(call => call[0] === 'auth').at(-1)[1].requireAdmin, true)
+})
+
+test('the live list reads only the configured portal and is empty without one', async () => {
+  const f = fixture()
+  f.repository.listDryRunReviews = async (...args) => { f.calls.push(['list', ...args]); return { items: [liveRow()], hasMore: false } }
+  assert.equal((await f.handler(get({ kind: 'live' }))).statusCode, 200)
+  assert.equal(f.calls.find(call => call[0] === 'list')[3].portalId, '123')
+  const none = fixture()
+  none.repository.getConfig = async () => ({ initial_start_locked_at: '2026-10-01T00:00:00Z', portal_id: null })
+  none.repository.listDryRunReviews = async () => { throw Error('no portal means no live rows to list') }
+  const response = await none.handler(get({ kind: 'live' }))
+  assert.equal(response.statusCode, 200)
+  assert.deepEqual(JSON.parse(response.body).items, [])
 })

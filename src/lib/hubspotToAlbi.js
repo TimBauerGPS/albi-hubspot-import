@@ -14,6 +14,7 @@ const SAFE_SERVER_MESSAGES = Object.freeze({
   'Review resolution is unavailable.': 'Review resolution is unavailable.',
   'Super administrator access is required.': 'Super administrator access is required.',
   'This sample review changed. Refresh and confirm the resolution again.': 'This sample review changed. Refresh and confirm the resolution again.',
+  'This record changed. Refresh and confirm the resolution again.': 'This record changed. Refresh and confirm the resolution again.',
   'Unable to resolve this sample review.': 'Unable to resolve this sample review.',
   'A dry run is required before live activation.': 'A dry run is required before live activation.',
   'A completed dry run is required before live activation.': 'A completed dry run is required before live activation.',

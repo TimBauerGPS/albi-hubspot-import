@@ -1467,6 +1467,7 @@ test('sample missing HubSpot organization captures its underlying identity even 
     run_id: 'sample-run', portal_id: '123', object_type: 'companies', source_id: '20',
     reason: 'missing_hubspot_company', conflict_type: 'missing_source', source_snapshot: { id: '20' },
     candidate_snapshots: [], match_evidence: { evidence: [] }, proposed_changes: { updates: {}, conflicts: {}, unchanged: [] },
+    triage_bucket: 'decision', triage_details: {},
   } })
 })
 
@@ -1514,4 +1515,32 @@ test('a different portal mapping with the same source ID does not change safe cu
   const result = await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
   assert.equal(result.status, 'completed')
   assert.equal(deps.items.find(row => row.object_type === 'contacts').albi_target_id, '200')
+})
+
+// Sample capture computes triage (no extra provider reads, so readiness stays unknown).
+function exactEmailSample(mappings = []) {
+  const deps = reviewSampleFixture({ companyIds: [], albiContacts: [{ id: '200', firstName: 'First10', lastName: 'Last10',
+    email: '10@example.com', phoneNumber: '4155550123' }] })
+  const getContacts = deps.hubspot.getContacts
+  deps.hubspot.getContacts = async ids => (await getContacts(ids)).map(row => ({ ...row, properties: { ...row.properties, phone: '415-555-0123 ext 5' } }))
+  const getMappings = deps.repository.getMappings
+  deps.repository.getMappings = async (...args) => { const all = await getMappings(...args); return { ...all, contacts: [...all.contacts, ...mappings] } }
+  return deps
+}
+
+test('a captured exact-email sample row is a quick link', async () => {
+  const deps = exactEmailSample()
+  await runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'manual' })
+  assert.equal(deps.captures.length, 1)
+  assert.equal(deps.captures[0].row.reason, 'unsupported_phone_evidence')
+  assert.equal(deps.captures[0].row.triage_bucket, 'quick')
+  assert.deepEqual(deps.captures[0].row.triage_details, { quickKind: 'link' })
+})
+
+test('sample capture triage ranks with the run mappings: a candidate linked elsewhere is a decision', async () => {
+  const deps = exactEmailSample([{ portal_id: '123', hubspot_id: '99', albi_contact_id: '200' }])
+  await runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'manual' })
+  assert.equal(deps.captures.length, 1)
+  assert.equal(deps.captures[0].row.triage_bucket, 'decision')
+  assert.deepEqual(deps.captures[0].row.triage_details, {})
 })

@@ -369,3 +369,16 @@ test('bulk_link validates items, allowlists fields, and is admin-only', async ()
   for (const body of bad) assert.equal((await f().request(body)).statusCode, 400, JSON.stringify(body).slice(0, 80))
   assert.equal((await fixture({ role: 'member' }).request(bulk())).statusCode, 403)
 })
+
+test('a live row\'s 409 keeps kind-neutral copy instead of the sample review fallback', async () => {
+  const live = 'This record changed. Refresh and confirm the resolution again.'
+  const passed = fixture()
+  passed.options.executeResolution = async () => { throw new H2AReviewError(409, live) }
+  assert.equal(JSON.parse((await passed.request()).body).error, live)
+  const other = fixture()
+  other.options.executeResolution = async () => { throw Object.assign(new H2AReviewError(409, 'secret live details'), { reviewKind: 'live' }) }
+  const response = await other.request()
+  assert.equal(response.statusCode, 409)
+  assert.equal(JSON.parse(response.body).error, live)
+  assert.equal(response.body.includes('secret'), false)
+})

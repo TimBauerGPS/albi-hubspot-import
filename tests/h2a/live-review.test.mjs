@@ -474,3 +474,129 @@ test('backfill computes create readiness for a new record with the shared captur
   assert.deepEqual([bySource['12'].triage_bucket, bySource['12'].triage_details], ['blocked', { blockedReason: 'organization_not_synced' }])
   assert.deepEqual([reads.albiOptions, reads.referral], [1, 1])
 })
+
+// Link-after-close race: a reviewer closes the row between capture's upsert and its link. The newly
+// linked conflict must close with the row's original outcome instead of staying open forever.
+function lateLinkFixture() {
+  const store = liveCloseStore({ reviewId: liveReviewId, conflictIds: ['c-1'] })
+  const attach = conflictId => store.state.conflicts.push({ id: conflictId, status: 'open', resolution_action: null, object_type: 'contacts', source_id: '42' })
+  const repository = { ...store.methods,
+    upsertLiveReview: async () => ({ id: liveReviewId, inserted: false }),
+    linkLiveReviewConflict: async (companyId, reviewId, conflictId) => {
+      if (store.state.review.status === 'needs_review') {
+        await store.methods.closeLiveReview(companyId, { reviewId, actorId: closeActor, outcome: 'resolved', resolutionAction: 'link_existing' })
+      }
+      if (store.state.conflicts.some(conflict => conflict.id === conflictId)) return false
+      attach(conflictId)
+      return true
+    },
+    getReview: async () => structuredClone(store.state.review),
+    findLiveReviewConflictLink: async (_company, conflictId) => store.state.conflicts.some(conflict => conflict.id === conflictId)
+      ? { review_id: liveReviewId, conflict_id: conflictId } : null,
+  }
+  return { store, attach, deps: { repository, dispatchResume: store.dispatchResume } }
+}
+const lateCapture = { ...base, reason: 'name_only_candidate', conflictType: 'contact_match', candidates: [{ id: '200', firstName: 'Ada', lastName: 'Lovelace' }] }
+
+test('a conflict linked after its row closed is closed with the row\'s original outcome and resumed once', async () => {
+  const { store, deps } = lateLinkFixture()
+  const result = await captureLiveReview(deps, { ...lateCapture, conflictId: 'c-2' })
+  assert.equal(result.linked, true)
+  assert.deepEqual(result.lateClose.lateClosedConflictIds, ['c-2'])
+  const late = store.state.conflicts.find(conflict => conflict.id === 'c-2')
+  assert.deepEqual([late.status, late.resolution_action, late.resolved_by], ['resolved', 'link_existing', closeActor])
+  assert.equal(store.state.resumes.filter(resume => resume.conflict_id === 'c-2').length, 1)
+  assert.ok(store.state.dispatched.includes(store.state.resumes.find(resume => resume.conflict_id === 'c-2').id))
+  // The replay uses the recorded close, not anything capture supplies.
+  assert.deepEqual(store.state.closeCalls.at(-1), { companyId: 'company-1', reviewId: liveReviewId, actorId: closeActor,
+    outcome: 'resolved', resolutionAction: 'link_existing' })
+  // Idempotent: capturing the same conflict again closes and resumes nothing new.
+  const again = await captureLiveReview(deps, { ...lateCapture, conflictId: 'c-2' })
+  assert.equal(again.linked, false)
+  assert.deepEqual(again.lateClose.lateClosedConflictIds, [])
+  assert.equal(store.state.resumes.length, 2)
+  assert.equal(store.state.conflictEvents.length, 2)
+})
+
+test('a conflict already linked to a closed row (an earlier replay failed) is closed by a later capture', async () => {
+  const { store, attach, deps } = lateLinkFixture()
+  await store.methods.closeLiveReview('company-1', { reviewId: liveReviewId, actorId: closeActor, outcome: 'skipped', resolutionAction: 'skip' })
+  attach('c-3')
+  const result = await captureLiveReview(deps, { ...lateCapture, conflictId: 'c-3' })
+  assert.equal(result.linked, false)
+  assert.deepEqual(result.lateClose.lateClosedConflictIds, ['c-3'])
+  const late = store.state.conflicts.find(conflict => conflict.id === 'c-3')
+  assert.deepEqual([late.status, late.resolution_action], ['skipped', 'skip'])
+  assert.equal(store.state.resumes.length, 0, 'a skipped row resumes nothing')
+})
+
+test('an open row after linking needs no replay', async () => {
+  const store = liveCloseStore({ reviewId: liveReviewId, conflictIds: [] })
+  const deps = { repository: { ...store.methods, upsertLiveReview: async () => ({ id: liveReviewId, inserted: true }),
+    linkLiveReviewConflict: async () => true, getReview: async () => structuredClone(store.state.review) }, dispatchResume: store.dispatchResume }
+  const result = await captureLiveReview(deps, { ...lateCapture, conflictId: 'c-9' })
+  assert.equal(result.lateClose, undefined)
+  assert.equal(store.state.closeCalls.length, 0)
+})
+
+test('the close model replays a late-linked conflict with the recorded outcome, whatever the caller passes', async () => {
+  const store = liveCloseStore({ reviewId: liveReviewId, conflictIds: ['c-1'] })
+  await store.methods.closeLiveReview('company-1', { reviewId: liveReviewId, actorId: closeActor, outcome: 'resolved', resolutionAction: 'create_new' })
+  store.state.conflicts.push({ id: 'c-2', status: 'open', resolution_action: null, object_type: 'contacts', source_id: '42' })
+  const replay = await store.methods.closeLiveReview('company-1', { reviewId: liveReviewId, actorId: 'someone-else', outcome: 'skipped', resolutionAction: 'skip' })
+  assert.equal(replay.replayed, true)
+  assert.deepEqual(replay.lateClosedConflictIds, ['c-2'])
+  assert.deepEqual(replay.closedConflictIds, ['c-1', 'c-2'])
+  assert.deepEqual(store.state.conflicts.map(conflict => [conflict.id, conflict.status, conflict.resolution_action, conflict.resolved_by]),
+    [['c-1', 'resolved', 'create_new', closeActor], ['c-2', 'resolved', 'create_new', closeActor]])
+  assert.equal(replay.resumeIds.length, 2)
+})
+
+test('repository getLiveReviewClose reads the recorded close event of a live row', async () => {
+  const calls = []
+  const rows = [{ event_type: 'cleared', actor_id: closeActor, sanitized_details: { outcome: 'resolved_by_sync', resolutionAction: null } }]
+  const client = { from(table) {
+    const call = { table, steps: [] }; calls.push(call)
+    const query = { select(...args) { call.steps.push(['select', ...args]); return query }, eq(...args) { call.steps.push(['eq', ...args]); return query },
+      in(...args) { call.steps.push(['in', ...args]); return query }, order(...args) { call.steps.push(['order', ...args]); return query },
+      limit(...args) { call.steps.push(['limit', ...args]); return query },
+      then: (resolve, reject) => Promise.resolve({ data: rows, error: null }).then(resolve, reject) }
+    return query
+  }, rpc: async () => { throw Error('unexpected rpc') } }
+  const repository = createH2ARepository(client)
+  assert.deepEqual(await repository.getLiveReviewClose('company-1', liveReviewId),
+    { actorId: closeActor, outcome: 'resolved_by_sync', resolutionAction: null })
+  assert.equal(calls[0].table, 'h2a_dry_run_review_events')
+  assert.deepEqual(calls[0].steps.filter(step => step[0] === 'eq'), [['eq', 'company_id', 'company-1'], ['eq', 'review_id', liveReviewId]])
+  assert.deepEqual(calls[0].steps.find(step => step[0] === 'in'), ['in', 'event_type', ['cleared', 'no_longer_in_scope']])
+  rows.splice(0, 1, { event_type: 'cleared', actor_id: closeActor, sanitized_details: { outcome: 'bogus' } })
+  assert.equal(await repository.getLiveReviewClose('company-1', liveReviewId), null)
+})
+
+test('backfill linking a conflict to a row that closes meanwhile replays the close too', async () => {
+  const { store, deps } = lateLinkFixture()
+  const conflict = { id: 'c-2', object_type: 'contacts', status: 'open', reason: 'name_only_candidate', conflict_type: 'contact_match',
+    run_id: 'run-1', portal_id: '123', source_id: '42', created_at: '2026-10-19T12:00:00.000Z' }
+  Object.assign(deps.repository, { listOpenSourceConflicts: async () => ({ items: [conflict], hasMore: false }),
+    findOpenLiveReviewBySource: async () => ({ id: liveReviewId }) })
+  const result = await backfillLiveReviews(deps, { companyId: 'company-1' })
+  assert.equal(result.linked, 1)
+  assert.equal(result.failed, 0)
+  assert.equal(store.state.conflicts.find(item => item.id === 'c-2').status, 'resolved')
+  assert.equal(store.state.resumes.filter(resume => resume.conflict_id === 'c-2').length, 1)
+})
+
+test('backfill heals an open conflict stranded on a closed row instead of skipping it', async () => {
+  const { store, attach, deps } = lateLinkFixture()
+  await store.methods.closeLiveReview('company-1', { reviewId: liveReviewId, actorId: closeActor, outcome: 'resolved', resolutionAction: 'create_new' })
+  attach('c-4')
+  const conflict = { id: 'c-4', object_type: 'contacts', status: 'open', reason: 'name_only_candidate', conflict_type: 'contact_match',
+    run_id: 'run-1', portal_id: '123', source_id: '42', created_at: '2026-10-19T12:00:00.000Z' }
+  Object.assign(deps.repository, { listOpenSourceConflicts: async () => ({ items: [conflict], hasMore: false }),
+    findOpenLiveReviewBySource: async () => { throw Error('a linked conflict is never re-captured') } })
+  const result = await backfillLiveReviews(deps, { companyId: 'company-1' })
+  assert.deepEqual([result.captured, result.linked, result.failed], [0, 0, 0])
+  const healed = store.state.conflicts.find(item => item.id === 'c-4')
+  assert.deepEqual([healed.status, healed.resolution_action], ['resolved', 'create_new'])
+  assert.equal(store.state.resumes.filter(resume => resume.conflict_id === 'c-4').length, 1)
+})

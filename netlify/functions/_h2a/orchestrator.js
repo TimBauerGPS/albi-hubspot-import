@@ -9,6 +9,8 @@ import { resolveActivityType, resolveContactType } from './options.js'
 import { reserveDelivery, completeDelivery } from './deliveries.js'
 import { captureLiveReview } from './liveReview.js'
 import { computeCaptureReadiness } from './createDefaults.js'
+import { computeTriage } from './triage.js'
+import { rankReviewCandidates } from './ranking.js'
 
 const text = value => value == null ? '' : String(value).trim()
 const sourceFields = record => record?.properties ?? record ?? {}
@@ -110,13 +112,20 @@ async function conflict(deps, ctx, data) {
     const identity = JSON.stringify([portalId, data.objectType, data.sourceId])
     if (!ctx.capturedReviewIdentities.has(identity)) {
       try {
+        const sourceSnapshot = safeReviewSnapshot(data.source ?? { id: data.sourceId }, data.objectType)
+        const candidateSnapshots = safeReviewCandidates(data.candidates ?? [], data.objectType)
+        // Triage at capture, like live capture. Readiness stays unknown: a sample makes no extra provider reads.
+        const mappings = data.objectType === 'companies' ? ctx.mappings?.organizations : ctx.mappings?.contacts
+        const triage = computeTriage({ row: { status: 'needs_review', reason: data.reason },
+          ranking: rankReviewCandidates({ objectType: data.objectType, source: sourceSnapshot, candidates: candidateSnapshots,
+            mappings: Array.isArray(mappings) ? mappings : [], portalId, sourceId: data.sourceId }) })
         await deps.repository.recordDryRunReview(companyId, {
           run_id: runId, portal_id: portalId, object_type: data.objectType, source_id: data.sourceId,
           reason: data.reason, conflict_type: data.type,
-          source_snapshot: safeReviewSnapshot(data.source ?? { id: data.sourceId }, data.objectType),
-          candidate_snapshots: safeReviewCandidates(data.candidates ?? [], data.objectType),
+          source_snapshot: sourceSnapshot, candidate_snapshots: candidateSnapshots,
           match_evidence: { evidence: safeReviewEvidence(data.evidence) },
           proposed_changes: safeReviewChanges(data.proposedChanges, data.objectType),
+          triage_bucket: triage.bucket, triage_details: triage.details,
         })
       } catch { throw new ReviewCaptureError() }
       ctx.capturedReviewIdentities.add(identity)

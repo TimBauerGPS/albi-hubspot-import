@@ -660,6 +660,29 @@ test('live review workspace migration exists and is mirrored in h2a-schema.sql',
   }
 })
 
+// Rows captured before triage existed keep the column defaults ('decision', '{}'). A one-off,
+// re-runnable update buckets the settled ones; open rows are left for recheck or a detail load.
+test('live review workspace migration buckets settled rows whose triage was never computed', () => {
+  for (const sql of [readLiveMigration(), readSchema()]) {
+    const update = sql.match(/with pending as \([\s\S]*?update public\.h2a_dry_run_reviews r set[\s\S]*?;\n/)?.[0]
+    assert.ok(update, 'one-off triage backfill update must exist')
+    // Scoped to settled rows never bucketed, so re-running touches nothing already computed.
+    assert.match(update, /where r\.status <> 'needs_review'\s+and r\.triage_bucket = 'decision'\s+and r\.triage_details = '\{\}'::jsonb/)
+    assert.doesNotMatch(update, /updated_at/)
+    // Current resolution is the newest one per review, as getCurrentReviewResolution reads it.
+    assert.match(update, /from public\.h2a_dry_run_review_resolutions s\s+where s\.company_id = r\.company_id and s\.review_id = r\.id\s+order by s\.created_at desc, s\.id desc limit 1\) as resolution_status/)
+    assert.match(update, /when p\.status = 'cleared' and p\.resolution_status = 'waiting_on_albi' then 'todo'/)
+    assert.match(update, /when p\.status = 'cleared' and p\.recheck_outcome in \('safe_to_link', 'safe_to_create'\)\s+and p\.resolution_status is distinct from 'completed' then 'quick'/)
+    assert.match(update, /else 'done' end/)
+    assert.match(update, /pg_catalog\.jsonb_build_object\('quickkind', case when p\.recheck_outcome = 'safe_to_link' then 'link' else 'create' end\)/)
+    assert.match(update, /from pending p\s+where r\.company_id = p\.company_id and r\.id = p\.id;/)
+    // It runs after the triage columns and the resolution table exist.
+    assert.ok(sql.indexOf('add column if not exists triage_details') < sql.indexOf(update))
+    assert.ok(!sql.includes('create table public.h2a_dry_run_review_resolutions') ||
+      sql.indexOf('create table public.h2a_dry_run_review_resolutions') < sql.indexOf(update))
+  }
+})
+
 test('live review rows are unique per open HubSpot source', () => {
   for (const sql of [readLiveMigration(), readSchema()]) {
     assert.match(sql, /create unique index (?:if not exists )?h2a_live_review_open_source_idx\s+on public\.h2a_dry_run_reviews \(company_id, portal_id, object_type, source_id\)\s+where review_kind = 'live' and status = 'needs_review'/)
@@ -689,12 +712,35 @@ test('h2a_close_live_review closes conflicts and inserts resumes in one function
     assert.match(body, /for update/)
     assert.match(body, /p_outcome is null or p_outcome not in \('resolved', 'resolved_by_sync', 'skipped', 'source_missing'\)/)
     assert.match(body, /p_outcome = 'resolved' and coalesce\(p_resolution_action, ''\) not in \('link_existing', 'create_new'\)/)
-    assert.match(body, /when p_outcome = 'resolved_by_sync' then 'link_existing'/)
-    assert.match(body, /if p_outcome in \('resolved', 'resolved_by_sync'\) then[\s\S]*?insert into public\.h2a_conflict_resumes/)
+    assert.match(body, /when v_outcome = 'resolved_by_sync' then 'link_existing'/)
+    assert.match(body, /if v_outcome in \('resolved', 'resolved_by_sync'\) then[\s\S]*?insert into public\.h2a_conflict_resumes/)
+    // A first close takes the caller's outcome; only a replay reads the recorded one.
+    assert.match(body, /v_replay := false;\s+v_actor_id := p_actor_id;\s+v_outcome := p_outcome;\s+v_action := p_resolution_action;/)
     assert.match(sql, /create or replace function public\.h2a_close_live_review\([\s\S]*?security definer set search_path = ''/)
     assert.match(sql, /revoke execute on function public\.h2a_close_live_review\(uuid, uuid, uuid, text, text\) from public, anon, authenticated;/)
     assert.match(sql, /grant execute on function public\.h2a_close_live_review\(uuid, uuid, uuid, text, text\) to service_role;/)
     assert.doesNotMatch(sql, /grant execute on function public\.h2a_close_live_review\([^;]*to (?:public|anon|authenticated)/)
+  }
+})
+
+// Link-after-close race: a replay closes conflicts linked after the first close, with the outcome,
+// action and actor recorded on the row's own close event (never the replaying caller's).
+test('h2a_close_live_review replay closes late-linked conflicts with the recorded close', () => {
+  for (const sql of [readLiveMigration(), readSchema()]) {
+    const body = functionBody(sql, 'h2a_close_live_review')
+    const replay = body.match(/if v_review\.status <> 'needs_review' then([\s\S]*?)\n  else/)?.[1]
+    assert.ok(replay, 'replay branch must exist')
+    assert.match(replay, /from public\.h2a_dry_run_review_events e\s+where e\.company_id = p_company_id and e\.review_id = p_review_id\s+and e\.event_type in \('cleared', 'no_longer_in_scope'\) and e\.sanitized_details \? 'outcome'\s+order by e\.created_at desc, e\.id desc limit 1/)
+    assert.match(replay, /e\.actor_id, e\.sanitized_details ->> 'outcome', e\.sanitized_details ->> 'resolutionaction'\s+into v_actor_id, v_outcome, v_action/)
+    assert.doesNotMatch(replay, /p_outcome|p_resolution_action/, 'a replay never uses the caller\'s outcome')
+    // One loop closes conflicts for both the first close and a replay; resumes stay insert-once.
+    assert.equal((body.match(/update public\.h2a_conflicts set/g) ?? []).length, 1)
+    assert.match(body, /c\.status in \('open', 'resolving'\)/)
+    assert.match(body, /on conflict \(company_id, conflict_id\) do nothing/)
+    assert.match(body, /'lateclosedconflictids', pg_catalog\.to_jsonb\(v_closed\)/)
+    assert.match(body, /'replayed', true/)
+    // The row's own close (status, event) is written only on the first close.
+    assert.match(body, /if v_replay then[\s\S]*?return[\s\S]*?end if;\s+update public\.h2a_dry_run_reviews set/)
   }
 })
 

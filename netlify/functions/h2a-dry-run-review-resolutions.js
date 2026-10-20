@@ -22,7 +22,8 @@ const SAFE_MESSAGES = new Set(['Invalid request body.', 'Unsupported request fie
   'A single company selector is required.', 'Invalid resolution request.', 'Invalid resolution decision.',
   'Review resolution is unavailable.', 'Administrator access is required.', 'Super administrator access is required.',
   'Sample review item not found.', 'Run a new sample to create detailed review data.', 'Review item not found.',
-  'Skip is only available for live reviews.', 'Creating with the organization is not available for this record.'])
+  'Skip is only available for live reviews.', 'Creating with the organization is not available for this record.',
+  'This record changed. Refresh and confirm the resolution again.'])
 const reply = (statusCode, body) => ({ statusCode, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store',
   'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Content-Type, Authorization',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS' }, body: JSON.stringify(body) })
@@ -178,7 +179,9 @@ export function createReviewResolutionHandler(options = {}) {
       if (error instanceof TypeError) return reply(400, { error: 'Invalid resolution decision.' })
       if (error instanceof H2AReviewError) return reply([400, 403, 404, 409].includes(error.statusCode) ? error.statusCode : 500,
         { error: SAFE_MESSAGES.has(error.message) ? error.message : error.statusCode === 409
-          ? 'This sample review changed. Refresh and confirm the resolution again.' : error.statusCode === 400 ? 'Invalid resolution decision.' : fallback })
+          // A live row is not a sample review: its unlisted 409s get the kind-neutral copy.
+          ? error.reviewKind === 'live' ? 'This record changed. Refresh and confirm the resolution again.'
+            : 'This sample review changed. Refresh and confirm the resolution again.' : error.statusCode === 400 ? 'Invalid resolution decision.' : fallback })
       return reply(500, { error: fallback })
     }
   }

@@ -34,7 +34,8 @@ test('resolution errors expose fixed actionable copy and never expose provider d
   const originalFetch = globalThis.fetch
   try {
     for (const message of ['Invalid resolution request.', 'Invalid resolution decision.', 'Review resolution is unavailable.',
-      'Super administrator access is required.', 'This sample review changed. Refresh and confirm the resolution again.', 'Unable to resolve this sample review.']) {
+      'Super administrator access is required.', 'This sample review changed. Refresh and confirm the resolution again.', 'Unable to resolve this sample review.',
+      'This record changed. Refresh and confirm the resolution again.']) {
       globalThis.fetch = async () => response({ error: message }, { status: 409 })
       await assert.rejects(() => getH2ADryRunReviewResolution(session, 'company-1', '00000000-0000-4000-8000-000000000001'), error => error.message === message)
     }

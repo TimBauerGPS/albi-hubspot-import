@@ -37,7 +37,29 @@ export async function captureLiveReview(deps, { companyId, runId, portalId, obje
   // conflict is not attached to it (the per-run key prevents a second row in this run).
   if (review.closed === true) return { reviewId: review.id, inserted: false, closed: true, linked: false }
   const linked = await repository.linkLiveReviewConflict(companyId, review.id, conflictId)
-  return { reviewId: review.id, inserted: review.inserted === true, linked: linked === true }
+  const lateClose = await closeLateLink(deps, { companyId, reviewId: review.id, conflictId, linked: linked === true })
+  return { reviewId: review.id, inserted: review.inserted === true, linked: linked === true, ...(lateClose ? { lateClose } : {}) }
+}
+
+// Link-after-close race: a reviewer (or sync) can close the row between the upsert above and the link,
+// so the conflict is linked to a row whose close already ran and would stay open forever. Re-read the row
+// the conflict is linked to (this one, or the row an earlier capture linked it to when the link already
+// existed); when that row is closed, replay its close. The close RPC's replay closes every still-open
+// linked conflict with the row's recorded outcome, action and actor and inserts their resumes once.
+// Errors propagate like any capture failure, so the run fails and the next capture retries the replay.
+async function closeLateLink(deps, { companyId, reviewId, conflictId, linked }) {
+  const repository = deps.repository
+  if (typeof repository.getReview !== 'function' || typeof repository.getLiveReviewClose !== 'function' ||
+    typeof repository.closeLiveReview !== 'function') return null
+  const holderId = linked ? reviewId : typeof repository.findLiveReviewConflictLink === 'function'
+    ? (await repository.findLiveReviewConflictLink(companyId, conflictId))?.review_id ?? null : null
+  if (!identity(holderId)) return null
+  const holder = await repository.getReview(companyId, holderId)
+  if (holder?.review_kind !== 'live' || holder.status === 'needs_review') return null
+  const recorded = await repository.getLiveReviewClose(companyId, holderId)
+  if (!recorded) return null
+  const closed = await closeLiveReview(deps, { companyId, reviewId: holderId, ...recorded })
+  return { reviewId: holderId, lateClosedConflictIds: closed.lateClosedConflictIds, dispatched: closed.dispatched, pending: closed.pending }
 }
 
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/
@@ -55,7 +77,8 @@ function backfillCursor(cursor) {
 // One-off, on-demand capture of open contact/company conflicts that predate live capture
 // ("Prepare open conflicts for review"). Pages oldest first; idempotent on the link table's
 // (company_id, conflict_id) and the live partial key, so re-running a page writes nothing.
-// - A conflict already linked to a review is left alone.
+// - A conflict already linked to a review is left alone, unless that review closed before the link landed
+//   (link-after-close race): then the review's close is replayed so the conflict closes and resumes.
 // - A source that already has an open live row only gets the conflict linked: the row's evidence,
 //   refreshed by a live run, is never replaced by the conflict's older stored snapshot.
 // - Otherwise the row is captured from the conflict's stored snapshots with triage computed like capture.
@@ -98,10 +121,19 @@ export async function backfillLiveReviews(deps, { companyId, limit = 50, cursor 
     if (!REVIEW_REASONS.has(conflict.reason) || !REVIEW_CONFLICT_TYPES.has(conflict.conflict_type) ||
       !identity(conflict.run_id) || !identity(conflict.portal_id) || !identity(conflict.source_id)) { counts.skipped++; continue }
     try {
-      if (await repository.findLiveReviewConflictLink(companyId, conflict.id)) continue
+      const link = await repository.findLiveReviewConflictLink(companyId, conflict.id)
+      if (link) {
+        // Still open but linked: normal while its row is open; stranded when the row closed before the
+        // link landed. closeLateLink replays that row's close so the conflict closes and resumes.
+        if (identity(link.review_id)) await closeLateLink(deps, { companyId, reviewId: link.review_id, conflictId: conflict.id, linked: true })
+        continue
+      }
       const open = await repository.findOpenLiveReviewBySource(companyId, conflict.portal_id, conflict.object_type, conflict.source_id)
       if (open?.id) {
-        if (await repository.linkLiveReviewConflict(companyId, open.id, conflict.id)) counts.linked++
+        const linked = await repository.linkLiveReviewConflict(companyId, open.id, conflict.id)
+        if (linked) counts.linked++
+        // The open row may have closed between the lookup and the link (same race as capture).
+        await closeLateLink(deps, { companyId, reviewId: open.id, conflictId: conflict.id, linked: linked === true })
         continue
       }
       if (mappings === null) mappings = typeof repository.getMappings === 'function' ? await repository.getMappings(companyId) : {}
@@ -150,6 +182,7 @@ async function closeOne(deps, { companyId, reviewId, actorId, outcome, resolutio
     deliveries = result.resumeIds.map(resumeId => ({ resumeId, accepted: false, pending: true }))
   }
   return { closedConflictIds: result.closedConflictIds, resumeIds: result.resumeIds, replayed: result.replayed === true,
+    lateClosedConflictIds: Array.isArray(result.lateClosedConflictIds) ? result.lateClosedConflictIds : [],
     dispatched: deliveries.filter(item => item.accepted).length, pending: deliveries.filter(item => item.pending).length }
 }
 

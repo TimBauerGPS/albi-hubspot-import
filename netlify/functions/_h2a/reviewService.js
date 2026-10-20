@@ -365,12 +365,14 @@ export function createReviewBatchCapabilities(repository) {
 }
 
 // Every open row of one kind: the sample's own rows, or every open live row (no run scope).
-async function openReviews(repository, companyId, runId, kind = 'sample') {
+async function openReviews(repository, companyId, runId, kind = 'sample', portalId = null) {
   const rows = []
+  // Live rows are scoped to the configured portal; without one there are none to recheck.
+  if (kind === 'live' && !portalId) return rows
   let before = null
   for (let page = 0; page < 100; page++) {
     const result = await repository.listDryRunReviews(companyId, kind === 'live' ? null : runId,
-      { limit: 100, before, status: 'needs_review', objectType: null, reason: null, kind })
+      { limit: 100, before, status: 'needs_review', objectType: null, reason: null, kind, ...(kind === 'live' ? { portalId } : {}) })
     if (!isRecord(result) || !Array.isArray(result.items)) malformed('review')
     rows.push(...result.items.filter(row => ['contacts', 'companies'].includes(row?.object_type)))
     const last = result.items.at(-1)
@@ -427,7 +429,7 @@ export async function runReviewRecheckBatch(deps, { companyId, batchId }) {
       if (!current.sample || current.sample.id !== batch.run_id) return await finish('failed', 'superseded')
       config = current.config
     }
-    const open = await openReviews(repository, companyId, batch.run_id, live ? 'live' : 'sample')
+    const open = await openReviews(repository, companyId, batch.run_id, live ? 'live' : 'sample', config?.portal_id ?? null)
     if (targeted) {
       const wanted = new Set(targeted)
       rows = open.filter(row => wanted.has(row.id))

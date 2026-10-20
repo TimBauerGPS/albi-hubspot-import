@@ -321,3 +321,11 @@ test('a full live batch settles a stranded row instead of re-evaluating it', asy
   assert.equal(f.applied.length, 0)
   assert.equal(result.counts.cleared, 1)
 })
+
+test('a live batch lists only the configured portal\'s open live rows', async () => {
+  const f = fixture({ rows: [{ kind: 'live' }], batch: { run_id: null, review_kind: 'live' } })
+  await runReviewRecheckBatch(f.deps, input)
+  const lists = f.calls.filter(call => call[0] === 'list')
+  assert.ok(lists.length > 0)
+  assert.ok(lists.every(([, , runId, filters]) => runId === null && filters.kind === 'live' && filters.portalId === '123'))
+})

@@ -101,9 +101,11 @@ function reviewQuery(supabase, companyId, runId) {
     .eq('company_id', companyId).eq('run_id', runId)
 }
 
-function liveReviewQuery(supabase, companyId) {
+// Live rows span every live run, so the configured portal is the scope (a portal switch hides old rows).
+function liveReviewQuery(supabase, companyId, portalId) {
   requireReviewIdentity(companyId)
-  return supabase.from('h2a_dry_run_reviews').select(REVIEW_COLUMNS).eq('company_id', companyId)
+  requireReviewIdentity(portalId)
+  return supabase.from('h2a_dry_run_reviews').select(REVIEW_COLUMNS).eq('company_id', companyId).eq('portal_id', portalId)
 }
 
 function reviewSourceIdentity(query, row) {
@@ -339,7 +341,7 @@ export function createH2ARepository(supabase) {
       const current = await this.getLatestCompletedSampleDryRun(companyId, after)
       return current?.id === run.id && current?.review_capture_version === 1
     },
-    async listDryRunReviews(companyId, runId, { limit = 25, before = null, status = null, objectType = null, reason = null, kind = 'sample', bucket = null, includeCounts = false } = {}) {
+    async listDryRunReviews(companyId, runId, { limit = 25, before = null, status = null, objectType = null, reason = null, kind = 'sample', bucket = null, includeCounts = false, portalId = null } = {}) {
       if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new TypeError('Invalid review page size')
       if (status !== null) requireReviewValue(status, REVIEW_STATUSES, 'status')
       if (objectType !== null) requireReviewValue(objectType, REVIEW_OBJECT_TYPES, 'object type')
@@ -351,7 +353,8 @@ export function createH2ARepository(supabase) {
         if (typeof before.id !== 'string' || !UUID_SHAPE.test(before.id)) throw new TypeError('Invalid review cursor')
       }
       // Live rows span every live run that captured them; only sample lists are run-scoped.
-      let query = kind === 'live' && runId === null ? liveReviewQuery(supabase, companyId) : reviewQuery(supabase, companyId, runId)
+      const unscopedLive = kind === 'live' && runId === null
+      let query = unscopedLive ? liveReviewQuery(supabase, companyId, portalId) : reviewQuery(supabase, companyId, runId)
       if (status !== null) query = query.eq('status', status)
       if (objectType !== null) query = query.eq('object_type', objectType)
       if (reason !== null) query = query.eq('reason', reason)
@@ -361,17 +364,18 @@ export function createH2ARepository(supabase) {
       const rows = checked(await query.order('created_at', { ascending: false }).order('id', { ascending: false }).limit(limit + 1))
       if (!Array.isArray(rows)) throw new Error('Invalid review page')
       const page = { items: rows.slice(0, limit), hasMore: rows.length > limit }
-      if (includeCounts) page.bucketCounts = await this.countReviewBuckets(companyId, runId, kind)
+      if (includeCounts) page.bucketCounts = await this.countReviewBuckets(companyId, runId, kind, unscopedLive ? portalId : null)
       return page
     },
     // Counts for the current kind and run; independent of the page filters so tabs stay stable.
-    async countReviewBuckets(companyId, runId, kind = 'sample') {
+    async countReviewBuckets(companyId, runId, kind = 'sample', portalId = null) {
       requireReviewIdentity(companyId)
       requireReviewValue(kind, REVIEW_KINDS, 'kind')
       if (!(kind === 'live' && runId === null)) requireReviewIdentity(runId)
+      else requireReviewIdentity(portalId)
       const entries = await Promise.all(TRIAGE_BUCKETS.map(async triageBucket => {
         let query = supabase.from('h2a_dry_run_reviews').select('id', { count: 'exact', head: true }).eq('company_id', companyId)
-        if (runId !== null) query = query.eq('run_id', runId)
+        query = runId !== null ? query.eq('run_id', runId) : query.eq('portal_id', portalId)
         const result = await query.eq('review_kind', kind).eq('triage_bucket', triageBucket)
         if (result?.error) throw result.error
         if (!Number.isSafeInteger(result?.count) || result.count < 0) throw new Error('Invalid review count')
@@ -415,6 +419,12 @@ export function createH2ARepository(supabase) {
       const payload = { company_id: companyId, run_id: input.run_id, portal_id: input.portal_id,
         object_type: input.object_type, source_id: input.source_id, reason: input.reason, conflict_type: input.conflict_type,
         ...reviewEvidencePayload(input, input.object_type), status: 'needs_review' }
+      // Triage computed at capture (sample capture passes it); other captures keep the column default.
+      if (input.triage_bucket !== undefined) {
+        requireReviewValue(input.triage_bucket, new Set(TRIAGE_BUCKETS), 'bucket')
+        payload.triage_bucket = input.triage_bucket
+        payload.triage_details = safeTriageDetails(input.triage_details ?? {})
+      }
       const inserted = await supabase.from('h2a_dry_run_reviews').insert(payload).select(REVIEW_COLUMNS).single()
       let review
       if (inserted?.error) {
@@ -516,6 +526,23 @@ export function createH2ARepository(supabase) {
       if (resolutionAction !== null) requireReviewValue(resolutionAction, LIVE_CLOSE_ACTIONS, 'close action')
       return checked(await supabase.rpc('h2a_close_live_review', { p_company_id: companyId, p_review_id: reviewId,
         p_actor_id: actorId, p_outcome: outcome, p_resolution_action: resolutionAction }))
+    },
+    // The close a live row was closed with, from the close event h2a_close_live_review records on its
+    // first close ({ actorId, outcome, resolutionAction }), or null when there is none.
+    async getLiveReviewClose(companyId, reviewId) {
+      for (const value of [companyId, reviewId]) requireReviewIdentity(value)
+      const rows = checked(await supabase.from('h2a_dry_run_review_events').select('event_type,actor_id,sanitized_details,created_at')
+        .eq('company_id', companyId).eq('review_id', reviewId).in('event_type', ['cleared', 'no_longer_in_scope'])
+        .order('created_at', { ascending: false }).order('id', { ascending: false }).limit(10))
+      for (const row of Array.isArray(rows) ? rows : []) {
+        const outcome = row?.sanitized_details?.outcome
+        if (outcome === undefined) continue
+        const resolutionAction = row.sanitized_details.resolutionAction ?? null
+        if (!LIVE_CLOSE_OUTCOMES.has(outcome) || resolutionAction !== null && !LIVE_CLOSE_ACTIONS.has(resolutionAction) ||
+          typeof row.actor_id !== 'string' || !UUID_SHAPE.test(row.actor_id)) return null
+        return { actorId: row.actor_id, outcome, resolutionAction }
+      }
+      return null
     },
     // Open live rows whose HubSpot source was merged into survivorSourceId (recorded in triage details).
     async listMergedAwayLiveReviews(companyId, portalId, objectType, survivorSourceId) {

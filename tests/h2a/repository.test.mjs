@@ -326,6 +326,17 @@ test('capture builds a positive-allowlist payload and records one fixed captured
   assert.deepEqual(event.sanitized_details, {})
 })
 
+test('sample capture stores the triage computed at capture, sanitized, and rejects an unknown bucket', async () => {
+  const { repository, calls } = reviewRepositoryFixture([data(reviewRow), data(reviewRow), data({ id: 'event-1' })])
+  await repository.recordDryRunReview('company-1', { ...reviewRow, triage_bucket: 'quick', triage_details: { quickKind: 'link', apiKey: 'secret' } })
+  const inserted = calls[0].steps.find(step => step[0] === 'insert')[1]
+  assert.equal(inserted.triage_bucket, 'quick')
+  assert.deepEqual(inserted.triage_details, { quickKind: 'link' })
+  const bad = reviewRepositoryFixture([])
+  await assert.rejects(() => bad.repository.recordDryRunReview('company-1', { ...reviewRow, triage_bucket: 'later', triage_details: {} }), TypeError)
+  assert.equal(bad.calls.length, 0)
+})
+
 test('unique capture replay updates the same tenant/run/source identity and ensures its captured event', async () => {
   const { repository, calls } = reviewRepositoryFixture([{ error: { code: '23505' } }, data(reviewRow), data(reviewRow),
     data(reviewRow), { error: { code: '23505', message: 'duplicate key value violates unique constraint "h2a_dry_review_events_captured_once_idx"' } }])
@@ -1108,6 +1119,20 @@ test('listDryRunReviews filters by kind and bucket and returns bucketCounts', as
   }
   await assert.rejects(() => repository.listDryRunReviews('company-1', 'sample-2', { kind: 'other' }), TypeError)
   await assert.rejects(() => repository.listDryRunReviews('company-1', 'sample-2', { bucket: 'nope' }), TypeError)
+})
+
+test('the live list (no run scope) is filtered to the configured portal, list and counts alike', async () => {
+  const counts = [0, 0, 1, 0, 0].map(count => ({ count, error: null }))
+  const { repository, calls } = reviewRepositoryFixture([data([reviewRow]), ...counts])
+  await repository.listDryRunReviews('company-1', null, { kind: 'live', portalId: '123', includeCounts: true })
+  assert.deepEqual(equalityFilters(calls[0]), [['company_id', 'company-1'], ['portal_id', '123'], ['review_kind', 'live']])
+  for (const call of calls.slice(1)) {
+    assert.deepEqual(equalityFilters(call).slice(0, 3), [['company_id', 'company-1'], ['portal_id', '123'], ['review_kind', 'live']])
+  }
+  const missing = reviewRepositoryFixture([])
+  await assert.rejects(() => missing.repository.listDryRunReviews('company-1', null, { kind: 'live' }), TypeError)
+  await assert.rejects(() => missing.repository.countReviewBuckets('company-1', null, 'live'), TypeError)
+  assert.equal(missing.calls.length, 0)
 })
 
 test('listDryRunReviews defaults to sample kind and omits counts unless requested', async () => {

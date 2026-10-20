@@ -79,11 +79,16 @@ declare
   v_review public.h2a_dry_run_reviews%rowtype;
   v_conflict public.h2a_conflicts%rowtype;
   v_now timestamptz := pg_catalog.now();
+  v_replay boolean;
+  v_actor_id uuid;
+  v_outcome text;
+  v_action text;
   v_status text;
   v_event_type text;
   v_db_action text;
   v_closed uuid[] := '{}';
   v_resumes uuid[] := '{}';
+  v_all uuid[] := '{}';
   v_resume_id uuid;
 begin
   if p_company_id is null or p_review_id is null or p_actor_id is null
@@ -100,45 +105,74 @@ begin
   if not found then return pg_catalog.jsonb_build_object('error', 'not_found'); end if;
 
   if v_review.status <> 'needs_review' then
-    select coalesce(pg_catalog.array_agg(l.conflict_id order by l.conflict_id), '{}') into v_closed
-      from public.h2a_live_review_conflicts l where l.company_id = p_company_id and l.review_id = p_review_id;
-    select coalesce(pg_catalog.array_agg(r.id order by r.id), '{}') into v_resumes
-      from public.h2a_conflict_resumes r where r.company_id = p_company_id and r.conflict_id = any (v_closed);
-    return pg_catalog.jsonb_build_object('closedConflictIds', pg_catalog.to_jsonb(v_closed),
-      'resumeIds', pg_catalog.to_jsonb(v_resumes), 'replayed', true);
+    -- Replay. A conflict linked after the first close (live capture raced the close) is still open:
+    -- close it with the outcome, action and actor the row was closed with, which the first close
+    -- recorded on the row's own close event. The caller's outcome is never used for a replay.
+    v_replay := true;
+    select e.actor_id, e.sanitized_details ->> 'outcome', e.sanitized_details ->> 'resolutionAction'
+      into v_actor_id, v_outcome, v_action
+      from public.h2a_dry_run_review_events e
+      where e.company_id = p_company_id and e.review_id = p_review_id
+        and e.event_type in ('cleared', 'no_longer_in_scope') and e.sanitized_details ? 'outcome'
+      order by e.created_at desc, e.id desc limit 1;
+    if v_actor_id is null or v_outcome is null
+      or v_outcome not in ('resolved', 'resolved_by_sync', 'skipped', 'source_missing')
+      or (v_outcome = 'resolved' and coalesce(v_action, '') not in ('link_existing', 'create_new'))
+      or (v_outcome in ('skipped', 'source_missing') and v_action is distinct from 'skip')
+      or (v_outcome = 'resolved_by_sync' and v_action is not null and v_action <> 'link_existing') then
+      v_outcome := null;
+    end if;
+  else
+    v_replay := false;
+    v_actor_id := p_actor_id;
+    v_outcome := p_outcome;
+    v_action := p_resolution_action;
   end if;
 
-  v_status := case when p_outcome = 'skipped' or p_outcome = 'source_missing' then 'skipped' else 'resolved' end;
-  v_event_type := case when v_status = 'skipped' then 'skipped' else 'resolved' end;
-  v_db_action := case when p_outcome = 'resolved_by_sync' then 'link_existing' else p_resolution_action end;
+  if v_outcome is not null then
+    v_status := case when v_outcome = 'skipped' or v_outcome = 'source_missing' then 'skipped' else 'resolved' end;
+    v_event_type := case when v_status = 'skipped' then 'skipped' else 'resolved' end;
+    v_db_action := case when v_outcome = 'resolved_by_sync' then 'link_existing' else v_action end;
 
-  for v_conflict in
-    select c.* from public.h2a_conflicts c
-      join public.h2a_live_review_conflicts l on l.company_id = c.company_id and l.conflict_id = c.id
-      where l.company_id = p_company_id and l.review_id = p_review_id and c.status in ('open', 'resolving')
-      order by c.id for update of c
-  loop
-    update public.h2a_conflicts set status = v_status, resolution_action = v_db_action,
-      resolved_by = p_actor_id, resolved_at = v_now, updated_at = v_now
-      where company_id = p_company_id and id = v_conflict.id;
-    insert into public.h2a_conflict_events (company_id, conflict_id, event_type, actor_id, resolution_action,
-      sanitized_details, created_at)
-    values (p_company_id, v_conflict.id, v_event_type, p_actor_id, v_db_action,
-      pg_catalog.jsonb_build_object('closedByReview', p_review_id, 'outcome', p_outcome,
-        'before', pg_catalog.jsonb_build_object('status', v_conflict.status, 'updatedAt', v_conflict.updated_at),
-        'after', pg_catalog.jsonb_build_object('status', v_status, 'resolutionAction', v_db_action)), v_now);
-    v_closed := v_closed || v_conflict.id;
-    if p_outcome in ('resolved', 'resolved_by_sync') then
-      v_resume_id := null;
-      insert into public.h2a_conflict_resumes (company_id, conflict_id, resolution_action, source_object_type, source_id,
-        activity_object_type, activity_id, originating_run_id, activity_delivery_id, created_at, updated_at)
-      values (p_company_id, v_conflict.id, v_db_action, v_conflict.object_type, v_conflict.source_id,
-        v_conflict.activity_object_type, v_conflict.activity_id, v_conflict.run_id, v_conflict.activity_delivery_id, v_now, v_now)
-      on conflict (company_id, conflict_id) do nothing
-      returning id into v_resume_id;
-      if v_resume_id is not null then v_resumes := v_resumes || v_resume_id; end if;
-    end if;
-  end loop;
+    for v_conflict in
+      select c.* from public.h2a_conflicts c
+        join public.h2a_live_review_conflicts l on l.company_id = c.company_id and l.conflict_id = c.id
+        where l.company_id = p_company_id and l.review_id = p_review_id and c.status in ('open', 'resolving')
+        order by c.id for update of c
+    loop
+      update public.h2a_conflicts set status = v_status, resolution_action = v_db_action,
+        resolved_by = v_actor_id, resolved_at = v_now, updated_at = v_now
+        where company_id = p_company_id and id = v_conflict.id;
+      insert into public.h2a_conflict_events (company_id, conflict_id, event_type, actor_id, resolution_action,
+        sanitized_details, created_at)
+      values (p_company_id, v_conflict.id, v_event_type, v_actor_id, v_db_action,
+        pg_catalog.jsonb_build_object('closedByReview', p_review_id, 'outcome', v_outcome, 'lateLink', v_replay,
+          'before', pg_catalog.jsonb_build_object('status', v_conflict.status, 'updatedAt', v_conflict.updated_at),
+          'after', pg_catalog.jsonb_build_object('status', v_status, 'resolutionAction', v_db_action)), v_now);
+      v_closed := v_closed || v_conflict.id;
+      if v_outcome in ('resolved', 'resolved_by_sync') then
+        v_resume_id := null;
+        insert into public.h2a_conflict_resumes (company_id, conflict_id, resolution_action, source_object_type, source_id,
+          activity_object_type, activity_id, originating_run_id, activity_delivery_id, created_at, updated_at)
+        values (p_company_id, v_conflict.id, v_db_action, v_conflict.object_type, v_conflict.source_id,
+          v_conflict.activity_object_type, v_conflict.activity_id, v_conflict.run_id, v_conflict.activity_delivery_id, v_now, v_now)
+        on conflict (company_id, conflict_id) do nothing
+        returning id into v_resume_id;
+        if v_resume_id is not null then v_resumes := v_resumes || v_resume_id; end if;
+      end if;
+    end loop;
+  end if;
+
+  if v_replay then
+    -- Every linked conflict and its resumes, as before, plus the ones this replay closed.
+    select coalesce(pg_catalog.array_agg(l.conflict_id order by l.conflict_id), '{}') into v_all
+      from public.h2a_live_review_conflicts l where l.company_id = p_company_id and l.review_id = p_review_id;
+    select coalesce(pg_catalog.array_agg(r.id order by r.id), '{}') into v_resumes
+      from public.h2a_conflict_resumes r where r.company_id = p_company_id and r.conflict_id = any (v_all);
+    return pg_catalog.jsonb_build_object('closedConflictIds', pg_catalog.to_jsonb(v_all),
+      'resumeIds', pg_catalog.to_jsonb(v_resumes), 'replayed', true,
+      'lateClosedConflictIds', pg_catalog.to_jsonb(v_closed));
+  end if;
 
   update public.h2a_dry_run_reviews set
     status = case when p_outcome = 'resolved' then 'cleared' else 'no_longer_in_scope' end,
@@ -146,6 +180,7 @@ begin
     recheck_outcome = case when p_outcome = 'source_missing' then 'source_missing' else recheck_outcome end,
     updated_at = v_now
     where company_id = p_company_id and id = p_review_id;
+  -- This close event is the durable record a later replay closes late-linked conflicts from.
   insert into public.h2a_dry_run_review_events (company_id, review_id, actor_id, event_type, sanitized_details, created_at)
   values (p_company_id, p_review_id, p_actor_id,
     case when p_outcome = 'resolved' then 'cleared' else 'no_longer_in_scope' end,
@@ -361,5 +396,35 @@ end;
 $$;
 revoke execute on function public.h2a_create_review_resolution(uuid, uuid, uuid, text, text, text, text, timestamptz, jsonb, text, uuid, uuid) from public, anon, authenticated;
 grant execute on function public.h2a_create_review_resolution(uuid, uuid, uuid, text, text, text, text, timestamptz, jsonb, text, uuid, uuid) to service_role;
+
+-- One-off, re-runnable triage backfill. Rows captured before triage existed still carry the column
+-- defaults ('decision', '{}'). Settled rows are bucketed the way computeTriage does: a cleared row with
+-- a safe recheck and no completed resolution is a Quick win (its Albi to-do, when waiting_on_albi, wins),
+-- everything else settled is Done. Open (needs_review) rows are left for a recheck or detail load, which
+-- compute their triage from live evidence. Only never-bucketed rows match, so a re-run changes nothing,
+-- and updated_at is untouched so reviewers' expectedUpdatedAt stays valid.
+with pending as (
+  select r.company_id, r.id, r.status, r.recheck_outcome,
+    (select s.status from public.h2a_dry_run_review_resolutions s
+      where s.company_id = r.company_id and s.review_id = r.id
+      order by s.created_at desc, s.id desc limit 1) as resolution_status
+  from public.h2a_dry_run_reviews r
+  where r.status <> 'needs_review'
+    and r.triage_bucket = 'decision'
+    and r.triage_details = '{}'::jsonb
+)
+update public.h2a_dry_run_reviews r set
+  triage_bucket = case
+    when p.status = 'cleared' and p.resolution_status = 'waiting_on_albi' then 'todo'
+    when p.status = 'cleared' and p.recheck_outcome in ('safe_to_link', 'safe_to_create')
+      and p.resolution_status is distinct from 'completed' then 'quick'
+    else 'done' end,
+  triage_details = case
+    when p.status = 'cleared' and p.recheck_outcome in ('safe_to_link', 'safe_to_create')
+      and p.resolution_status is distinct from 'completed' and p.resolution_status is distinct from 'waiting_on_albi'
+      then pg_catalog.jsonb_build_object('quickKind', case when p.recheck_outcome = 'safe_to_link' then 'link' else 'create' end)
+    else '{}'::jsonb end
+  from pending p
+  where r.company_id = p.company_id and r.id = p.id;
 
 commit;

@@ -22,6 +22,14 @@ const stale = (check = 'other', fields = []) => {
   error.staleFields = fields
   throw error
 }
+// A live row has no sample: its 409s use kind-neutral copy. The audit (staleCheck/staleFields) is unchanged.
+export const LIVE_STALE_MESSAGE = 'This record changed. Refresh and confirm the resolution again.'
+function asLiveConflict(error) {
+  if (!(error instanceof H2AReviewError)) return error
+  error.reviewKind = 'live'
+  if (error.statusCode !== 409 || !/sample review|this sample/i.test(error.message)) return error
+  return Object.assign(new H2AReviewError(409, LIVE_STALE_MESSAGE), { staleCheck: error.staleCheck, staleFields: error.staleFields, reviewKind: 'live' })
+}
 const differingFields = (left, right) => [...new Set([...Object.keys(left ?? {}), ...Object.keys(right ?? {})])]
   .filter(key => !isDeepStrictEqual(left?.[key], right?.[key])).sort()
 const terminal = row => ['completed', 'superseded'].includes(row.status)
@@ -318,7 +326,9 @@ async function currentReview(deps, companyId, reviewId) {
   if (stored?.review_kind === 'live') {
     if (!['contacts', 'companies'].includes(stored.object_type)) fail(404, 'Review item not found.')
     const config = await deps.repository.getConfig(companyId)
-    if (!config?.portal_id || stored.portal_id !== config.portal_id) stale('portal')
+    if (!config?.portal_id || stored.portal_id !== config.portal_id) {
+      try { stale('portal') } catch (error) { throw asLiveConflict(error) }
+    }
     return { config, row: { ...stored, company_id: companyId } }
   }
   const resolved = await resolveReviewSample(deps.repository, companyId)
@@ -606,6 +616,11 @@ async function runClaim(deps, input, saved, context) {
 export async function executeReviewResolution(deps, input) {
   const decision = normalizeResolutionDecision(input.decision)
   const context = await currentReview(deps, input.companyId, input.reviewId)
+  if (context.row.review_kind !== 'live') return executeOnReview(deps, input, decision, context)
+  try { return await executeOnReview(deps, input, decision, context) } catch (error) { throw asLiveConflict(error) }
+}
+
+async function executeOnReview(deps, input, decision, context) {
   const live = context.row.review_kind === 'live'
   if (decision.action === 'skip_live' && !live) fail(400, 'Skip is only available for live reviews.')
   if (live) {

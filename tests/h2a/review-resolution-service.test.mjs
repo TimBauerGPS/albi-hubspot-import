@@ -1064,3 +1064,18 @@ test('the real engine creates the organization, then the contact against its new
   assert.equal(mutations(f).length, 1)
   assert.equal(mutations(f)[0][1].organizationId, '60')
 })
+
+// A live row has no sample: its freshness rejections use kind-neutral copy, with the audit unchanged.
+const LIVE_STALE = 'This record changed. Refresh and confirm the resolution again.'
+test('a stale live decision says the record changed, not the sample review', async () => {
+  const f = liveFixture()
+  await assert.rejects(executeReviewResolution(f.deps, { ...linkLive, expectedUpdatedAt: '2026-10-12T12:00:00Z' }),
+    error => error.statusCode === 409 && error.message === LIVE_STALE)
+  const changed = liveFixture({ reason: 'nonblank_field_difference', conflictType: 'contact_fields' })
+  changed.source.properties.phone = '5559990000'
+  await assert.rejects(executeReviewResolution(changed.deps, { ...input, decision: { action: 'resolve_fields', fieldChoices: { email: 'hubspot' } } }),
+    error => error.statusCode === 409 && error.message === LIVE_STALE && error.staleCheck === 'source')
+  const sample = fixture()
+  await assert.rejects(executeReviewResolution(sample.deps, { ...input, expectedUpdatedAt: '2026-10-12T12:00:00Z' }),
+    error => error.statusCode === 409 && !error.message.includes('This record changed'))
+})

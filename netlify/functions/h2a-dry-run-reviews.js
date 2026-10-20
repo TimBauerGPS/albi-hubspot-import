@@ -26,6 +26,7 @@ const reply = (statusCode, body) => ({ statusCode, headers: { 'Content-Type': 'a
 // Live merge following never captures a row: the survivor's live row appears when a sync reaches it.
 export const LIVE_SURVIVOR_PENDING = 'The surviving record will appear here when the next sync reaches it.'
 const emptyProgress = () => ({ total: 0, needsReview: 0, cleared: 0, noLongerInScope: 0, fullDryRunReady: false })
+const isAdminAuth = auth => auth?.isSuperAdmin === true || auth?.role === 'admin'
 const AUTH_MESSAGES = new Set(['Authentication required.', 'Invalid authentication token.', 'Administrator access is required.',
   'You are not authorized to access H2A.', 'You are not authorized to access the requested company.', 'A company must be selected.', 'Company not found.'])
 
@@ -84,6 +85,8 @@ function request(event) {
     objectType: query.objectType ?? null, reason: query.reason ?? null, kind: query.kind ?? 'sample', bucket: query.bucket ?? null, includeCounts: true } }
 }
 
+// Read-only for members (Conflicts inspection): provider reads gate on canResolve, and the stored
+// triage refresh is written only for an admin.
 async function detail(repository, companyId, runId, row, auth, options, config) {
   const events = await repository.listDryRunReviewEvents(companyId, runId, row.id)
   const projected = await currentResolutionProjection(repository, companyId, row.id, row.portal_id)
@@ -156,8 +159,8 @@ async function detail(repository, companyId, runId, row, auth, options, config) 
   const mappings = row.candidate_snapshots?.length ? await repository.getMappings(companyId).catch(() => null) : null
   // Detail knows the live create readiness and merge state, so refresh the stored bucket (written only when changed).
   const projectedRow = projectReviewRow(row, { detail: true, mappings: mappings ?? [] })
-  const refreshed = await refreshReviewTriage(repository, { companyId, row, resolutionStatus: projected.resolution?.status ?? null,
-    createReadiness: resolutionCapability.canResolve ? resolutionOptions.createReadiness : undefined, mergedInto })
+  const refreshed = isAdminAuth(auth) ? await refreshReviewTriage(repository, { companyId, row, resolutionStatus: projected.resolution?.status ?? null,
+    createReadiness: resolutionCapability.canResolve ? resolutionOptions.createReadiness : undefined, mergedInto }) : null
   if (refreshed) { projectedRow.triageBucket = refreshed.bucket; projectedRow.triageDetails = refreshed.details }
   return { ...projectedRow, resolutionStatus: projected.resolution?.status ?? null,
     events: events.map(projectReviewEvent), resolution: projected.resolution,
@@ -222,8 +225,13 @@ export function createDryRunReviewHandler(options = {}) {
     const isRecheck = event.httpMethod === 'POST'
     try {
       const input = request(event)
+      // Live list and detail are member-readable, as the legacy conflicts GET was (Conflicts is
+      // member-reachable). A detail's kind comes from its stored row, so admin is enforced below for
+      // a sample detail. The sample list and every POST stay admin-only.
+      const memberReadable = !isRecheck && (input.kind === 'live' || input.reviewId !== undefined)
       const auth = await (options.requireRequest ?? requireH2ARequest)(event, { supabase: options.supabase,
-        getSupabase: options.getSupabase, requireAdmin: true, requestedCompanyId: input.companyId })
+        getSupabase: options.getSupabase, requireAdmin: !memberReadable, requestedCompanyId: input.companyId })
+      const admin = !memberReadable || isAdminAuth(auth)
       const repository = options.repository ?? createH2ARepository(auth.supabase)
       const companyId = auth.companyId
       if (isRecheck && input.prepareMergedSurvivor === true) {
@@ -264,8 +272,9 @@ export function createDryRunReviewHandler(options = {}) {
             fail(404, 'Sample review item not found.')
           }
           // A completed resolution whose close failed earlier is closed now (best effort; idempotent).
+          // That is a write, so only an admin's load settles it; a member sees the row as stored.
           let row = stored
-          try {
+          if (admin) try {
             const settled = await settleLiveReviewClose({ repository,
               dispatchResume: options.dispatchResume ?? (intent => defaultDispatchResume(intent, options)) },
             { companyId, row: stored, actorId: auth.userId })
@@ -273,9 +282,13 @@ export function createDryRunReviewHandler(options = {}) {
           } catch { /* The open row stays the retry marker for the next detail load or recheck. */ }
           return reply(200, { item: await detail(repository, companyId, row.run_id, row, auth, options, config) })
         }
+        if (!admin) fail(403, 'Administrator access is required.')
       }
       if (input.kind === 'live') {
-        const page = await repository.listDryRunReviews(companyId, null, input.filters)
+        // Live rows are scoped to the configured portal; without one there is nothing to list.
+        const config = await repository.getConfig(companyId)
+        if (!config?.portal_id) return reply(200, { items: [], nextCursor: null })
+        const page = await repository.listDryRunReviews(companyId, null, { ...input.filters, portalId: config.portal_id })
         const resolutionStatuses = typeof repository.getCurrentReviewResolution === 'function'
           ? await Promise.all(page.items.map(async row => (await repository.getCurrentReviewResolution(companyId, row.id))?.status ?? null)) : []
         const last = page.items.at(-1)
