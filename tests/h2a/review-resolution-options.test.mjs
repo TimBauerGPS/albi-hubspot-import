@@ -50,8 +50,12 @@ test('create readiness trusts the last recheck (no full Albi scan) and names why
   assert.deepEqual((await load({ row: { ...createRow, source_snapshot: { ...createRow.source_snapshot, firstName: 'Old' } } })).createReadiness,
     { ready: false, blockedReason: 'source_changed' })
   assert.deepEqual((await load({ reads: { ...currentReads, hubspotRead: { ...currentReads.hubspotRead,
+    getContacts: async () => [{ id: '123', properties: { firstname: '', lastname: '' } }] } },
+  row: { ...createRow, source_snapshot: { id: '123' } } })).createReadiness, { ready: false, blockedReason: 'missing_name' })
+  // One name is enough: the create fills Albi's other required name with ".".
+  assert.equal((await load({ reads: { ...currentReads, hubspotRead: { ...currentReads.hubspotRead,
     getContacts: async () => [{ id: '123', properties: { firstname: 'Alex', lastname: '' } }] } },
-  row: { ...createRow, source_snapshot: { id: '123', firstName: 'Alex' } } })).createReadiness, { ready: false, blockedReason: 'missing_name' })
+  row: { ...createRow, source_snapshot: { id: '123', firstName: 'Alex' } } })).createReadiness.ready, true)
   assert.deepEqual((await load({ reads: { ...currentReads, albiRead: { ...currentReads.albiRead, listReferralSources: async () => [] } } })).createReadiness,
     { ready: false, blockedReason: 'referral_sources_unavailable' })
   const mapped = await load({ mappings: { ...currentMappings, contacts: [{ portal_id: '321', hubspot_id: '123', albi_contact_id: '456' }] } })

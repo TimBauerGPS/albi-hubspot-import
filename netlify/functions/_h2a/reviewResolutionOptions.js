@@ -155,7 +155,8 @@ export async function loadReviewResolutionOptions({ row, repository, reads, prog
           new Set(capturedIds).size !== capturedIds.length) return unavailable
       }
       const props = sourceRows[0].properties
-      const nameReady = row.object_type === 'contacts' ? Boolean(String(props.firstname ?? '').trim() && String(props.lastname ?? '').trim())
+      // One name is enough for a contact: the create fills Albi's other required name with a placeholder.
+      const nameReady = row.object_type === 'contacts' ? Boolean(String(props.firstname ?? '').trim() || String(props.lastname ?? '').trim())
         : Boolean(String(props.name ?? '').trim())
       let organizationTypeId = null, organizationReady = true, organizationBlock = null
       if (associated.length === 1) {

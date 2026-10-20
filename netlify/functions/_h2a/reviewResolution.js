@@ -182,6 +182,9 @@ function selectedOrganization(input, sourceId) {
   return organization
 }
 
+// Albi requires both a first and a last name; a HubSpot contact with only one gets this in the other.
+export const ALBI_NAME_PLACEHOLDER = '.'
+
 function createPayload(input, hubspot, type, associations) {
   let organization = null
   if (type === 'contacts' && associations.length) {
@@ -202,6 +205,8 @@ function createPayload(input, hubspot, type, associations) {
   const typeId = positiveId(defaults.typeId)
   if (!Number.isSafeInteger(Number(typeId))) invalidPlan()
   const payload = {}
+  const nameOf = field => String(fieldValue(hubspot, [FIELD_METADATA.contacts[field].hubspot, field], false) ?? '').trim()
+  const singleName = type === 'contacts' && Boolean(nameOf('firstName') || nameOf('lastName'))
   // Only properties accepted by the existing Albi create contracts are copied.
   // Keep creates on the same minimal contract exercised by the production sync.
   // Richer provider fields remain available for comparison and manual resolution,
@@ -210,6 +215,7 @@ function createPayload(input, hubspot, type, associations) {
     const meta = FIELD_METADATA[type][field]
     let value = fieldValue(hubspot, [meta.hubspot, field], false)
     if (value !== null) value = value.trim()
+    if (['firstName', 'lastName'].includes(field) && !value && singleName) value = ALBI_NAME_PLACEHOLDER
     if (['firstName', 'lastName', 'name'].includes(field) && !value) invalidPlan()
     if (value === null || value === '') continue
     if (field === 'phoneNumber') {

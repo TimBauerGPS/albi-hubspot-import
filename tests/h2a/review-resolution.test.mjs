@@ -196,6 +196,17 @@ test('create plans use the production-proven minimal Albi contact contract', () 
   })
 })
 
+test('a contact with only one name is created with a "." in the other name, which Albi requires', () => {
+  const input = createInput('contacts')
+  input.hubspot.properties.lastname = '  '
+  assert.equal(plan(input).providerOperation.payload.firstName, 'A')
+  assert.equal(plan(input).providerOperation.payload.lastName, '.')
+  const lastOnly = createInput('contacts'); delete lastOnly.hubspot.properties.firstname
+  assert.deepEqual([plan(lastOnly).providerOperation.payload.firstName, plan(lastOnly).providerOperation.payload.lastName], ['.', 'B'])
+  const none = createInput('contacts'); delete none.hubspot.properties.firstname; delete none.hubspot.properties.lastname
+  assert.throws(() => plan(none), TypeError)
+})
+
 test('forced create records the exact ignored candidates and still builds a create plan', () => {
   const input = createInput('contacts')
   input.review.reason = 'name_only_candidate'
@@ -224,7 +235,7 @@ test('a contact create needs its associated organization mapped; deferral is no 
 
 test('create prerequisites reject missing names, options, unresolved context and unsafe phone formats', () => {
   for (const change of [
-    input => { input.hubspot.properties.lastname = '' }, input => { input.optionMappings[0].confirmed = false },
+    input => { input.hubspot.properties.lastname = ''; input.hubspot.properties.firstname = '' }, input => { input.optionMappings[0].confirmed = false },
     input => { input.optionMappings.push({ ...input.optionMappings[0] }) }, input => { input.optionMappings[0].albi_id = '0' },
     input => { input.hubspot.properties.phone = '5551112222 x123' },
     input => { input.associatedCompanyIds = ['99'] },
