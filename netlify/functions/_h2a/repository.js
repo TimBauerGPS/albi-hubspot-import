@@ -184,6 +184,20 @@ function reviewResolutionRepository(supabase) {
         p_event_type: input.eventType, p_event_details: safeResolutionEventDetails(input.details),
         p_provider_outcome_code: input.providerOutcomeCode ?? null })
     },
+    // Albi create receipts recorded by any earlier resolution of this review (newest 20 resolutions).
+    async listPriorCreateReceipts(companyId, reviewId) {
+      requireReviewIdentity(companyId)
+      requireResolutionUuid(reviewId)
+      const resolutions = await resolutionStorage(() => scoped(supabase, 'h2a_dry_run_review_resolutions', companyId, 'id')
+        .eq('review_id', reviewId).order('created_at', { ascending: false }).limit(20))
+      const ids = (Array.isArray(resolutions) ? resolutions : []).map(row => row?.id).filter(id => typeof id === 'string')
+      if (!ids.length) return []
+      const events = await resolutionStorage(() => scoped(supabase, 'h2a_dry_run_review_resolution_events', companyId, RESOLUTION_EVENT_COLUMNS)
+        .in('resolution_id', ids).eq('event_type', 'claimed').limit(RESOLUTION_EVENT_LIMIT))
+      if (!Array.isArray(events)) throw new Error('Review resolution storage failed')
+      return [...new Set(events.map(safeStoredResolutionEvent).map(event => event.sanitized_details?.createReceiptId)
+        .filter(id => typeof id === 'string' && /^[1-9]\d{0,99}$/.test(id)))]
+    },
     async listReviewResolutionEvents(companyId, resolutionId) {
       requireReviewIdentity(companyId)
       requireResolutionUuid(resolutionId)

@@ -1184,3 +1184,16 @@ test('create batches expire abandoned ones, insert one queued batch, and transit
   }
   await assert.rejects(repository.createReviewCreateBatch('company-1', { kind: 'sample', items, referralSourceId: 'x', actorId: ACTOR_ID, now: BATCH_TIME, staleBefore: BATCH_TIME }))
 })
+
+test('earlier create receipts for a review are read from its resolutions’ claimed events', async () => {
+  const reviewId = '00000000-0000-4000-8000-000000000009'
+  const event = receipt => ({ id: 'e', company_id: 'company-1', resolution_id: 'r1', actor_id: null, event_type: 'claimed',
+    sanitized_details: receipt ? { createReceiptId: receipt } : {}, created_at: '2026-10-20T12:00:00.000Z' })
+  const { repository, calls } = reviewRepositoryFixture([data([{ id: 'r1' }, { id: 'r2' }]), data([event('31'), event(null), event('31')])])
+  assert.deepEqual(await repository.listPriorCreateReceipts('company-1', reviewId), ['31'])
+  assert.equal(calls[0].table, 'h2a_dry_run_review_resolutions')
+  assert.equal(calls[1].table, 'h2a_dry_run_review_resolution_events')
+  const empty = reviewRepositoryFixture([data([])])
+  assert.deepEqual(await empty.repository.listPriorCreateReceipts('company-1', reviewId), [])
+  assert.equal(empty.calls.length, 1)
+})

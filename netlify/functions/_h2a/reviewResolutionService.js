@@ -546,6 +546,21 @@ async function runClaim(deps, input, saved, context) {
       createTarget = plan.action === 'force_create_albi'
         ? forcedReceiptTarget(row, current, createReceiptId)
         : exactCreateTarget(row, plan, current, createReceiptId, false)
+      // An earlier attempt on this record that Albi already answered with a receipt (but that ended failed, for
+      // example before receipts were trusted) is that record: link it rather than create a second one.
+      if (!createTarget && !contextPlan && !createReceiptId && typeof deps.repository.listPriorCreateReceipts === 'function') {
+        const prior = await bounded(deps, () => deps.repository.listPriorCreateReceipts(input.companyId, row.id), deadline)
+        if (!Array.isArray(prior)) malformed('resolution')
+        const receipts = [...new Set(prior.filter(isResolutionProviderId))]
+        if (receipts.length > 1) throw new ApiError('permanent', { code: 'operation_failed' })
+        if (receipts.length === 1) {
+          createTarget = forcedReceiptTarget(row, current, receipts[0])
+          if (!createTarget) throw new ApiError('permanent', { code: 'operation_failed' })
+          createReceiptId = receipts[0]
+          await caps.appendReviewResolutionEvent(input.companyId, saved.id,
+            { actorId: input.actorId, eventType: 'claimed', details: { createReceiptId } })
+        }
+      }
       if (createTarget) reconciled = true
       else if (contextPlan) throw new ApiError('permanent', { code: 'operation_failed' })
       else if (plan.action !== 'force_create_albi') {
@@ -593,7 +608,16 @@ async function runClaim(deps, input, saved, context) {
         if (!verified) throw error
         reconciled = true
       }
-      if (!reconciled) {
+      if (!reconciled && plan.verification.create && createReceiptId) {
+        // Albi answered the create with the new record's id: that is the record. Albi's list can lag behind or
+        // store a value slightly differently, so requiring the list to echo every field marked real creates as
+        // failed (and left them unlinked). Only check that no other HubSpot record is linked to this id; the
+        // recheck that follows compares fields as usual.
+        const mappings = await deps.repository.getMappings(row.company_id)
+        if (!mappings || !['contacts', 'organizations'].every(key => Array.isArray(mappings[key]))) malformed('resolution')
+        createTarget = forcedReceiptTarget(row, { mappings }, createReceiptId)
+        if (!createTarget) malformed('resolution')
+      } else if (!reconciled) {
         const after = await evidence(deps, clients, row, saved.decision, deadline)
         createTarget = plan.verification.create ? plan.action === 'force_create_albi'
           ? forcedReceiptTarget(row, after, createReceiptId)

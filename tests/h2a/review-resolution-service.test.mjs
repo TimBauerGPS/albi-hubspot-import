@@ -365,6 +365,46 @@ test('successful name-only create persists an exact receipt before verification 
   assert.equal(mutations(f).length, 1)
 })
 
+test('a create Albi accepted is linked to its receipt id even when Albi lists it late or with a value it changed', async () => {
+  for (const listed of [null, { id: '30', firstName: 'A', lastName: 'B', contactTypeIds: ['12'], city: 'CHANGED BY ALBI' }]) {
+    const f = fixture(), createInput = asCreate(f)
+    delete f.source.properties.email; delete f.source.properties.phone
+    delete f.row.source_snapshot.email; delete f.row.source_snapshot.phoneNumber
+    f.row.proposed_changes = { conflicts: {}, updates: {} }
+    f.createdTarget = { id: '30', firstName: 'A', lastName: 'B', contactTypeIds: ['12'] }
+    const before = structuredClone(f.contacts)
+    f.deps.albiRead.listContacts = async () => ({ records: f.calls.some(call => Array.isArray(call) && call[0] === 'CREATE')
+      ? [...before, ...(listed ? [listed] : [])] : before, cursor: null })
+    const result = await executeReviewResolution(f.deps, createInput)
+    assert.equal(result.resolution.status, 'ready_to_recheck')
+    assert.equal(f.mappings.contacts[0].albi_contact_id, '30')
+    assert.equal(mutations(f).length, 1)
+  }
+})
+
+test('a create retried after an earlier attempt got an Albi receipt links that record instead of creating again', async () => {
+  const f = fixture(), createInput = asCreate(f)
+  delete f.source.properties.email; delete f.source.properties.phone
+  delete f.row.source_snapshot.email; delete f.row.source_snapshot.phoneNumber
+  f.row.proposed_changes = { conflicts: {}, updates: {} }
+  const asked = []
+  f.deps.repository.listPriorCreateReceipts = async (companyId, reviewId) => { asked.push([companyId, reviewId]); return ['31'] }
+  const result = await executeReviewResolution(f.deps, createInput)
+  assert.equal(result.resolution.status, 'ready_to_recheck')
+  assert.equal(f.mappings.contacts[0].albi_contact_id, '31')
+  assert.equal(mutations(f).length, 0, 'nothing is created twice')
+  assert.equal(asked.length, 1)
+  assert.ok(f.events.some(event => event.details?.createReceiptId === '31'))
+  // Two different earlier receipts are never guessed between.
+  const g = fixture()
+  delete g.source.properties.email; delete g.source.properties.phone
+  delete g.row.source_snapshot.email; delete g.row.source_snapshot.phoneNumber
+  g.row.proposed_changes = { conflicts: {}, updates: {} }
+  g.deps.repository.listPriorCreateReceipts = async () => ['31', '32']
+  assert.equal((await executeReviewResolution(g.deps, asCreate(g))).resolution.status, 'failed')
+  assert.equal(mutations(g).length, 0)
+})
+
 test('successful organization create with name-only evidence maps the receipt target', async () => {
   const f = fixture()
   f.row.object_type = 'companies'; f.row.reason = 'no_match'; f.row.conflict_type = 'organization_match'
