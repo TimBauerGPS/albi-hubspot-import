@@ -769,6 +769,8 @@ test('skip_live is a resolution action allowed only on live rows', () => {
     assert.match(body, /p_action not in \('resolve_fields', 'link_existing', 'create_albi', 'force_create_albi', 'choose_organization', 'skip_live'\)/)
     assert.match(body, /if p_action = 'skip_live' and v_review\.review_kind is distinct from 'live' then\s+return pg_catalog\.jsonb_build_object\('error', 'invalid_resolution'\);/)
     assert.match(body, /v_review\.review_kind = 'sample' and p_action = 'create_albi'\s+and v_review\.status = 'cleared' and v_review\.recheck_outcome = 'safe_to_create'/)
+    // A sample review that Recheck cleared as safe to link can save that link now.
+    assert.match(body, /v_review\.review_kind = 'sample' and p_action = 'link_existing'\s+and v_review\.status = 'cleared' and v_review\.recheck_outcome = 'safe_to_link'/)
   }
 })
 

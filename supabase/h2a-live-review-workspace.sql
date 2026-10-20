@@ -374,7 +374,8 @@ begin
     return pg_catalog.jsonb_build_object('error', 'stale');
   end if;
   if v_review.status <> 'needs_review' and not (v_review.review_kind = 'sample' and p_action = 'create_albi'
-    and v_review.status = 'cleared' and v_review.recheck_outcome = 'safe_to_create') then
+    and v_review.status = 'cleared' and v_review.recheck_outcome = 'safe_to_create') and not (v_review.review_kind = 'sample' and p_action = 'link_existing'
+    and v_review.status = 'cleared' and v_review.recheck_outcome = 'safe_to_link') then
     return pg_catalog.jsonb_build_object('error', 'stale');
   end if;
   v_now := pg_catalog.clock_timestamp();
