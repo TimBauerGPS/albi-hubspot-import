@@ -1158,3 +1158,25 @@ test('merged-away live rows are found by the survivor id stored in triage detail
     ['review_kind', 'live'], ['status', 'needs_review'], ['triage_details->>mergedIntoSourceId', '77']])
   await assert.rejects(repository.listMergedAwayLiveReviews('company-1', '123', 'contacts', 'x'), TypeError)
 })
+
+test('create batches expire abandoned ones, insert one queued batch, and transition conditionally', async () => {
+  const items = [{ reviewId: '00000000-0000-4000-8000-000000000001', expectedUpdatedAt: '2026-10-12T12:00:00.000Z' }]
+  const createRow = { id: BATCH_ID, company_id: 'company-1', review_kind: 'sample', items, referral_source_id: '5', status: 'queued' }
+  const { repository, calls } = reviewRepositoryFixture([data([]), data(createRow), data({ ...createRow, status: 'running' }), data([{ id: BATCH_ID }]), data([{ id: BATCH_ID }])])
+  const created = await repository.createReviewCreateBatch('company-1', { kind: 'sample', items, referralSourceId: '5', actorId: ACTOR_ID,
+    now: BATCH_TIME, staleBefore: BATCH_TIME })
+  assert.equal(created.batch.id, BATCH_ID)
+  assert.equal(calls[0].table, 'h2a_review_create_batches')
+  assert.deepEqual(calls[1].steps.find(step => step[0] === 'insert')[1], { company_id: 'company-1', review_kind: 'sample', items,
+    referral_source_id: '5', requested_by: ACTOR_ID, status: 'queued', total: 1, heartbeat_at: BATCH_TIME, created_at: BATCH_TIME, updated_at: BATCH_TIME })
+  assert.equal((await repository.claimReviewCreateBatch('company-1', BATCH_ID, BATCH_TIME)).status, 'running')
+  const counts = { total: 1, done: 1, created: 1, skipped: 0, failed: 0 }
+  assert.equal(await repository.updateReviewCreateBatch('company-1', BATCH_ID, { counts, now: BATCH_TIME }), true)
+  assert.deepEqual(calls[3].steps.find(step => step[0] === 'update')[1], { total: 1, done: 1, created: 1, skipped: 0, failed: 0,
+    heartbeat_at: BATCH_TIME, updated_at: BATCH_TIME })
+  assert.equal(await repository.finishReviewCreateBatch('company-1', BATCH_ID, { status: 'completed', counts, now: BATCH_TIME }), true)
+  for (const bad of [[], [{ reviewId: 'nope', expectedUpdatedAt: BATCH_TIME }], Array.from({ length: 51 }, () => items[0])]) {
+    await assert.rejects(repository.createReviewCreateBatch('company-1', { kind: 'sample', items: bad, referralSourceId: '5', actorId: ACTOR_ID, now: BATCH_TIME, staleBefore: BATCH_TIME }))
+  }
+  await assert.rejects(repository.createReviewCreateBatch('company-1', { kind: 'sample', items, referralSourceId: 'x', actorId: ACTOR_ID, now: BATCH_TIME, staleBefore: BATCH_TIME }))
+})

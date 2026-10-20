@@ -294,6 +294,18 @@ export function resolveH2ADryRunReview(session, companyId, input, { signal } = {
 const pick = (input, keys) => Object.fromEntries(keys.filter(key => input?.[key] !== undefined).map(key => [key, input[key]]))
 
 // Links up to 25 exact-match rows, each with its own version and request ID; the server reports each row.
+// "Create selected": the latest create batch of a kind plus Albi's referral sources to choose from.
+export function getH2ACreateBatch(session, companyId, kind = 'sample', { signal } = {}) {
+  return request(session, `h2a-review-create-batch?kind=${encodeURIComponent(kind === 'live' ? 'live' : 'sample')}`, { companyId, signal })
+}
+
+// Starts a background batch creating the selected reviewed records in Albi with one referral source.
+export function startH2ACreateBatch(session, companyId, input = {}, { signal } = {}) {
+  const items = (Array.isArray(input?.items) ? input.items : []).map(item => pick(item, ['reviewId', 'expectedUpdatedAt']))
+  return request(session, 'h2a-review-create-batch', { method: 'POST', companyId,
+    body: { kind: input?.kind === 'live' ? 'live' : 'sample', referralSourceId: input?.referralSourceId, items }, signal })
+}
+
 export function bulkLinkH2AReviews(session, companyId, items, { signal } = {}) {
   const clean = (Array.isArray(items) ? items : []).map(item => pick(item, ['reviewId', 'candidateId', 'expectedUpdatedAt', 'clientRequestId']))
   return request(session, 'h2a-dry-run-review-resolutions', { method: 'POST', companyId: resolutionCompany(companyId),

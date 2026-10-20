@@ -156,15 +156,17 @@ async function evidence(deps, clients, row, decision, deadline) {
   // An email-match link only saves our mapping; it is verified live by the recheck that follows.
   const capturedEmailLink = decision.action === 'link_existing' && (decision.ignoreContactDifferences === true || Array.isArray(decision.ignoredFields))
   const captured = capturedForceCreate || capturedManualOnly || capturedEmailLink
+  // A batch passes one shared Albi read (deps.albiSnapshot) so each record is checked without re-walking Albi.
+  const shared = kind => deps.albiSnapshot && Array.isArray(deps.albiSnapshot[kind]) ? structuredClone(deps.albiSnapshot[kind]) : null
   const contacts = row.object_type === 'contacts'
-    ? captured ? structuredClone(row.candidate_snapshots) : await listAll(deps, args => clients.albiRead.listContacts(args), deadline)
+    ? captured ? structuredClone(row.candidate_snapshots) : shared('contacts') ?? await listAll(deps, args => clients.albiRead.listContacts(args), deadline)
     : []
   // A contact create uses the reviewed organization mapping (org-first) rather than scanning every Albi organization.
   const mappedOrganizationsOnly = capturedForceCreate || decision.action === 'create_albi' && row.object_type === 'contacts'
   const needsOrganizations = !captured && !mappedOrganizationsOnly &&
     (row.object_type === 'companies' || decision.action === 'choose_organization' || decision.action === 'create_albi')
   const organizations = needsOrganizations
-    ? await listAll(deps, args => clients.albiRead.listOrganizations(args), deadline)
+    ? shared('organizations') ?? await listAll(deps, args => clients.albiRead.listOrganizations(args), deadline)
     : captured && row.object_type === 'companies' ? structuredClone(row.candidate_snapshots) : []
   const candidates = row.object_type === 'contacts' ? contacts : organizations
   const organizationEvidence = []
@@ -569,6 +571,15 @@ async function runClaim(deps, input, saved, context) {
           // identify the exact new record even when names are not unique keys.
           await caps.appendReviewResolutionEvent(input.companyId, saved.id,
             { actorId: input.actorId, eventType: 'claimed', details: { createReceiptId } })
+          // With a shared batch read, add the created record (receipt id + the exact payload Albi accepted) to it, so
+          // this record verifies and later records in the batch see it as a possible duplicate.
+          if (deps.albiSnapshot) {
+            const kind = row.object_type === 'contacts' ? 'contacts' : 'organizations'
+            const created = { id: receipt.id }
+            for (const [key, value] of Object.entries(operation.payload)) created[key === 'zipCode' ? 'zipcode' : key] = structuredClone(value)
+            if (!Array.isArray(deps.albiSnapshot[kind])) deps.albiSnapshot[kind] = []
+            deps.albiSnapshot[kind].push(created)
+          }
         }
       } catch (error) {
         // All ambiguous responses are verified by reads. Permission/validation

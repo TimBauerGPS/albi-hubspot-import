@@ -11,6 +11,7 @@ const recheckBatchMigrationUrl = new URL('../supabase/h2a-review-recheck-batches
 const liveReviewMigrationUrl = new URL('../supabase/h2a-live-review-workspace.sql', import.meta.url)
 const mappingOwnershipMigrationUrl = new URL('../supabase/h2a-mapping-target-ownership.sql', import.meta.url)
 const requiredTables = [
+  'h2a_review_create_batches',
   'h2a_company_config', 'h2a_option_mappings', 'h2a_sync_runs',
   'h2a_cursors', 'h2a_backfill_windows', 'h2a_contact_mappings',
   'h2a_organization_mappings', 'h2a_activity_deliveries',
@@ -22,7 +23,7 @@ const requiredTables = [
   'h2a_review_recheck_batches', 'h2a_live_review_conflicts',
 ]
 const serviceOnlyTables = ['h2a_dry_run_reviews', 'h2a_dry_run_review_events']
-const batchTables = ['h2a_review_recheck_batches', 'h2a_live_review_conflicts']
+const batchTables = ['h2a_review_recheck_batches', 'h2a_live_review_conflicts', 'h2a_review_create_batches']
 const resolutionTables = ['h2a_dry_run_review_resolutions', 'h2a_dry_run_review_resolution_events', 'h2a_contact_organization_choices']
 const readSchema = () => readFileSync(schemaUrl, 'utf8').replace(/--[^\n]*/g, '').toLowerCase()
 const readSampleMigration = () => readFileSync(sampleMigrationUrl, 'utf8').replace(/--[^\n]*/g, '').toLowerCase()
@@ -780,5 +781,16 @@ test('recheck batches are scoped by review_kind and may list review_ids', () => 
     assert.match(sql, /alter table public\.h2a_review_recheck_batches alter column run_id drop not null;/)
     assert.match(sql, /check \(review_kind = 'live' or run_id is not null\)/)
     assert.match(sql, /create unique index (?:if not exists )?h2a_review_recheck_batches_one_active_kind_idx\s+on public\.h2a_review_recheck_batches \(company_id, review_kind\)\s+where status in \('queued', 'running'\)/)
+  }
+})
+
+test('create batches are service-only, bounded, and one active per company', () => {
+  const sql = readFileSync(new URL('../supabase/h2a-review-create-batches.sql', import.meta.url), 'utf8').replace(/--[^\n]*/g, '').toLowerCase()
+  for (const source of [sql, readSchema()]) {
+    assert.match(source, /create table (?:if not exists )?public\.h2a_review_create_batches/)
+    assert.match(source, /jsonb_array_length\(items\) between 1 and 50/)
+    assert.match(source, /create unique index (?:if not exists )?h2a_review_create_batches_one_active_idx\s+on public\.h2a_review_create_batches \(company_id\)\s+where status in \('queued', 'running'\)/)
+    assert.match(source, /alter table public\.h2a_review_create_batches enable row level security;/)
+    assert.match(source, /revoke all on table public\.h2a_review_create_batches from public, anon, authenticated, service_role;/)
   }
 })

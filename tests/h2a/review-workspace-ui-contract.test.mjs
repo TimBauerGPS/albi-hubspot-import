@@ -292,7 +292,7 @@ test('org-first create is enabled once a source from orgFirstCreate is chosen', 
 
 // ---- Task 14: workspace, queue, Albi to-do, bulk and pages ----
 
-const CLIENTS = ['getH2AReviews', 'getH2ADryRunReview', 'recheckH2ADryRunReview', 'resolveH2ADryRunReview', 'bulkLinkH2AReviews',
+const CLIENTS = ['getH2ACreateBatch', 'startH2ACreateBatch', 'getH2AReviews', 'getH2ADryRunReview', 'recheckH2ADryRunReview', 'resolveH2ADryRunReview', 'bulkLinkH2AReviews',
   'createH2AOrganizationThenContact', 'skipH2ALiveReview', 'startH2ARecheckAll', 'getH2ARecheckAll', 'prepareH2AOrganizationReview',
   'prepareH2AMergedSurvivorReview', 'getH2AConflicts', 'getH2AOverview', 'prepareH2ALiveReviews']
 function clients(overrides, calls, defaults) {
@@ -798,4 +798,38 @@ test('a field HubSpot leaves blank offers only Use Albi and can be applied on it
   ui.find('button', 'Use Albi').props.onClick(); ui.run()
   ui.find('button', 'Apply field choices').props.onClick()
   assert.deepEqual(j(calls), [{ jobTitle: 'albi' }])
+})
+
+test('quick wins offers Create selected for no-match rows', async () => {
+  const items = [listRow('a', 'Jane Doe', { triageDetails: { quickKind: 'create' } }), listRow('b', 'Marcus Lee')]
+  const props = { items, bucket: 'quick', selectedId: 'a', pendingIds: new Set(), errors: {}, checked: new Set(['a']), bulkLinkCount: 1, createSelectedCount: 1,
+    onSelect() {}, onToggle() {}, onSelectAll() {}, onBulkLink() {}, onRecheckSelected() {}, onCreateSelected() {} }
+  const out = await rendered('ReviewQueue.jsx', props)
+  assert.match(out, /Create selected \(1\)/)
+  assert.doesNotMatch(await rendered('ReviewQueue.jsx', { ...props, bucket: 'decision' }), /Create selected/)
+})
+
+test('Create selected asks for one referral source, starts a background batch and reports the outcome', async () => {
+  const rows = [listRow('a', 'Jane Doe', { triageDetails: { quickKind: 'create' } }), listRow('b', 'Marcus Lee', { triageDetails: { quickKind: 'create' } }), listRow('c', 'Linky')]
+  let polls = 0
+  const ui = await mountWorkspace({ rows,
+    getH2ADryRunReview: async (_s, _c, id) => ({ item: detailOf(id, { updatedAt: '2026-10-12T12:00:00.000Z',
+      triageDetails: { quickKind: id === 'c' ? 'link' : 'create' } }) }),
+    getH2ACreateBatch: async () => ({ referralSources: [{ id: '5', label: 'Network' }],
+      batch: polls++ === 0 ? null : { id: 'b1', status: 'completed', total: 2, done: 2, created: 1, skipped: 1, failed: 0 } }),
+    startH2ACreateBatch: async () => ({ status: 'queued', batch: { id: 'b1', status: 'queued', total: 2, done: 0, created: 0, skipped: 0, failed: 0 } }) },
+  { createBatchPollMs: 1 })
+  assert.equal(ui.queue().props.createSelectedCount, 2)
+  await ui.queue().props.onCreateSelected(); await ui.flush()
+  assert.match(ui.text(), /Jane Doe/); assert.match(ui.text(), /Marcus Lee/)
+  const confirm = ui.find('button', 'Create 2 in Albi')
+  assert.equal(confirm.props.disabled, true)
+  ui.find('select', 'Referral source').props.onChange({ target: { value: '5' } }); await ui.flush()
+  ui.find('button', 'Create 2 in Albi').props.onClick(); await ui.flush()
+  const started = ui.calls.find(call => call.name === 'startH2ACreateBatch')
+  assert.deepEqual(j(started.args[2]), { kind: 'sample', referralSourceId: '5', items: [{ reviewId: 'a', expectedUpdatedAt: '2026-10-12T12:00:00.000Z' }, { reviewId: 'b', expectedUpdatedAt: '2026-10-12T12:00:00.000Z' }] })
+  assert.match(ui.text(), /Creating in Albi: 0 of 2 done/)
+  for (let i = 0; i < 5 && !/Create selected finished/.test(ui.text()); i++) await ui.tick()
+  assert.match(ui.text(), /Create selected finished: 1 created, 1 skipped, 0 failed/)
+  ui.unmount()
 })

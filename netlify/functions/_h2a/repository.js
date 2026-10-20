@@ -78,6 +78,16 @@ function requireReviewValue(value, allowed, label) {
   if (!allowed.has(value)) throw new TypeError(`Invalid review ${label}`)
 }
 
+const CREATE_BATCH_TABLE = 'h2a_review_create_batches'
+const CREATE_BATCH_COLUMNS = 'id,company_id,review_kind,items,referral_source_id,requested_by,status,total,done,created,skipped,failed,error_code,heartbeat_at,started_at,finished_at,created_at,updated_at'
+const MAX_CREATE_BATCH_ITEMS = 50
+function createBatchCounts(counts) {
+  if (!counts || typeof counts !== 'object') throw new TypeError('Invalid create batch counts')
+  return Object.fromEntries(['total', 'done', 'created', 'skipped', 'failed'].map(key => {
+    if (!Number.isSafeInteger(counts[key]) || counts[key] < 0) throw new TypeError('Invalid create batch counts')
+    return [key, counts[key]]
+  }))
+}
 const RECHECK_BATCH_TABLE = 'h2a_review_recheck_batches'
 const RECHECK_BATCH_COLUMNS = 'id,company_id,run_id,review_kind,review_ids,requested_by,status,total,done,cleared,still_needs_review,no_longer_in_scope,stale,failed,error_code,heartbeat_at,started_at,finished_at,created_at,updated_at'
 const RECHECK_BATCH_ERRORS = new Set(['superseded', 'timeout', 'expired', 'dispatch_failed', 'operation_failed',
@@ -650,6 +660,60 @@ export function createH2ARepository(supabase) {
         return { error: 'active', batch: active ?? null }
       }
       return { batch: checked(inserted) }
+    },
+    async createReviewCreateBatch(companyId, { kind = 'sample', items, referralSourceId, actorId, now = new Date().toISOString(), staleBefore }) {
+      requireReviewIdentity(companyId)
+      requireReviewValue(kind, REVIEW_KINDS, 'kind')
+      if (!Array.isArray(items) || items.length < 1 || items.length > MAX_CREATE_BATCH_ITEMS || items.some(item => !item || typeof item !== 'object' ||
+        typeof item.reviewId !== 'string' || !UUID_SHAPE.test(item.reviewId) || typeof item.expectedUpdatedAt !== 'string' ||
+        !TIMESTAMP_SHAPE.test(item.expectedUpdatedAt)) || new Set(items.map(item => item.reviewId)).size !== items.length) throw new TypeError('Invalid create batch items')
+      if (typeof referralSourceId !== 'string' || !/^[1-9]\d{0,99}$/.test(referralSourceId)) throw new TypeError('Invalid create batch referral source')
+      requireReviewIdentity(actorId)
+      requireReviewTimestamp(now)
+      requireReviewTimestamp(staleBefore)
+      checked(await supabase.from(CREATE_BATCH_TABLE).update({ status: 'failed', error_code: 'expired', finished_at: now, updated_at: now })
+        .eq('company_id', companyId).in('status', ['queued', 'running']).lt('heartbeat_at', staleBefore).select('id'))
+      const inserted = await supabase.from(CREATE_BATCH_TABLE).insert({ company_id: companyId, review_kind: kind,
+        items: items.map(item => ({ reviewId: item.reviewId, expectedUpdatedAt: item.expectedUpdatedAt })), referral_source_id: referralSourceId,
+        requested_by: actorId, status: 'queued', total: items.length, heartbeat_at: now, created_at: now, updated_at: now })
+        .select(CREATE_BATCH_COLUMNS).single()
+      if (inserted?.error?.code === '23505') {
+        const active = checked(await supabase.from(CREATE_BATCH_TABLE).select(CREATE_BATCH_COLUMNS).eq('company_id', companyId)
+          .in('status', ['queued', 'running']).order('created_at', { ascending: false }).limit(1).maybeSingle())
+        return { error: 'active', batch: active ?? null }
+      }
+      return { batch: checked(inserted) }
+    },
+    async getLatestReviewCreateBatch(companyId, kind = 'sample') {
+      requireReviewIdentity(companyId)
+      requireReviewValue(kind, REVIEW_KINDS, 'kind')
+      return checked(await supabase.from(CREATE_BATCH_TABLE).select(CREATE_BATCH_COLUMNS).eq('company_id', companyId)
+        .eq('review_kind', kind).order('created_at', { ascending: false }).order('id', { ascending: false }).limit(1).maybeSingle())
+    },
+    async claimReviewCreateBatch(companyId, batchId, now = new Date().toISOString()) {
+      requireReviewIdentity(companyId)
+      requireReviewIdentity(batchId)
+      requireReviewTimestamp(now)
+      return checked(await supabase.from(CREATE_BATCH_TABLE).update({ status: 'running', started_at: now, heartbeat_at: now, updated_at: now })
+        .eq('company_id', companyId).eq('id', batchId).eq('status', 'queued').select(CREATE_BATCH_COLUMNS).maybeSingle()) ?? null
+    },
+    async updateReviewCreateBatch(companyId, batchId, { counts, now = new Date().toISOString() }) {
+      requireReviewIdentity(companyId)
+      requireReviewIdentity(batchId)
+      requireReviewTimestamp(now)
+      const rows = checked(await supabase.from(CREATE_BATCH_TABLE).update({ ...createBatchCounts(counts), heartbeat_at: now, updated_at: now })
+        .eq('company_id', companyId).eq('id', batchId).eq('status', 'running').select('id'))
+      return Array.isArray(rows) && rows.length === 1
+    },
+    async finishReviewCreateBatch(companyId, batchId, { status, errorCode = null, counts, now = new Date().toISOString(), fromStatus = 'running' }) {
+      requireReviewIdentity(companyId)
+      requireReviewIdentity(batchId)
+      requireReviewTimestamp(now)
+      if (!['completed', 'failed'].includes(status) || !['queued', 'running'].includes(fromStatus)) throw new TypeError('Invalid create batch state')
+      if (errorCode !== null && !['timeout', 'expired', 'dispatch_failed', 'operation_failed'].includes(errorCode)) throw new TypeError('Invalid create batch error')
+      const rows = checked(await supabase.from(CREATE_BATCH_TABLE).update({ ...createBatchCounts(counts), status, error_code: errorCode,
+        finished_at: now, heartbeat_at: now, updated_at: now }).eq('company_id', companyId).eq('id', batchId).eq('status', fromStatus).select('id'))
+      return Array.isArray(rows) && rows.length === 1
     },
     async getLatestReviewRecheckBatch(companyId, kind = 'sample') {
       requireReviewIdentity(companyId)

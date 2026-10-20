@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { bulkLinkH2AReviews, createH2AOrganizationThenContact, getH2ADryRunReview, getH2AReviews, prepareH2AMergedSurvivorReview,
+import { bulkLinkH2AReviews, createH2AOrganizationThenContact, getH2ACreateBatch, startH2ACreateBatch, getH2ADryRunReview, getH2AReviews, prepareH2AMergedSurvivorReview,
   prepareH2AOrganizationReview, recheckH2ADryRunReview, resolveH2ADryRunReview, skipH2ALiveReview, startH2ARecheckAll } from '../../lib/hubspotToAlbi'
 import { BUCKETS, createDeferredQueue, fieldLabel, nextRecordId, shortcutFor } from './reviewWorkspace.js'
 import { presentSampleReviewItem, SAMPLE_REVIEW_REASON_OPTIONS } from './sampleReview.js'
@@ -83,7 +83,7 @@ function UndoToasts({ entries, onUndo, onSendNow }) {
 // One review workspace for both queues: kind "sample" (dry-run sample rows) and kind "live" (Conflicts).
 export default function ReviewWorkspace({
   kind = 'sample', session, companyId, tenantRevision = 0, completeTenantTransition, isAdmin = false, readOnly = !isAdmin,
-  initialFilters, reloadToken = 0, renderHeader, renderBeforeQueue, renderGate, renderFooter, onBatchStarted,
+  initialFilters, reloadToken = 0, renderHeader, renderBeforeQueue, renderGate, renderFooter, onBatchStarted, createBatchPollMs = 3000,
 }) {
   const tenantKey = `${companyId ?? 'none'}:${tenantRevision}`
   const tenantKeyRef = useRef(tenantKey)
@@ -143,6 +143,9 @@ export default function ReviewWorkspace({
   const [checked, setChecked] = useState(() => new Set())
   const [bulk, setBulk] = useState(null)
   const [bulkSummary, setBulkSummary] = useState('')
+  // "Create selected": the open choice dialog, then the running background batch's progress.
+  const [createDialog, setCreateDialog] = useState(null)
+  const [createProgress, setCreateProgress] = useState(null)
   const [help, setHelp] = useState(false)
 
   const same = startedFor => mountedRef.current && tenantKeyRef.current === startedFor
@@ -696,6 +699,56 @@ export default function ReviewWorkspace({
       if (same(startedFor)) setBulk(null)
     }
   }
+  // Create selected: ticked Quick-wins rows that are plain creates (no Albi match). One referral source for all;
+  // a background batch reads Albi once and runs the normal checked create for each.
+  const createEligible = view === 'quick' ? items.filter(item => item.triageBucket === 'quick' && item.triageDetails?.quickKind === 'create' && !pendingSet.has(item.id)) : []
+  // Like bulk link: the ticked no-match rows, or every one in Quick wins when none are ticked.
+  const createTargets = (checked.size ? createEligible.filter(item => checked.has(item.id)) : createEligible).slice(0, 50)
+  async function openCreateSelected() {
+    if (!createTargets.length || bulk || createProgress) return
+    const startedFor = tenantKey, targets = [...createTargets]
+    setActionError(''); setNotice('')
+    try {
+      const loaded = await getH2ACreateBatch(session, companyId, kind)
+      if (!same(startedFor)) return
+      const sources = list(loaded?.referralSources).filter(source => typeof source?.id === 'string' && typeof source?.label === 'string')
+      if (!sources.length) { setActionError('Albi’s referral sources could not be loaded. Try again.'); return }
+      setCreateDialog({ targets, sources, referralSourceId: '' })
+    } catch (cause) { if (same(startedFor)) setActionError(cause.message) }
+  }
+  async function pollCreateBatch(startedFor) {
+    for (;;) {
+      await new Promise(resolve => setTimeout(resolve, createBatchPollMs))
+      if (!same(startedFor)) return
+      let batch = null
+      try { batch = (await getH2ACreateBatch(session, companyId, kind))?.batch ?? null } catch { continue }
+      if (!same(startedFor)) return
+      if (batch) setCreateProgress(batch)
+      if (batch && ['completed', 'failed'].includes(batch.status)) {
+        setCreateProgress(null)
+        setBulkSummary(batch.status === 'completed'
+          ? `Create selected finished: ${batch.created} created, ${batch.skipped} skipped, ${batch.failed} failed.${batch.created ? ' Recheck them to clear them.' : ''}`
+          : `Create selected stopped early: ${batch.created} created, ${batch.skipped} skipped, ${batch.failed} failed.`)
+        setRetryToken(value => value + 1)
+        return
+      }
+    }
+  }
+  async function runCreateSelected() {
+    const current = createDialog
+    if (!current?.referralSourceId) return
+    setCreateDialog(null)
+    const startedFor = tenantKey
+    try {
+      const result = await startH2ACreateBatch(session, companyId, { kind, referralSourceId: current.referralSourceId,
+        items: current.targets.map(item => ({ reviewId: item.id, expectedUpdatedAt: item.updatedAt })) })
+      if (!same(startedFor)) return
+      setChecked(new Set())
+      setCreateProgress(result?.batch ?? { status: 'queued', total: current.targets.length, done: 0 })
+      if (result?.status === 'already_running') setNotice('A create batch is already running. Its progress is shown here.')
+      pollCreateBatch(startedFor)
+    } catch (cause) { if (same(startedFor)) setActionError(cause.message) }
+  }
   function openRecheckSelected() {
     const ids = [...checked]
     if (!ids.length || bulk) return
@@ -803,6 +856,8 @@ export default function ReviewWorkspace({
           <p>{`Linking exact matches… ${bulk.done} / ${bulk.total}`}</p>
           <div className="mt-2 h-2 overflow-hidden rounded-full bg-white" role="progressbar" aria-label="Bulk link progress" aria-valuemin={0} aria-valuemax={bulk.total} aria-valuenow={bulk.done}>
             <div className="h-full rounded-full bg-brand-600 transition-all" style={{ width: `${bulk.total ? Math.round(bulk.done / bulk.total * 100) : 0}%` }} /></div></div>}
+        {visible && createProgress && <p className="rounded-lg border border-brand-200 bg-brand-50 px-4 py-3 text-brand-800" role="status">
+          {`Creating in Albi: ${createProgress.done ?? 0} of ${createProgress.total ?? 0} done${createProgress.created ? ` (${createProgress.created} created)` : ''}. Albi is read once; each record is still checked before it is created.`}</p>}
         {visible && bulkSummary && <p className="rounded-lg border border-gray-200 bg-white px-4 py-3 text-gray-800" role="status">{bulkSummary}</p>}
         {visible && actionError && <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-red-800" role="alert"><p>{actionError}</p>
           <button type="button" onClick={() => setRetryToken(value => value + 1)} className={`${btn} mt-3`}>Reload queue</button></div>}
@@ -816,7 +871,8 @@ export default function ReviewWorkspace({
             : <div className="grid gap-4 lg:grid-cols-[20rem_minmax(0,1fr)] lg:items-start">
               <ReviewQueue items={items} bucket={view} selectedId={selectedId} pendingIds={pendingSet} sendingIds={sendingSet} errors={recordErrors} checked={checked}
                 bulkEnabled={!readOnly} onSelect={selectRecord} onToggle={toggle} onSelectAll={selectAll} bulkLinkCount={bulkTargets.length}
-                onBulkLink={openBulkLink} onRecheckSelected={openRecheckSelected} busy={Boolean(bulk)}
+                onBulkLink={openBulkLink} onRecheckSelected={openRecheckSelected} busy={Boolean(bulk) || Boolean(createProgress)}
+                createSelectedCount={createTargets.length} onCreateSelected={readOnly ? undefined : openCreateSelected}
                 nextCursor={nextCursor} loadingMore={loadingMore} loadMoreDisabled={Boolean(busyId) || Boolean(bulk)} onLoadMore={loadMore} />
               <div className="min-w-0 space-y-3">
                 {returnToId && returnToId !== selectedId && <div className="rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm text-gray-800">
@@ -841,6 +897,21 @@ export default function ReviewWorkspace({
 
     <UndoToasts entries={pending} onUndo={doUndo} onSendNow={sendNow} />
     <style>{'@keyframes h2a-undo { from { width: 100% } to { width: 0% } }'}</style>
+    {createDialog && <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-950/45 px-4" role="dialog" aria-modal="true" aria-label="Create selected in Albi">
+      <div className="w-full max-w-md rounded-xl bg-white p-5 shadow-xl">
+        <h3 className="text-lg font-semibold text-gray-900">{`Create ${plural(createDialog.targets.length, 'new record')} in Albi?`}</h3>
+        <ul className="mt-3 space-y-1 text-sm text-gray-700">{createDialog.targets.slice(0, 8).map(item => <li key={item.id}>{nameOf(item)}</li>)}
+          {createDialog.targets.length > 8 && <li>{`…and ${createDialog.targets.length - 8} more`}</li>}</ul>
+        <label className="mt-4 block text-xs font-medium text-gray-700">Referral source for all of them
+          <select aria-label="Referral source" value={createDialog.referralSourceId} onChange={event => { const value = event.target.value; setCreateDialog(current => current ? { ...current, referralSourceId: value } : current) }}
+            className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900">
+            <option value="">Referral source…</option>
+            {createDialog.sources.map(source => <option key={source.id} value={source.id}>{source.label}</option>)}</select></label>
+        <p className="mt-3 text-xs text-gray-600">Each record is checked against Albi first; any that now match an Albi record, or changed, are skipped. New records are Type Referrer and Status Active, with the owner’s salesperson.</p>
+        <div className="mt-5 flex flex-row-reverse gap-2">
+          <button type="button" className={primary} disabled={!createDialog.referralSourceId} onClick={runCreateSelected}>{`Create ${createDialog.targets.length} in Albi`}</button>
+          <button type="button" className={btn} onClick={() => setCreateDialog(null)}>Cancel</button></div>
+      </div></div>}
     {dialog && <ConfirmDialog dialog={dialog} panelRef={dialogPanelRef} confirmRef={dialogConfirmRef} onConfirm={confirmDialog} onCancel={closeDialog} />}
     <ShortcutHelp open={help} kind={kind} onClose={() => setHelp(false)} />
   </div>

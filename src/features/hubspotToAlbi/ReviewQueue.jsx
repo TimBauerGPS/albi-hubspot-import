@@ -27,7 +27,7 @@ function rowReason(item, review, { pending, sending, error }) {
 // exist only on the Quick wins bucket, and there is deliberately no bulk create.
 export default function ReviewQueue({
   items = [], bucket = 'quick', selectedId = null, pendingIds = new Set(), sendingIds = new Set(), errors = {}, checked = new Set(),
-  bulkEnabled = true, onSelect, onToggle, onSelectAll, bulkLinkCount = 0, onBulkLink, onRecheckSelected, busy = false,
+  bulkEnabled = true, onSelect, onToggle, onSelectAll, bulkLinkCount = 0, onBulkLink, onRecheckSelected, createSelectedCount = 0, onCreateSelected, busy = false,
   nextCursor = null, loadingMore = false, loadMoreDisabled = false, onLoadMore,
 }) {
   const sentinel = useRef(null)
@@ -46,11 +46,13 @@ export default function ReviewQueue({
   const allChecked = selectable.length > 0 && selectable.every(item => checked.has(item.id))
   return <aside className="min-w-0 overflow-hidden rounded-xl border border-gray-200 bg-white lg:sticky lg:top-4" aria-label="Review queue">
     {bulk && <div className="space-y-2 border-b border-gray-200 p-3">
-      <p className="text-xs text-gray-600">{checked.size ? `${checked.size} selected` : 'Bulk link applies to every exact match, or to the rows you tick (x). Creates are one at a time.'}</p>
+      <p className="text-xs text-gray-600">{checked.size ? `${checked.size} selected` : 'Bulk link applies to every exact match, or to the rows you tick (x). Tick no-match rows to create them together.'}</p>
       <div className="flex flex-wrap gap-2">
         <button type="button" className={btn} disabled={busy || !selectable.length} onClick={onSelectAll}>{allChecked ? 'Clear selection' : 'Select all in bucket'}</button>
         <button type="button" className={btn} disabled={busy || !bulkLinkCount} onClick={onBulkLink}>Link all exact matches ({bulkLinkCount})</button>
         <button type="button" className={btn} disabled={busy || !checked.size} onClick={onRecheckSelected}>Recheck selected ({checked.size})</button>
+        {onCreateSelected && <button type="button" className={btn} disabled={busy || !createSelectedCount} onClick={onCreateSelected}
+          title="Create the ticked no-match records in Albi with one referral source">Create selected ({createSelectedCount})</button>}
       </div>
     </div>}
     <ol className="max-h-[38rem] divide-y divide-gray-100 overflow-y-auto">

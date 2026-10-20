@@ -1090,3 +1090,15 @@ test('creating a contact uses the organization mapping instead of scanning Albi 
   assert.equal(result.resolution.status, 'ready_to_recheck')
   assert.equal(mutations(f)[0][1].organizationId, '88')
 })
+
+test('a create given a shared Albi read uses it, verifies against the receipt, and adds the new record to that read', async () => {
+  const f = fixture(), createInput = asCreate(f)
+  f.deps.albiRead.listContacts = async () => { throw Error('must use the shared Albi read') }
+  const snapshot = { contacts: [], organizations: [] }
+  f.deps.albiSnapshot = snapshot
+  const result = await executeReviewResolution(f.deps, createInput)
+  assert.equal(result.resolution.status, 'ready_to_recheck')
+  assert.equal(f.mappings.contacts[0].albi_contact_id, '30')
+  assert.deepEqual(snapshot.contacts.map(record => record.id), ['30'])
+  assert.equal(snapshot.contacts[0].email, 'hs@example.com')
+})
