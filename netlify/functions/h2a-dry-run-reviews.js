@@ -92,7 +92,7 @@ async function detail(repository, companyId, runId, row, auth, options, config) 
   const projected = await currentResolutionProjection(repository, companyId, row.id, row.portal_id)
   const resolutionCapability = projectResolutionCapability(auth, (options.env ?? process.env).H2A_REVIEW_RESOLUTION_MODE, projected.hubspotWrites)
   const actions = getH2AReviewActions(row.reason, row.object_type)
-  let resolutionOptions = { organizationOptions: [], createReadiness: { ready: false }, forceCreateReadiness: { eligible: false, ready: false } }
+  let resolutionOptions = { organizationOptions: [], createReadiness: { ready: false }, forceCreateReadiness: { eligible: false, ready: false } }, timedOut = false
   if (resolutionCapability.canResolve && (row.status === 'needs_review' || row.status === 'cleared' && row.recheck_outcome === 'safe_to_create') &&
     (actions.includes('choose_organization') || actions.includes('create_albi') &&
       Array.isArray(row.candidate_snapshots) && row.candidate_snapshots.length === 0 ||
@@ -110,7 +110,17 @@ async function detail(repository, companyId, runId, row, auth, options, config) 
         return account.portalId === config.portal_id ? loadedOptions : null
       }, timeoutMs)
       if (loaded) resolutionOptions = loaded
-    } catch { /* The chooser remains disabled when live evidence cannot be read. */ }
+      else timedOut = true
+    } catch { timedOut = true /* The chooser remains disabled when live evidence cannot be read. */ }
+    // Say why creation is off when its checks did not finish, rather than an unexplained "unavailable".
+    if (timedOut) {
+      if (actions.includes('create_albi') && Array.isArray(row.candidate_snapshots) && row.candidate_snapshots.length === 0) {
+        resolutionOptions = { ...resolutionOptions, createReadiness: { ready: false, blockedReason: 'evidence_unavailable' } }
+      }
+      if (actions.includes('force_create_albi') && Array.isArray(row.candidate_snapshots) && row.candidate_snapshots.length > 0) {
+        resolutionOptions = { ...resolutionOptions, forceCreateReadiness: { eligible: true, ready: false, blockedReason: 'evidence_unavailable' } }
+      }
+    }
   }
   // "Create organization and contact": advisory, so any failure or timeout simply leaves it unavailable.
   let orgFirstCreate = { eligible: false }

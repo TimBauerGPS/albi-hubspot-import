@@ -6,6 +6,13 @@ export const H2A_BLOCKED_REASONS = Object.freeze({
   multiple_organizations: 'This contact has more than one HubSpot organization. Keep one association in HubSpot, then recheck.',
   salesperson_not_found: 'The HubSpot owner’s name does not exactly match one Albi salesperson. Correct the name in Albi or HubSpot, then recheck.',
   organization_not_synced: 'This contact’s HubSpot organization is not in Albi yet. Create or link the organization first.',
+  source_changed: 'This HubSpot record changed since it was last checked. Recheck this record, then create it.',
+  missing_name: 'The HubSpot record is missing a required name (first and last name, or company name). Add it in HubSpot, then recheck.',
+  default_type_unconfirmed: 'The default Albi type isn’t confirmed. Confirm the default contact and organization types in Settings, then recheck.',
+  referral_sources_unavailable: 'Albi’s referral sources could not be loaded. Reload this record to try again.',
+  organization_mapping_ambiguous: 'This contact’s HubSpot organization is linked to more than one Albi organization. Fix the duplicate link first.',
+  organization_missing_in_hubspot: 'This contact’s HubSpot organization could not be read. Check the association in HubSpot, then recheck.',
+  evidence_unavailable: 'The checks for creating this record didn’t finish in time. Reload the record or Recheck it.',
 })
 
 export function blockedReasonCopy(code) {

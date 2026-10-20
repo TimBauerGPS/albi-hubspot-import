@@ -42,9 +42,12 @@ export function safeReferralSources(sources) {
 
 // Pure. The one create-readiness shape, shared by the review detail projection and live capture.
 // baseReady covers the record's own checks; an organization block always names organization_not_synced.
-export function buildCreateReadiness({ baseReady, organizationBlock = null, referralSources = [], defaults = null }) {
+export function buildCreateReadiness({ baseReady, organizationBlock = null, referralSources = [], defaults = null, notReadyReason = null }) {
   const ready = Boolean(baseReady) && referralSources.length > 0 && defaults?.ok === true
-  const blockedReason = organizationBlock ? 'organization_not_synced' : defaults && defaults.ok !== true ? defaults.reason : undefined
+  // The first failing check names itself, so the record never shows an unexplained "unavailable".
+  const blockedReason = organizationBlock ? 'organization_not_synced' : notReadyReason ? notReadyReason
+    : baseReady && referralSources.length === 0 ? 'referral_sources_unavailable'
+      : defaults && defaults.ok !== true ? defaults.reason : undefined
   return { ready, ...(ready ? { referralSources } : {}), ...(blockedReason ? { blockedReason } : {}),
     ...(organizationBlock ? { organization: organizationBlock } : {}) }
 }

@@ -34,32 +34,38 @@ test('missing or contradictory live association evidence leaves organization act
   }
 })
 
-test('create readiness requires current identity, confirmed type, and resolvable associated organization', async () => {
+test('create readiness trusts the last recheck (no full Albi scan) and names why it is blocked', async () => {
   const createRow = { ...row, reason: 'no_match', recheck_outcome: null, candidate_snapshots: [],
     source_snapshot: { id: '123', firstName: 'Alex', lastName: 'Stone' } }
   const currentMappings = { ...mappings, contacts: [], options: [{ mapping_kind: 'default_contact_type',
     albi_id: '12', confirmed: true }] }
   const currentReads = { ...reads, hubspotRead: { ...reads.hubspotRead,
     getContacts: async () => [{ id: '123', properties: { firstname: 'Alex', lastname: 'Stone' } }] },
-  albiRead: { ...reads.albiRead, listContacts: async () => ({ records: [], cursor: null }) } }
-  const ready = await loadReviewResolutionOptions({ row: createRow, repository: { getMappings: async () => currentMappings }, reads: currentReads })
-  assert.deepEqual(ready.createReadiness, { ready: true, referralSources: [{ id: '5', label: 'Network' }] })
-  const missingType = await loadReviewResolutionOptions({ row: createRow, repository: { getMappings: async () => ({ ...currentMappings, options: [] }) }, reads: currentReads })
-  assert.deepEqual(missingType.createReadiness, { ready: false })
-  const candidate = await loadReviewResolutionOptions({ row: createRow, repository: { getMappings: async () => currentMappings },
-    reads: { ...currentReads, albiRead: { ...currentReads.albiRead,
-      listContacts: async () => ({ records: [{ id: '456', firstName: 'Alex', lastName: 'Stone' }], cursor: null }) } } })
-  assert.deepEqual(candidate.createReadiness, { ready: false })
-  const unreadable = await loadReviewResolutionOptions({ row: createRow, repository: { getMappings: async () => currentMappings },
-    reads: { ...currentReads, albiRead: { ...currentReads.albiRead, listContacts: async () => ({}) } } })
-  assert.deepEqual(unreadable.createReadiness, { ready: false })
-  const stale = await loadReviewResolutionOptions({ row: { ...createRow, source_snapshot: { ...createRow.source_snapshot, firstName: 'Old' } },
-    repository: { getMappings: async () => currentMappings }, reads: currentReads })
-  assert.deepEqual(stale.createReadiness, { ready: false })
-  const ambiguousMapping = await loadReviewResolutionOptions({ row: createRow,
-    repository: { getMappings: async () => ({ ...currentMappings, contacts: [{ portal_id: '321', hubspot_id: '123', albi_contact_id: '456' }] }) },
-    reads: currentReads })
-  assert.deepEqual(ambiguousMapping.createReadiness, { ready: false })
+  albiRead: { ...reads.albiRead, listContacts: async () => { throw Error('must not scan Albi contacts') },
+    listOrganizations: async () => { throw Error('must not scan Albi organizations') } } }
+  const load = (overrides = {}) => loadReviewResolutionOptions({ row: overrides.row ?? createRow,
+    repository: { getMappings: async () => overrides.mappings ?? currentMappings }, reads: overrides.reads ?? currentReads })
+  assert.deepEqual((await load()).createReadiness, { ready: true, referralSources: [{ id: '5', label: 'Network' }] })
+  assert.deepEqual((await load({ mappings: { ...currentMappings, options: [] } })).createReadiness, { ready: false, blockedReason: 'default_type_unconfirmed' })
+  assert.deepEqual((await load({ row: { ...createRow, source_snapshot: { ...createRow.source_snapshot, firstName: 'Old' } } })).createReadiness,
+    { ready: false, blockedReason: 'source_changed' })
+  assert.deepEqual((await load({ reads: { ...currentReads, hubspotRead: { ...currentReads.hubspotRead,
+    getContacts: async () => [{ id: '123', properties: { firstname: 'Alex', lastname: '' } }] } },
+  row: { ...createRow, source_snapshot: { id: '123', firstName: 'Alex' } } })).createReadiness, { ready: false, blockedReason: 'missing_name' })
+  assert.deepEqual((await load({ reads: { ...currentReads, albiRead: { ...currentReads.albiRead, listReferralSources: async () => [] } } })).createReadiness,
+    { ready: false, blockedReason: 'referral_sources_unavailable' })
+  const mapped = await load({ mappings: { ...currentMappings, contacts: [{ portal_id: '321', hubspot_id: '123', albi_contact_id: '456' }] } })
+  assert.deepEqual(mapped.createReadiness, { ready: false })
+})
+
+test('a contact behind a mapped organization is ready without scanning Albi organizations', async () => {
+  const createRow = { ...row, reason: 'no_match', recheck_outcome: null, candidate_snapshots: [],
+    source_snapshot: { id: '123', firstName: 'Alex', lastName: 'Stone' } }
+  const result = await loadReviewResolutionOptions({ row: createRow,
+    repository: { getMappings: async () => ({ ...mappings, contacts: [], options: [{ mapping_kind: 'default_contact_type', albi_id: '12', confirmed: true }] }) },
+    reads: { ...reads, hubspotRead: { ...reads.hubspotRead, getContacts: async () => [{ id: '123', properties: { firstname: 'Alex', lastname: 'Stone' } }] },
+      albiRead: { ...reads.albiRead, listContacts: async () => { throw Error('no scan') }, listOrganizations: async () => { throw Error('no scan') } } } })
+  assert.equal(result.createReadiness.ready, true)
 })
 
 test('forced create readiness permits the captured candidate set but never an existing source mapping', async () => {

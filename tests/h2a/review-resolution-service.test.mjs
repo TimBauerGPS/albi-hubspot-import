@@ -1079,3 +1079,14 @@ test('a stale live decision says the record changed, not the sample review', asy
   await assert.rejects(executeReviewResolution(sample.deps, { ...input, expectedUpdatedAt: '2026-10-12T12:00:00Z' }),
     error => error.statusCode === 409 && !error.message.includes('This record changed'))
 })
+
+test('creating a contact uses the organization mapping instead of scanning Albi organizations', async () => {
+  const f = fixture(), createInput = asCreate(f)
+  f.associations = ['77']
+  f.mappings.organizations.push({ portal_id: '123', hubspot_id: '77', albi_organization_id: '88' })
+  f.createdTarget = { ...f.createdTarget, organizationId: '88' }
+  f.deps.albiRead.listOrganizations = async () => { throw Error('must not scan Albi organizations') }
+  const result = await executeReviewResolution(f.deps, createInput)
+  assert.equal(result.resolution.status, 'ready_to_recheck')
+  assert.equal(mutations(f)[0][1].organizationId, '88')
+})

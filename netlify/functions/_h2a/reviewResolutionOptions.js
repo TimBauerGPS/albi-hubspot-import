@@ -132,17 +132,11 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
         blockedReason: sourceMapped ? 'source_already_mapped' : 'multiple_organizations' } }
     }
     if ((normal || forced) && associated.length <= 1 && !sourceMapped) {
-      if (!isDeepStrictEqual(safeReviewSnapshot(sourceRows[0], row.object_type), row.source_snapshot)) return unavailable
-      if (normal) {
-        const candidates = row.object_type === 'contacts' ? await all(args => reads.albiRead.listContacts(args))
-          : await all(args => reads.albiRead.listOrganizations(args))
-        if (!candidates) return unavailable
-        const match = (row.object_type === 'contacts' ? decideContactMatch : decideOrganizationMatch)({
-          source: sourceRows[0], candidates, portalId: row.portal_id,
-          mappings: mappings[row.object_type === 'contacts' ? 'contacts' : 'organizations'],
-        })
-        if (match.action !== 'create') return unavailable
-      }
+      const blocked = reason => ({ ...unavailable, ...(forced ? { forceCreateReadiness: { eligible: true, ready: false, blockedReason: reason } }
+        : { createReadiness: { ready: false, blockedReason: reason } }) })
+      if (!isDeepStrictEqual(safeReviewSnapshot(sourceRows[0], row.object_type), row.source_snapshot)) return blocked('source_changed')
+      // No full Albi scan here: the last recheck captured no candidates, and the create itself re-checks Albi
+      // live before writing, so a duplicate that appeared since is still refused.
       if (forced) {
         const capturedIds = row.candidate_snapshots.map(item => item?.id)
         if (!capturedIds.length || capturedIds.length > 10 || capturedIds.some(id => !providerId(id)) ||
@@ -155,22 +149,20 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
       if (associated.length === 1) {
         const sourceId = associated[0]
         const associationMappings = mappings.organizations.filter(item => item?.portal_id === row.portal_id && mappedSource(item) === sourceId)
-        if (associationMappings.length > 1) return unavailable
+        if (associationMappings.length > 1) return blocked('organization_mapping_ambiguous')
         const targetId = exactMapping(mappings.organizations, row.portal_id, sourceId, 'companies')
         const companies = await hubspot.getCompanies([sourceId])
-        const organizations = forced ? null : await all(args => reads.albiRead.listOrganizations(args))
-        const target = organizations?.find(item => item.id === targetId)
         const companyReady = Array.isArray(companies) && companies.length === 1 && companies[0]?.id === sourceId &&
           companies[0]?.archived !== true && record(companies[0]?.properties)
-        organizationReady = Boolean(companyReady && targetId && (forced || target))
+        if (!companyReady) return blocked('organization_missing_in_hubspot')
+        // The reviewed mapping is the organization's identity; the create re-reads it live.
+        organizationReady = Boolean(targetId)
         if (companyReady && associationMappings.length === 0) {
           // The organization must be synced first; point at its own audited review when one exists.
           const found = typeof repository.findDryRunReviewBySource === 'function'
             ? await repository.findDryRunReviewBySource(row.company_id, row.run_id, 'companies', sourceId) : null
           organizationBlock = { sourceId, reviewId: typeof found?.id === 'string' ? found.id : null }
         }
-        if (organizationReady && Array.isArray(target?.organizationTypeIds) && target.organizationTypeIds.length === 1 &&
-          providerId(target.organizationTypeIds[0])) organizationTypeId = target.organizationTypeIds[0]
       }
       const options = row.object_type === 'contacts' ? mappings.options : mappings.options.filter(item =>
         (item?.mapping_kind ?? item?.mappingKind) === 'default_organization_type' && (item?.source_key ?? item?.sourceKey) === 'default')
@@ -180,10 +172,11 @@ export async function loadReviewResolutionOptions({ row, repository, reads }) {
       const typeReady = type.action === 'resolved' && providerId(type.contactTypeId) &&
         Number.isSafeInteger(Number(type.contactTypeId))
       const baseReady = nameReady && organizationReady && typeReady && !organizationBlock
+      const notReadyReason = organizationBlock ? null : !nameReady ? 'missing_name' : !typeReady ? 'default_type_unconfirmed' : null
       const referralSources = safeReferralSources(baseReady ? await reads.albiRead.listReferralSources() : [])
       const defaults = baseReady && referralSources.length > 0 ? await loadCreateDefaults({ hubspotRead: hubspot, albiRead: reads.albiRead,
         objectType: row.object_type, sourceId: row.source_id }) : null
-      const details = buildCreateReadiness({ baseReady, organizationBlock, referralSources, defaults })
+      const details = buildCreateReadiness({ baseReady, organizationBlock, referralSources, defaults, notReadyReason })
       return { ...unavailable, ...(forced ? { forceCreateReadiness: { eligible: true, ...details } } : { createReadiness: details }) }
     }
   } catch { /* A failed read cannot become an actionable projection. */ }

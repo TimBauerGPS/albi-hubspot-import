@@ -159,7 +159,9 @@ async function evidence(deps, clients, row, decision, deadline) {
   const contacts = row.object_type === 'contacts'
     ? captured ? structuredClone(row.candidate_snapshots) : await listAll(deps, args => clients.albiRead.listContacts(args), deadline)
     : []
-  const needsOrganizations = !captured &&
+  // A contact create uses the reviewed organization mapping (org-first) rather than scanning every Albi organization.
+  const mappedOrganizationsOnly = capturedForceCreate || decision.action === 'create_albi' && row.object_type === 'contacts'
+  const needsOrganizations = !captured && !mappedOrganizationsOnly &&
     (row.object_type === 'companies' || decision.action === 'choose_organization' || decision.action === 'create_albi')
   const organizations = needsOrganizations
     ? await listAll(deps, args => clients.albiRead.listOrganizations(args), deadline)
@@ -172,7 +174,7 @@ async function evidence(deps, clients, row, decision, deadline) {
     const company = await sourceRead(deps, clients, 'companies', id, deadline)
     if (!company) continue
     const rows = mappings.organizations
-    if (capturedForceCreate) {
+    if (mappedOrganizationsOnly) {
       const mapped = rows.filter(mapping => mapping.hubspot_id === id && mapping.portal_id === row.portal_id)
       if (mapped.length > 1) stale('mapping')
       if (mapped.length === 1 && isResolutionProviderId(mapped[0].albi_organization_id)) {

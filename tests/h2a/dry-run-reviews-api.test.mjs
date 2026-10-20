@@ -112,7 +112,8 @@ test('detail returns safe JSON when advisory provider evidence exceeds its deadl
   assert.equal(response.statusCode, 200)
   assert.equal(response.headers['Content-Type'], 'application/json')
   const item = JSON.parse(response.body).item
-  assert.deepEqual(item.forceCreateReadiness, { eligible: false, ready: false })
+  // Running out of time names itself instead of silently hiding creation.
+  assert.deepEqual(item.forceCreateReadiness, { eligible: true, ready: false, blockedReason: 'evidence_unavailable' })
   assert.equal(item.resolutionCapability.canResolve, true)
 })
 
@@ -695,4 +696,16 @@ test('the live list reads only the configured portal and is empty without one', 
   const response = await none.handler(get({ kind: 'live' }))
   assert.equal(response.statusCode, 200)
   assert.deepEqual(JSON.parse(response.body).items, [])
+})
+
+test('a create-eligible record whose readiness check runs out of time says so', async () => {
+  const f = fixture()
+  f.options.env = { H2A_REVIEW_RESOLUTION_MODE: 'admins' }
+  f.options.requireRequest = async () => ({ companyId: 'authorized-company', role: 'admin', isSuperAdmin: false })
+  f.options.detailDeadlineMs = 5
+  f.row.reason = 'no_match'; f.row.candidate_snapshots = []
+  f.options.makeClients = async () => ({ hubspot: { getContacts: () => new Promise(() => {}), getCompanies: async () => [], getAssociations: () => new Promise(() => {}) },
+    albi: { listContacts: () => new Promise(() => {}), listOrganizations: () => new Promise(() => {}) } })
+  const item = JSON.parse((await createDryRunReviewHandler(f.options)(get({ reviewId }))).body).item
+  assert.deepEqual(item.createReadiness, { ready: false, blockedReason: 'evidence_unavailable' })
 })
