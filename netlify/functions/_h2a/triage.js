@@ -8,13 +8,14 @@ export const TRIAGE_BUCKETS = Object.freeze(['quick', 'todo', 'decision', 'block
 
 // Pure bucket decision. createReadiness undefined means "not known yet"; only the link rule can yield quick then.
 // mergedInto is optional because merge state is read live from HubSpot, not stored.
-export function computeTriage({ row, ranking, createReadiness, resolutionStatus, mergedInto } = {}) {
+export function computeTriage({ row, ranking, createReadiness, resolutionStatus, mergedInto, linked = true } = {}) {
   const candidates = Array.isArray(ranking?.candidates) ? ranking.candidates : []
   // Open Albi work wins over a cleared safe recheck: the reviewer still owes that to-do.
   if (resolutionStatus === 'waiting_on_albi' && ['needs_review', 'cleared'].includes(row?.status)) return { bucket: 'todo', details: {} }
   // A link or create that saved (Albi written, mapping stored) only needs a recheck to confirm: it is done, so it is
   // never offered again as a create (a duplicate) or shown as blocked because it is now linked. Recheck all confirms it.
-  if (resolutionStatus === 'ready_to_recheck' && ['needs_review', 'cleared'].includes(row?.status)) return { bucket: 'done', details: { recheckPending: true } }
+  // linked: the source has a stored mapping (false when an attempt never wrote, so it is not shown as finished).
+  if (resolutionStatus === 'ready_to_recheck' && linked && ['needs_review', 'cleared'].includes(row?.status)) return { bucket: 'done', details: { recheckPending: true } }
   if (row?.status === 'cleared' && resolutionStatus !== 'completed' &&
     ['safe_to_link', 'safe_to_create'].includes(row?.recheck_outcome)) {
     // A safe create that is known to be blocked (e.g. its organization must be linked first) is not a quick win.
@@ -80,12 +81,13 @@ export async function refreshReviewTriage(repository, { companyId, row, resoluti
     const objectType = row.object_type
     const source = safeReviewSnapshot(row.source_snapshot, objectType)
     const candidates = safeReviewCandidates(row.candidate_snapshots, objectType)
-    const all = candidates.length && typeof repository.getMappings === 'function'
+    const all = (candidates.length || status === 'ready_to_recheck') && typeof repository.getMappings === 'function'
       ? await repository.getMappings(companyId).catch(() => null) : null
     const mappings = Array.isArray(all) ? all : all?.[objectType === 'companies' ? 'organizations' : 'contacts'] ?? []
+    const linked = status !== 'ready_to_recheck' || mappings.some(item => item?.portal_id === row.portal_id && item?.hubspot_id === row.source_id)
     const ranking = rankReviewCandidates({ objectType, source, candidates, mappings, portalId: row.portal_id, sourceId: row.source_id })
     const next = computeTriage({ row, ranking, createReadiness: carriedReadiness(row, createReadiness),
-      resolutionStatus: status, mergedInto: carriedMerge(row, mergedInto) })
+      resolutionStatus: status, mergedInto: carriedMerge(row, mergedInto), linked })
     if (sameTriage(row, next)) return next
     await repository.setReviewTriage(companyId, row.id, next)
     return next

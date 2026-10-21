@@ -18,7 +18,10 @@ test('a saved create or link waiting for its recheck is done, not still offered 
   assert.deepEqual(computeTriage({ row: row({ status: 'cleared', recheck_outcome: 'safe_to_create' }), ranking: { candidates: [] },
     createReadiness: { ready: true }, resolutionStatus: 'ready_to_recheck' }), saved)
   assert.deepEqual(computeTriage({ row: row(), ranking: { candidates: [] }, createReadiness: { ready: false, blockedReason: 'source_already_mapped' },
-    resolutionStatus: 'ready_to_recheck' }), saved)
+    resolutionStatus: 'ready_to_recheck', linked: true }), saved)
+  // Done needs the link to exist: an attempt that never wrote anything is not finished work.
+  assert.notEqual(computeTriage({ row: row({ status: 'cleared', recheck_outcome: 'safe_to_create' }), ranking: { candidates: [] },
+    createReadiness: { ready: true }, resolutionStatus: 'ready_to_recheck', linked: false }).bucket, 'done')
 })
 
 test('todo when waiting on Albi', () => {

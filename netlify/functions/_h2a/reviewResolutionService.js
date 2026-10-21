@@ -476,9 +476,11 @@ async function runClaim(deps, input, saved, context) {
     // did not return a create receipt. Rebuild the plan so a corrected deployment
     // can safely retry the same audited decision. Ambiguous failures still keep
     // their immutable context and are never blindly repeated.
+    // The same holds for a failure that happened before any write (a stale check, e.g. a possible duplicate
+    // appeared) and for Albi's rate limit (a 429 is a refusal, not a partial write): with no receipt, plan again.
     const rebuildAfterValidation = !createReceiptId && ['create_albi', 'force_create_albi'].includes(saved.action) &&
-      events.slice(persistedIndex + 1).some(event =>
-        event.event_type === 'failed' && event.sanitized_details?.category === 'validation')
+      events.slice(persistedIndex + 1).some(event => event.event_type === 'failed' &&
+        (['validation', 'rate_limit'].includes(event.sanitized_details?.category) || typeof event.sanitized_details?.staleCheck === 'string'))
     const contextPlan = persisted && !rebuildAfterValidation
       ? safeResolutionExecutionContext(persisted.sanitized_details.executionContext) : null
     if (persisted && !rebuildAfterValidation && !contextPlan || contextPlan && (contextPlan.decisionHash !== hashResolutionDecision(saved.decision) ||
@@ -551,7 +553,8 @@ async function runClaim(deps, input, saved, context) {
     }
     let createTarget = null
     if (operation?.provider === 'albi') {
-      createTarget = plan.action === 'force_create_albi'
+      // A receipt Albi returned is that record, whether or not Albi's list shows it (or shows it exactly).
+      createTarget = plan.action === 'force_create_albi' || createReceiptId
         ? forcedReceiptTarget(row, current, createReceiptId)
         : exactCreateTarget(row, plan, current, createReceiptId, false)
       // An earlier attempt on this record that Albi already answered with a receipt (but that ended failed, for
@@ -710,13 +713,16 @@ export async function finalizeRecheckedResolution(deps, { companyId, reviewId, a
   if (typeof repository.getCurrentReviewResolution !== 'function') return null
   const saved = await repository.getCurrentReviewResolution(companyId, reviewId)
   if (!saved || terminal(saved)) return saved ? { resolution: saved } : null
+  const wasFailed = saved.status === 'failed'
   const owner = randomUUID()
   const claim = await repository.claimReviewResolution(companyId, saved.id, owner, actorId, 120)
   if (claim?.error === 'not_claimable' || claim?.error === 'review_busy') return null
   const claimed = rpc(claim)
-  const status = ['cleared', 'no_longer_in_scope'].includes(review.status) ? 'completed'
+  // A failed attempt wrote nothing we kept (a receipt it got is still found by the next create), so the recheck
+  // closes it instead of relabeling it "ready to recheck", which made unfinished records look saved.
+  const status = wasFailed ? 'superseded' : ['cleared', 'no_longer_in_scope'].includes(review.status) ? 'completed'
     : claimed.execution_phase === 'waiting_on_albi' ? 'waiting_on_albi' : 'ready_to_recheck'
-  const eventType = status === 'completed' ? 'completed' : status === 'waiting_on_albi' ? 'waiting_on_albi' : 'recheck_requested'
+  const eventType = status === 'superseded' ? 'superseded' : status === 'completed' ? 'completed' : status === 'waiting_on_albi' ? 'waiting_on_albi' : 'recheck_requested'
   return { resolution: rpc(await repository.finishReviewResolution(companyId, saved.id, owner,
     { actorId, status, eventType, providerOutcomeCode: eventType, details: { code: eventType } })) }
 }

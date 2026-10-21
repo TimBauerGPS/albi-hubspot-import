@@ -484,6 +484,16 @@ test('production recheck completes current intent only when review evaluation cl
   assert.equal(result.review.status, 'cleared'); assert.equal(f.intent.status, 'completed')
 })
 
+test('a recheck never relabels a failed attempt as saved; it closes it so the record can be decided again', async () => {
+  const f = fixture(), createInput = asCreate(f)
+  f.deps.albiRead.listContacts = async () => ({ records: [{ id: '77', firstName: 'A', lastName: 'B' }], cursor: null })
+  await assert.rejects(executeReviewResolution(f.deps, createInput), error => error.statusCode === 409)
+  assert.equal(f.intent.status, 'failed')
+  f.intent.lease_owner = null
+  await recheckDryRunReview(f.deps, input)
+  assert.equal(f.intent.status, 'superseded')
+})
+
 test('production recheck retains manual waiting while values still differ', async () => {
   const f = fixture(); await executeReviewResolution(f.deps, { ...input, decision: { action: 'resolve_fields', fieldChoices: { email: 'hubspot' } } })
   await recheckDryRunReview(f.deps, input)
@@ -606,6 +616,40 @@ test('create mapping saved before finalization crash is reconciled without a sec
   const result = await executeReviewResolution(f.deps, createInput)
   assert.equal(result.resolution.status, 'ready_to_recheck')
   assert.equal(mutations(f).length, 1); assert.equal(f.events.at(-1).eventType, 'provider_reconciled')
+})
+
+test('retrying a failed create that already has an Albi receipt links that record even when Albi does not list it', async () => {
+  const f = fixture(), createInput = asCreate(f)
+  f.deps.albiRead.listContacts = async () => ({ records: [], cursor: null })
+  // The first attempt gets Albi's receipt, then fails before the link is saved (as a 429 did for Yadira).
+  const getMappings = f.deps.repository.getMappings
+  let broken = true
+  f.deps.repository.getMappings = async (...args) => {
+    if (broken && f.calls.some(call => Array.isArray(call) && call[0] === 'CREATE')) throw new Error('rate limited')
+    return getMappings(...args)
+  }
+  await executeReviewResolution(f.deps, createInput)
+  assert.equal(f.intent.status, 'failed')
+  assert.equal(f.mappings.contacts.length, 0)
+  broken = false; f.intent.lease_owner = null
+  const result = await executeReviewResolution(f.deps, createInput)
+  assert.equal(result.resolution.status, 'ready_to_recheck')
+  assert.equal(f.mappings.contacts[0].albi_contact_id, '30')
+  assert.equal(mutations(f).length, 1, 'Albi is written once')
+})
+
+test('retrying a create that failed before writing (a duplicate appeared, or Albi rate limited) plans it again', async () => {
+  const f = fixture(), createInput = asCreate(f)
+  const candidate = { id: '77', firstName: 'A', lastName: 'B' }
+  f.deps.albiRead.listContacts = async () => ({ records: [candidate], cursor: null })
+  await assert.rejects(executeReviewResolution(f.deps, createInput), error => error.statusCode === 409)
+  assert.equal(f.intent.status, 'failed')
+  assert.equal(mutations(f).length, 0)
+  // The possible duplicate is gone (merged in Albi); the same request is planned again rather than stuck on its old plan.
+  f.deps.albiRead.listContacts = async () => ({ records: [], cursor: null }); f.intent.lease_owner = null
+  const result = await executeReviewResolution(f.deps, createInput)
+  assert.equal(result.resolution.status, 'ready_to_recheck')
+  assert.equal(mutations(f).length, 1)
 })
 
 test('explicit organization addition uses one PUT, saves choice, and leaves Albi reassociation manual', async () => {
