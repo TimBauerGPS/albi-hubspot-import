@@ -192,16 +192,18 @@ export function evaluateContactReview({ source, candidates = [], mappings = [], 
   organization = null, organizationChoice = null, availableCompanies = [], companyId = null, portalId = null, preferFirst = false } = {}) {
   const conflict = (type, result, selected = []) => reviewResult('needs_review', type, result, selected, 'contact')
   const sourceId = identity(valueOf(source, ['id'], true))
-  const context = selectReviewedOrganizationContext({ associatedCompanyIds, choice: organizationChoice, availableCompanies,
-    companyId, portalId, contactId: sourceId, preferFirst })
-  if (context.status === 'ambiguous' && new Set(associatedCompanyIds.map(String)).size > 1) {
-    return conflict('association', { reason: 'multiple_associated_organizations' })
-  }
-  if (context.status === 'selected' && !['safe_to_link', 'safe_to_create'].includes(organization?.outcome)) {
-    return conflict('association', { reason: 'organization_unresolved' })
-  }
   const input = { source, sourceId, candidates, existingMapping: mappingForReview(mappings, sourceId, portalId), mappings, portalId }
   const decision = decideContactMatch(input)
+  // Organization questions only matter before a contact is linked; a linked contact's activities go to its Albi record.
+  const linked = decision.action === 'link' && decision.reason === 'existing_mapping'
+  const context = selectReviewedOrganizationContext({ associatedCompanyIds, choice: organizationChoice, availableCompanies,
+    companyId, portalId, contactId: sourceId, preferFirst })
+  if (!linked && context.status === 'ambiguous' && new Set(associatedCompanyIds.map(String)).size > 1) {
+    return conflict('association', { reason: 'multiple_associated_organizations' })
+  }
+  if (!linked && context.status === 'selected' && !['safe_to_link', 'safe_to_create'].includes(organization?.outcome)) {
+    return conflict('association', { reason: 'organization_unresolved' })
+  }
   const related = selectReviewCandidates(input, decision, 'contact')
   if (decision.action === 'conflict') return conflict('contact_match', decision, related)
   if (decision.action === 'link') {
@@ -211,8 +213,10 @@ export function evaluateContactReview({ source, candidates = [], mappings = [], 
     const organizationTargetId = identity(organization?.targetId)
     // Existing contacts require a resolved organization target; a proposed
     // organization creation cannot establish their current association.
-    if (organization?.outcome === 'safe_to_create' || organization?.outcome === 'safe_to_link' &&
-      (!organizationTargetId || target && identity(valueOf(target, ['organizationId'])) !== organizationTargetId)) {
+    // A contact already linked to Albi is never held by its Albi organization: Albi cannot reassociate contacts
+    // from here, so a mismatch is an optional Albi edit, like a field difference.
+    if (decision.reason !== 'existing_mapping' && (organization?.outcome === 'safe_to_create' || organization?.outcome === 'safe_to_link' &&
+      (!organizationTargetId || target && identity(valueOf(target, ['organizationId'])) !== organizationTargetId))) {
       return conflict('association', { ...decision, reason: 'albi_contact_association_contract_unverified' }, related)
     }
     return reviewResult('safe_to_link', '', decision, related, 'contact')

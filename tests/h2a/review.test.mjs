@@ -353,3 +353,26 @@ test('a record already linked to Albi passes even when its fields differ, keepin
     candidates: [{ id: '50', name: 'Acme', city: 'Irvine' }], mappings: [{ portal_id: '123', hubspot_id: 'hs-org', albi_organization_id: '50' }], portalId: '123' })
   assert.equal(organization.outcome, 'safe_to_link')
 })
+
+test('a linked contact whose Albi organization differs is not held (Albi cannot reassociate contacts)', () => {
+  const source = { id: 'hs-1', firstName: 'Tara', lastName: 'Joanis', email: 't@x.test' }
+  const albi = { id: '20', firstName: 'Tara', lastName: 'Joanis', email: 't@x.test', organizationId: '77' }
+  const organization = { outcome: 'safe_to_link', targetId: '50' }
+  const linked = evaluateContactReview({ source, candidates: [albi], associatedCompanyIds: ['hs-org'], organization,
+    mappings: [{ portal_id: '123', hubspot_id: 'hs-1', albi_contact_id: '20' }], portalId: '123' })
+  assert.equal(linked.outcome, 'safe_to_link')
+  // Not linked yet: the organization mismatch still asks the reviewer.
+  const unlinked = evaluateContactReview({ source, candidates: [albi], associatedCompanyIds: ['hs-org'], organization, mappings: [], portalId: '123' })
+  assert.equal(unlinked.reason, 'albi_contact_association_contract_unverified')
+})
+
+test('a linked contact is not held by several HubSpot organizations or an organization still needing review', () => {
+  const source = { id: 'hs-1', firstName: 'Tara', lastName: 'Joanis', email: 't@x.test' }
+  const albi = { id: '20', firstName: 'Tara', lastName: 'Joanis', email: 't@x.test' }
+  const mappings = [{ portal_id: '123', hubspot_id: 'hs-1', albi_contact_id: '20' }]
+  assert.equal(evaluateContactReview({ source, candidates: [albi], associatedCompanyIds: ['a', 'b'], mappings, portalId: '123' }).outcome, 'safe_to_link')
+  assert.equal(evaluateContactReview({ source, candidates: [albi], associatedCompanyIds: ['a'], organization: { outcome: 'needs_review' },
+    mappings, portalId: '123' }).outcome, 'safe_to_link')
+  // Unlinked, both still ask.
+  assert.equal(evaluateContactReview({ source, candidates: [albi], associatedCompanyIds: ['a', 'b'], mappings: [], portalId: '123' }).reason, 'multiple_associated_organizations')
+})

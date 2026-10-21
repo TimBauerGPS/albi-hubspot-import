@@ -167,13 +167,19 @@ export default function ReviewRecord({
       ? item.hubspotOrganizations.filter(organization => idPattern.test(organization?.sourceId) && typeof organization?.name === 'string').map(organization => organization.name).join(', ') || 'No organization is associated in HubSpot.'
       : 'The HubSpot association could not be read right now.' : null
   const albiUrl = selected ? review.candidateLinks.find(link => link.id === selected.id)?.url : null
+  // For an organization mismatch, both sides' organizations are named so the difference is visible at a glance.
+  const associationMismatch = ['albi_contact_association_contract_unverified', 'association_contract_unverified'].includes(item?.reason)
+  const albiOrg = associationMismatch && review.objectType === 'contacts' && selected
+    ? (typeof selected.organizationName === 'string' && selected.organizationName.trim() ? selected.organizationName.trim() : 'None') : null
   const orgGate = !orgFirst && unsyncedOrganization && canAct && !merged
 
   return <section className="min-w-0 overflow-hidden rounded-xl border border-gray-200 bg-white" aria-label={`Review ${review.displayName}`}>
     <header className="flex flex-wrap items-start justify-between gap-3 border-b border-gray-200 px-5 py-3">
       <div className="min-w-0">
         <h2 className="truncate text-lg font-semibold text-gray-900">{review.displayName}</h2>
-        <p className="text-sm text-gray-700">{review.reasonLabel}{hubspotOrgs ? <> · <span className="text-gray-500">HubSpot organization:</span> {hubspotOrgs}</> : null}</p>
+        <p className="text-sm text-gray-700">{review.reasonLabel}{hubspotOrgs ? <> · <span className="text-gray-500">HubSpot organization:</span> {hubspotOrgs}</> : null}
+          {albiOrg ? <> · <span className="text-gray-500">Albi organization:</span> {albiOrg}</> : null}</p>
+        {associationMismatch && review.guidance ? <p className="mt-1 max-w-2xl text-xs text-gray-600">{review.guidance}</p> : null}
       </div>
       <div className="text-right text-xs text-gray-500">
         <Link url={review.hubspotUrl}>Open in HubSpot</Link>{albiUrl ? <> · <Link url={albiUrl}>Open in Albi</Link></> : null}

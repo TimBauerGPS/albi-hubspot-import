@@ -89,7 +89,7 @@ test('sample dry-run review breakdown separates underlying records, blocked acti
         items: [
           { key: 'emails:organization_fields_require_review', objectLabel: 'Emails', reasonLabel: 'Related organization fields need review', count: 3 },
           { key: 'calls:contact_fields_require_review', objectLabel: 'Calls', reasonLabel: 'Related contact fields need review', count: 2 },
-          { key: 'communications:association_contract_unverified', objectLabel: 'Communications', reasonLabel: 'Related contact-organization link needs review', count: 2 },
+          { key: 'communications:association_contract_unverified', objectLabel: 'Communications', reasonLabel: 'A related contact is under a different organization in Albi', count: 2 },
           { key: 'other:other_review_reason', objectLabel: 'Other records', reasonLabel: 'Other review reason', count: 2 },
         ],
       },

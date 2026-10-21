@@ -135,6 +135,18 @@ test('a done record lists Albi’s differing fields as an optional Albi edit', a
   assert.doesNotMatch(clean, /Optional/)
 })
 
+test('an organization mismatch says plainly which organization each side has and what to do', async () => {
+  const out = await html({ ...base, reason: 'albi_contact_association_contract_unverified',
+    hubspotOrganizations: [{ sourceId: '99', name: 'Sperry Equities' }],
+    candidateSnapshots: [{ ...base.candidateSnapshots[0], organizationName: 'Old Org LLC' }] })
+  assert.match(out, /In Albi this contact is under a different organization/)
+  assert.match(out, /HubSpot organization:.*Sperry Equities/)
+  assert.match(out, /Albi organization:.*Old Org LLC/)
+  assert.match(out, /change it in Albi/)
+  const noneInAlbi = await html({ ...base, reason: 'albi_contact_association_contract_unverified', hubspotOrganizations: [{ sourceId: '99', name: 'Sperry Equities' }] })
+  assert.match(noneInAlbi, /Albi organization:.*None/)
+})
+
 test('blocked record shows named blocked copy', async () => {
   const out = await html({ ...none, createReadiness: { ready: false, blockedReason: 'salesperson_not_found' } })
   assert.match(out, /Can’t create yet/); assert.match(out, /exactly match one Albi salesperson/)
