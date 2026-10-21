@@ -75,7 +75,10 @@ export default function ReviewRecord({
   const selected = candidates[candidateIndex] ?? null
   const suggested = candidates.find(candidate => candidate.id === item?.suggestedCandidateId) ?? null
 
-  const canAct = capability.canResolve && review.actions.length > 0 && (review.status === 'needs_review' ||
+  // In Done the work is finished (linked, or created and linked): nothing more is offered, so a saved record is never
+  // re-created or re-linked. Recheck stays available to confirm it.
+  const finished = item?.triageBucket === 'done'
+  const canAct = !finished && capability.canResolve && review.actions.length > 0 && (review.status === 'needs_review' ||
     review.status === 'cleared' && ['safe_to_create', 'safe_to_link'].includes(item?.recheckOutcome))
   const disabled = pending || busy
   const merged = idPattern.test(item?.mergedInto?.sourceId) ? item.mergedInto : null
@@ -176,6 +179,10 @@ export default function ReviewRecord({
     </header>
 
     <div className="space-y-4 px-5 py-4">
+      {finished && <div className="rounded-lg border border-green-200 bg-green-50 p-3 text-sm text-green-900" role="status">
+        <p className="font-semibold">Done</p>
+        <p className="mt-1 text-xs">{review.status === 'no_longer_in_scope' ? `This ${objectLabel} is no longer in scope. Nothing else to do.`
+          : `This ${objectLabel} is linked in Albi. Nothing else to do${item?.triageDetails?.recheckPending ? '; Recheck all confirms it later.' : '.'}`}</p></div>}
       {!capability.canResolve && <p className="text-xs leading-5 text-gray-600" role="status">Resolution is {capability.enabled ? 'read-only for your role.' : 'unavailable in the current mode.'} {capability.hubspotWrites === 'rejected' ? 'Recent HubSpot write authorization was rejected.' : ''}</p>}
       {merged && <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm">
         <p className="font-semibold text-amber-950">Merged in HubSpot into {objectLabel} {merged.sourceId}</p>

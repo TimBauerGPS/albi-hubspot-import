@@ -120,6 +120,13 @@ test('merged record shows survivor action and no create', async () => {
   assert.deepEqual(j(calls), [{ sourceId: '999', reviewId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' }])
 })
 
+test('a finished record says it is done and offers no more create or link actions', async () => {
+  const out = await html({ ...base, status: 'cleared', recheckOutcome: 'safe_to_link', triageBucket: 'done', triageDetails: { recheckPending: true },
+    createReadiness: { ready: false, blockedReason: 'source_already_mapped' }, forceCreateReadiness: { eligible: false, ready: false, blockedReason: 'source_already_mapped' } })
+  assert.match(out, /Done/); assert.match(out, /linked in Albi/)
+  for (const pattern of [/Can’t create yet/, /Accept suggestion/, /Link and ignore/, /Create new contact in Albi/, />Link</]) assert.doesNotMatch(out, pattern)
+})
+
 test('blocked record shows named blocked copy', async () => {
   const out = await html({ ...none, createReadiness: { ready: false, blockedReason: 'salesperson_not_found' } })
   assert.match(out, /Can’t create yet/); assert.match(out, /exactly match one Albi salesperson/)
