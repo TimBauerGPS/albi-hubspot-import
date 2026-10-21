@@ -188,7 +188,7 @@ export const ALBI_NAME_PLACEHOLDER = '.'
 function createPayload(input, hubspot, type, associations) {
   let organization = null
   if (type === 'contacts' && associations.length) {
-    if (associations.length !== 1) invalidPlan()
+    // The first association (HubSpot's primary company) is the contact's organization.
     organization = selectedOrganization(input, associations[0])
     if (!Number.isSafeInteger(Number(organization.targetId))) invalidPlan()
   }

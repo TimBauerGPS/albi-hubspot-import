@@ -311,10 +311,11 @@ test('forced create retries a definitive validation rejection with a freshly reb
 
 test('a transient failure after a validation retry is never blindly repeated', async () => {
   const f = fixture(), createInput = asForcedCreate(f)
+  // Albi rejected it, so nothing was made.
+  f.createdTarget = null
   f.writeError = new ApiError('validation', { code: 'operation_failed' })
   await executeReviewResolution(f.deps, createInput)
 
-  f.createdTarget = null
   f.writeError = new ApiError('transient', { code: 'timeout' })
   const ambiguous = await executeReviewResolution(f.deps, createInput)
   assert.equal(ambiguous.resolution.status, 'failed')
@@ -555,6 +556,30 @@ test('real provider client reads retain address2 and contact jobTitle evidence',
   assert.equal((await albi.listContacts({ cursor: '1', pageSize: 100 })).records[0].jobTitle, 'Manager')
 })
 
+test('a contact behind an organization already linked to Albi is not held up by that organization’s field differences', async () => {
+  const f = fixture()
+  f.contacts = []; f.row.reason = 'organization_unresolved'; f.row.conflict_type = 'association'; f.row.candidate_snapshots = []
+  f.mappings.options = [{ mapping_kind: 'default_contact_type', source_key: 'default', albi_id: '12', confirmed: true }]
+  f.associations = ['99']
+  f.mappings.organizations = [{ portal_id: '123', hubspot_id: '99', albi_organization_id: '50' }]
+  // Albi's organization differs from HubSpot's (name and phone), which its own review accepted.
+  f.organizations = [{ id: '50', name: 'Acme Holdings LLC', phoneNumber: '5559990000', organizationTypeIds: ['12', '13'] }]
+  const result = await recheckDryRunReview(f.deps, input)
+  assert.equal(result.review.status, 'cleared')
+  assert.equal(f.row.status, 'cleared')
+})
+
+test('a contact with several HubSpot organizations uses the first (primary) one', async () => {
+  const f = fixture()
+  f.contacts = []; f.row.reason = 'multiple_associated_organizations'; f.row.conflict_type = 'association'; f.row.candidate_snapshots = []
+  f.mappings.options = [{ mapping_kind: 'default_contact_type', source_key: 'default', albi_id: '12', confirmed: true }]
+  f.associations = ['99', '98']
+  f.mappings.organizations = [{ portal_id: '123', hubspot_id: '99', albi_organization_id: '50' }]
+  f.organizations = [{ id: '50', name: 'Acme', phoneNumber: '5552223333' }]
+  await recheckDryRunReview(f.deps, input)
+  assert.equal(f.row.status, 'cleared')
+})
+
 test('recheck provider failure preserves waiting intent and adds fixed resolution audit', async () => {
   const f = fixture(); await executeReviewResolution(f.deps, input)
   f.deps.hubspotRead.getContacts = async () => { throw Object.assign(Error('secret'), { category: 'auth' }) }
@@ -650,6 +675,41 @@ test('retrying a create that failed before writing (a duplicate appeared, or Alb
   const result = await executeReviewResolution(f.deps, createInput)
   assert.equal(result.resolution.status, 'ready_to_recheck')
   assert.equal(mutations(f).length, 1)
+})
+
+test('a retry after a create that timed out links the record Albi made instead of creating a second one', async () => {
+  const f = fixture(), createInput = asForcedCreate(f)
+  f.writeError = new ApiError('transient', { operation: 'createContact', code: 'timeout' })
+  await executeReviewResolution(f.deps, createInput)
+  assert.equal(f.intent.status, 'failed')
+  assert.equal(mutations(f).length, 1)
+  f.writeError = null; f.intent.lease_owner = null
+  const result = await executeReviewResolution(f.deps, createInput)
+  assert.equal(result.resolution.status, 'ready_to_recheck')
+  assert.equal(f.mappings.contacts[0].albi_contact_id, '30')
+  assert.equal(mutations(f).length, 1, 'no second create')
+})
+
+test('a retry after a create that timed out without making a record creates it then', async () => {
+  const f = fixture(), createInput = asForcedCreate(f)
+  const made = f.createdTarget
+  f.createdTarget = null
+  f.writeError = new ApiError('transient', { operation: 'createContact', code: 'timeout' })
+  await executeReviewResolution(f.deps, createInput)
+  assert.equal(f.intent.status, 'failed')
+  f.writeError = null; f.createdTarget = made; f.intent.lease_owner = null
+  // Right away it is still unknown (Albi's list may lag), so nothing is created.
+  await executeReviewResolution(f.deps, createInput)
+  assert.equal(mutations(f).length, 1)
+  f.intent.lease_owner = null
+  // Ten minutes on, Albi still has no such record: it was not made, so it is created now.
+  f.deps.clockMs = () => Date.now() + 10 * 60000
+  const list = f.deps.repository.listReviewResolutionEvents
+  f.deps.repository.listReviewResolutionEvents = async (...args) => (await list(...args)).map(event => ({ ...event, created_at: new Date().toISOString() }))
+  const result = await executeReviewResolution(f.deps, createInput)
+  assert.equal(result.resolution.status, 'ready_to_recheck')
+  assert.equal(mutations(f).length, 2)
+  assert.equal(f.mappings.contacts[0].albi_contact_id, '30')
 })
 
 test('explicit organization addition uses one PUT, saves choice, and leaves Albi reassociation manual', async () => {

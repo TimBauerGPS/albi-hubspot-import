@@ -20,6 +20,8 @@ const SCOPES = Object.freeze({
   listSalespeople: 'options.salespeople:list',
 })
 const text = value => typeof value === 'string' && Boolean(value.trim())
+// Albi can take well over 10s to answer a create; giving up early leaves it unknown whether the record was made.
+export const CREATE_TIMEOUT_MS = 20000
 const ADDRESS_FIELDS = ['address1', 'address2', 'city', 'state', 'zipCode', 'country', 'latitude', 'longitude', 'email', 'phoneNumber', 'referralSourceId', 'relationshipStatusId', 'salespersonId', 'sandbox', 'parentOrganizationId']
 const WRITE_FIELDS = {
   createContact: ['firstName', 'lastName', 'contactTypeIds', 'organizationId', 'organizationName', 'useOrganizationAddress', 'parentOrganizationName', 'status', 'salespersonName', 'jobTitle', ...ADDRESS_FIELDS],
@@ -231,7 +233,7 @@ export class AlbiClient {
     let data
     try {
       data = await this.#scopedRequest(await this.#path(resource),
-        { method: 'POST', body: payload, operation, retrySafe: false }, SCOPES[operation])
+        { method: 'POST', body: payload, operation, retrySafe: false, timeoutMs: CREATE_TIMEOUT_MS }, SCOPES[operation])
     } catch (error) {
       if (error instanceof ApiError && error.providerShape) error.providerShape = `${requestShape(payload)};${error.providerShape}`.slice(0, 240)
       throw error

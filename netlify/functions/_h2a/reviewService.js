@@ -230,7 +230,7 @@ async function evaluateReviewRow(deps, { companyId, reviewId, actorId, row, conf
         // First choose a possible source to read; only the actual company read
         // below can authorize a reviewed context in the evaluator.
         const context = selectReviewedOrganizationContext({ associatedCompanyIds, choice: organizationChoice,
-          availableCompanies: associatedCompanyIds.map(id => ({ id })), companyId, portalId: row.portal_id, contactId: row.source_id })
+          availableCompanies: associatedCompanyIds.map(id => ({ id })), companyId, portalId: row.portal_id, contactId: row.source_id, preferFirst: true })
         if (context.companyId) {
           const id = context.companyId
           const company = await currentSource(deps, hubspot, 'companies', id, deadline)
@@ -238,13 +238,22 @@ async function evaluateReviewRow(deps, { companyId, reviewId, actorId, row, conf
           else {
             availableCompanies.push(company)
             const organizations = await albiRecords(deps, albi, 'organizations', deadline)
-            const result = evaluateOrganizationReview({ source: company, candidates: organizations, portalId: row.portal_id,
-              mappings: mappings.organizations, optionMappings: mappings.options })
-            organization = organizationContext(result, organizations, mappings.organizations, id, row.portal_id, mappings.options)
+            // An organization already linked to Albi is settled for its contacts: its own field differences belong to
+            // the organization's review (and may have been accepted there), not to every contact behind it.
+            const linked = mappings.organizations.filter(item => item?.portal_id === row.portal_id && item?.hubspot_id === id)
+            const linkedTarget = linked.length === 1 ? organizations.find(item => item?.id === linked[0].albi_organization_id) : null
+            if (linkedTarget) {
+              const types = Array.isArray(linkedTarget.organizationTypeIds) ? linkedTarget.organizationTypeIds : []
+              organization = { outcome: 'safe_to_link', targetId: linkedTarget.id, organizationTypeId: types.length === 1 ? types[0] : null }
+            } else {
+              const result = evaluateOrganizationReview({ source: company, candidates: organizations, portalId: row.portal_id,
+                mappings: mappings.organizations, optionMappings: mappings.options })
+              organization = organizationContext(result, organizations, mappings.organizations, id, row.portal_id, mappings.options)
+            }
           }
         }
         evaluation = evaluateContactReview({ source, candidates, associatedCompanyIds, organization, organizationChoice, availableCompanies,
-          companyId, portalId: row.portal_id,
+          companyId, portalId: row.portal_id, preferFirst: true,
           mappings: mappings.contacts, optionMappings: mappings.options })
         evaluation = await acceptedLinkDifferences(deps, companyId, row, evaluation, source, candidates, mappings.contacts, deadline)
         // Samples may have used activity company context when direct associations

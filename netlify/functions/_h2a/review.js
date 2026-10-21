@@ -171,7 +171,7 @@ export function evaluateOrganizationReview({ source, candidates = [], mappings =
 }
 
 export function selectReviewedOrganizationContext({ associatedCompanyIds = [], choice = null, availableCompanies = [],
-  companyId = null, portalId = null, contactId = null } = {}) {
+  companyId = null, portalId = null, contactId = null, preferFirst = false } = {}) {
   const ids = new Set(array(associatedCompanyIds).map(identity).filter(Boolean))
   const selected = identity(object(choice).hubspot_company_id)
   const applicable = [['company_id', companyId], ['portal_id', portalId], ['hubspot_contact_id', contactId]]
@@ -180,15 +180,18 @@ export function selectReviewedOrganizationContext({ associatedCompanyIds = [], c
     .some(company => company?.archived !== true && identity(company?.id) === selected)) {
     return { status: 'selected', companyId: selected }
   }
+  // The review workspace uses the first of several (HubSpot's primary company is listed first); the live sync
+  // still sends a contact with several to review.
+  if (preferFirst && ids.size > 1) return { status: 'single', companyId: [...ids][0] }
   return { status: ids.size === 1 ? 'single' : 'ambiguous', companyId: ids.size === 1 ? [...ids][0] : null }
 }
 
 export function evaluateContactReview({ source, candidates = [], mappings = [], optionMappings = [], associatedCompanyIds = [],
-  organization = null, organizationChoice = null, availableCompanies = [], companyId = null, portalId = null } = {}) {
+  organization = null, organizationChoice = null, availableCompanies = [], companyId = null, portalId = null, preferFirst = false } = {}) {
   const conflict = (type, result, selected = []) => reviewResult('needs_review', type, result, selected, 'contact')
   const sourceId = identity(valueOf(source, ['id'], true))
   const context = selectReviewedOrganizationContext({ associatedCompanyIds, choice: organizationChoice, availableCompanies,
-    companyId, portalId, contactId: sourceId })
+    companyId, portalId, contactId: sourceId, preferFirst })
   if (context.status === 'ambiguous' && new Set(associatedCompanyIds.map(String)).size > 1) {
     return conflict('association', { reason: 'multiple_associated_organizations' })
   }

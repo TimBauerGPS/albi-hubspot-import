@@ -274,12 +274,14 @@ test('contact organization context evaluates current exact company and its full 
   assert.equal(f.applied[0][1].outcome, 'safe_to_link')
 })
 
-test('ambiguous HubSpot organizations remain an association review', async () => {
+test('a contact with several HubSpot organizations is rechecked against the first (primary) one', async () => {
   const f = fixture()
   f.deps.hubspotRead.getAssociations = async () => [{ fromId: '10', toObjectType: 'companies', toIds: ['11', '12'] }]
+  const read = []
+  f.deps.hubspotRead.getCompanies = async ids => { read.push(...ids); return ids.map(id => ({ id, properties: { name: 'Allied' } })) }
   await recheckDryRunReview(f.deps, input)
-  assert.equal(f.applied[0][1].reason, 'multiple_associated_organizations')
-  assert.equal(f.applied[0][1].conflictType, 'association')
+  assert.deepEqual(read, ['11'])
+  assert.notEqual(f.applied[0][1].reason, 'multiple_associated_organizations')
 })
 
 function reviewedOrganizationFixture() {
@@ -308,7 +310,7 @@ test('reviewed recheck keeps both direct associations and clears using the selec
 })
 
 for (const invalid of ['missing', 'deleted', 'cross-tenant', 'wrong portal', 'wrong contact', 'no longer associated']) {
-  test(`reviewed recheck ignores ${invalid} choice and retains ordinary ambiguity`, async () => {
+  test(`reviewed recheck ignores ${invalid} choice and falls back to the first organization`, async () => {
     const f = reviewedOrganizationFixture()
     if (invalid === 'missing') f.deps.hubspotRead.getCompanies = async () => []
     if (invalid === 'deleted') f.deps.hubspotRead.getCompanies = async () => [{ id: '11', archived: true, properties: {} }]
@@ -317,8 +319,10 @@ for (const invalid of ['missing', 'deleted', 'cross-tenant', 'wrong portal', 'wr
     if (invalid === 'wrong contact') f.choice.hubspot_contact_id = '99'
     if (invalid === 'no longer associated') f.choice.hubspot_company_id = '13'
     await recheckDryRunReview(f.deps, input)
-    assert.equal(f.applied[0][1].outcome, 'still_needs_review')
-    assert.equal(f.applied[0][1].reason, 'multiple_associated_organizations')
+    // The first association is 11, so a missing or deleted 11 still needs review; otherwise 11 links as usual.
+    const applied = f.applied[0][1]
+    assert.ok(applied.outcome !== 'still_needs_review' || applied.reason !== 'multiple_associated_organizations')
+    if (!['missing', 'deleted'].includes(invalid)) assert.equal(applied.outcome, 'safe_to_link')
   })
 }
 

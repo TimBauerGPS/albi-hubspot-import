@@ -73,7 +73,9 @@ export function createHttpClient({ baseUrl, headers = {}, fetch = globalThis.fet
   const retries = Math.max(0, Math.min(3, Number.isInteger(maxRetries) ? maxRetries : 2))
   const delayCap = Math.max(1, Math.min(10000, maxDelayMs))
   const deadline = Math.max(1, Math.min(30000, timeoutMs))
-  return async function request(path, { method = 'GET', body, operation = 'request', retrySafe = method === 'GET', statusOnly = false } = {}) {
+  return async function request(path, { method = 'GET', body, operation = 'request', retrySafe = method === 'GET', statusOnly = false, timeoutMs: requestTimeoutMs } = {}) {
+    // A single slow write may wait longer than reads (an abandoned create leaves its outcome unknown).
+    const limit = Number.isFinite(requestTimeoutMs) ? Math.max(1, Math.min(30000, requestTimeoutMs)) : deadline
     const url = new URL(path, baseUrl)
     if (url.origin !== origin || url.username || url.password) invalid(operation)
     for (let attempt = 0; ; attempt++) {
@@ -108,7 +110,7 @@ export function createHttpClient({ baseUrl, headers = {}, fetch = globalThis.fet
             try { return await response.json() } catch { malformed(operation) }
           })(),
           new Promise((_, reject) => {
-            timer = setTimeout(() => { controller.abort(); reject(new ApiError('transient', { operation, code: 'timeout' })) }, deadline)
+            timer = setTimeout(() => { controller.abort(); reject(new ApiError('transient', { operation, code: 'timeout' })) }, limit)
           }),
         ])
       } catch (caught) {

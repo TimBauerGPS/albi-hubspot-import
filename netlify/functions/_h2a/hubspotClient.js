@@ -135,17 +135,23 @@ export class HubSpotClient {
     const ids = objectIds.map(value => id(value, 'getAssociations'))
     const results = []
     for (const fromId of ids) for (const toObjectType of new Set(toObjectTypes)) {
-      const toIds = [], seen = new Set()
+      const toIds = [], primary = [], seen = new Set()
       let after = null
       do {
         const query = new URLSearchParams({ limit: '500' })
         if (after) query.set('after', after)
         const data = page(await this.#request(`${ROOT}/${objectType}/${fromId}/associations/${toObjectType}?${query}`, { operation: 'getAssociations' }), 'getAssociations')
-        toIds.push(...data.results.map(value => responseId(value?.toObjectId, 'getAssociations')))
+        for (const value of data.results) {
+          const toId = responseId(value?.toObjectId, 'getAssociations')
+          // HubSpot marks a contact's primary company (label "Primary", HubSpot-defined type 1); it is listed first.
+          const isPrimary = Array.isArray(value?.associationTypes) && value.associationTypes.some(type => type?.label === 'Primary' ||
+            type?.category === 'HUBSPOT_DEFINED' && type?.typeId === 1 && objectType === 'contacts' && toObjectType === 'companies')
+          ;(isPrimary ? primary : toIds).push(toId)
+        }
         after = data.after
         cursorSeen(seen, after)
       } while (after)
-      results.push({ fromId, toObjectType, toIds: [...new Set(toIds)] })
+      results.push({ fromId, toObjectType, toIds: [...new Set([...primary, ...toIds])] })
     }
     return results
   }

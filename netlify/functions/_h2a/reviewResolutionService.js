@@ -126,6 +126,8 @@ async function sourceRead(deps, clients, type, id, deadline) {
 // A create that a recheck cleared as safe to create within this window already had all of Albi checked for a
 // duplicate; re-reading every Albi contact before writing took ~30s and drew Albi rate limits.
 const TRUSTED_RECHECK_MS = 24 * 3600000
+// How long after a timed-out create Albi's list is trusted to show it, if it was made.
+const UNKNOWN_CREATE_SETTLE_MS = 5 * 60000
 
 async function evidence(deps, clients, row, decision, deadline, { live = false } = {}) {
   const source = await sourceRead(deps, clients, row.object_type, row.source_id, deadline)
@@ -306,6 +308,21 @@ function exactCreateTarget(row, plan, current, receiptId = null, requireReceipt 
   return target.id
 }
 
+// Whether an Albi record is the one a create payload would have made: same name (and email or phone when sent).
+function madeFrom(record, payload, kind) {
+  if (!payload || !isResolutionProviderId(record?.id)) return false
+  const same = (a, b) => String(a ?? '').trim().toLocaleLowerCase('en-US') === String(b ?? '').trim().toLocaleLowerCase('en-US')
+  // The type it was created with must be on it; a same-named record of another type is not this create.
+  const typeKey = kind === 'contacts' ? 'contactTypeIds' : 'organizationTypeIds'
+  if (Array.isArray(payload[typeKey]) && !(Array.isArray(record[typeKey]) && payload[typeKey].every(id => record[typeKey].map(String).includes(String(id))))) return false
+  if (kind === 'contacts') {
+    if (!same(record.firstName, payload.firstName) || !same(record.lastName, payload.lastName)) return false
+    return payload.email ? same(record.email, payload.email) : true
+  }
+  if (!same(record.name, payload.name)) return false
+  return payload.phoneNumber ? normalizePhone(record.phoneNumber ?? '').writable === payload.phoneNumber : true
+}
+
 function forcedReceiptTarget(row, current, receiptId) {
   if (!isResolutionProviderId(receiptId)) return null
   const rows = row.object_type === 'contacts' ? current.mappings.contacts : current.mappings.organizations
@@ -481,7 +498,7 @@ async function runClaim(deps, input, saved, context) {
     const rebuildAfterValidation = !createReceiptId && ['create_albi', 'force_create_albi'].includes(saved.action) &&
       events.slice(persistedIndex + 1).some(event => event.event_type === 'failed' &&
         (['validation', 'rate_limit'].includes(event.sanitized_details?.category) || typeof event.sanitized_details?.staleCheck === 'string'))
-    const contextPlan = persisted && !rebuildAfterValidation
+    let contextPlan = persisted && !rebuildAfterValidation
       ? safeResolutionExecutionContext(persisted.sanitized_details.executionContext) : null
     if (persisted && !rebuildAfterValidation && !contextPlan || contextPlan && (contextPlan.decisionHash !== hashResolutionDecision(saved.decision) ||
       contextPlan.action !== saved.action || contextPlan.providerOperation?.id && contextPlan.providerOperation.id !== saved.source_id ||
@@ -489,6 +506,26 @@ async function runClaim(deps, input, saved, context) {
       contextPlan.verification.create && (contextPlan.verification.create.sourceId !== saved.source_id ||
         contextPlan.verification.create.portalId !== saved.portal_id))) malformed('resolution')
     clients = deps.getResolutionClients ? await bounded(deps, () => deps.getResolutionClients(input.companyId, context.config), deadline) : deps
+    // A create that timed out (or lost its connection) with no receipt may or may not have been made. Look for it in
+    // Albi: one exact new record is that create (link it); none means it was not made (plan it again).
+    const timedOut = contextPlan && !createReceiptId && ['create_albi', 'force_create_albi'].includes(saved.action) &&
+      events.slice(persistedIndex + 1).some(event => event.event_type === 'failed' && event.sanitized_details?.category === 'transient')
+    if (timedOut) {
+      const kind = row.object_type === 'contacts' ? 'contacts' : 'organizations'
+      const live = await listAll(deps, args => kind === 'contacts' ? clients.albiRead.listContacts(args) : clients.albiRead.listOrganizations(args), deadline)
+      const ignored = new Set(contextPlan.ignoredCandidateIds ?? [])
+      const found = live.filter(record => record && !ignored.has(record.id) && madeFrom(record, contextPlan.providerOperation?.payload, kind))
+      if (found.length > 1) throw new ApiError('permanent', { code: 'operation_failed' })
+      if (found.length === 1) {
+        createReceiptId = found[0].id
+        await caps.appendReviewResolutionEvent(input.companyId, saved.id, { actorId: input.actorId, eventType: 'claimed', details: { createReceiptId } })
+      } else {
+        // Albi's list can lag a fresh create, so "not found" only counts once the attempt is a few minutes old.
+        const failedAt = Math.max(...events.slice(persistedIndex + 1).filter(event => event.event_type === 'failed')
+          .map(event => Date.parse(event.created_at ?? '')).filter(Number.isFinite), -Infinity)
+        if (Number.isFinite(failedAt) && clock(deps) - failedAt >= UNKNOWN_CREATE_SETTLE_MS) contextPlan = null
+      }
+    }
     current = await evidence(deps, clients, row, saved.decision, deadline)
     if (phase !== 'applying') return finish(phase, phase === 'waiting_on_albi' ? 'waiting_on_albi' : 'recheck_requested')
     if (row.updated_at !== saved.expected_review_updated_at) stale('review')

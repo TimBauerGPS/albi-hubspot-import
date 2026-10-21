@@ -546,3 +546,13 @@ test('an owner without a first or last name does not fail the owner list', async
   const owners = await new HubSpotClient({ token: 'token', fetch: f.fetch }).listOwners()
   assert.deepEqual(owners.map(owner => [owner.id, owner.firstName, owner.lastName]), [['42', 'Ana', 'Ruiz'], ['43', '', ''], ['44', 'Cher', '']])
 })
+
+test('a contact’s primary HubSpot company is listed first among its associations', async () => {
+  const f = transport([{ results: [
+    { toObjectId: 501, associationTypes: [{ category: 'HUBSPOT_DEFINED', typeId: 279, label: null }] },
+    { toObjectId: 502, associationTypes: [{ category: 'HUBSPOT_DEFINED', typeId: 1, label: 'Primary' }, { category: 'HUBSPOT_DEFINED', typeId: 279, label: null }] },
+  ] }])
+  const c = new HubSpotClient({ token: 'token', fetch: f.fetch })
+  assert.deepEqual(await c.getAssociations({ objectType: 'contacts', objectIds: ['10'], toObjectTypes: ['companies'] }),
+    [{ fromId: '10', toObjectType: 'companies', toIds: ['502', '501'] }])
+})

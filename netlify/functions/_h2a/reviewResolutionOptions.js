@@ -70,22 +70,24 @@ export async function loadReviewResolutionOptions({ row, repository, reads, prog
     if (!mappings || !['contacts', 'organizations', 'options'].every(key => Array.isArray(mappings[key]))) return named('evidence_unavailable')
     if (!Array.isArray(sourceRows) || sourceRows.length !== 1 || sourceRows[0]?.id !== row.source_id ||
       sourceRows[0]?.archived === true || !record(sourceRows[0]?.properties)) return named('source_unavailable')
-    const associated = row.object_type === 'contacts' ? associationIds(associationRows, row.source_id) : []
-    if (associated === null) return named('evidence_unavailable')
+    const allAssociated = row.object_type === 'contacts' ? associationIds(associationRows, row.source_id) : []
+    if (allAssociated === null) return named('evidence_unavailable')
+    // Several associated organizations: the first (HubSpot's primary company) is the one matched to Albi.
+    const associated = allAssociated.slice(0, 1)
 
     // A contact a recheck cleared as safe to create is offered creation (with its organization gate), not the choice.
     const clearedToCreate = row.status === 'cleared' && row.recheck_outcome === 'safe_to_create'
     if (actions.includes('choose_organization') && row.object_type === 'contacts' && !clearedToCreate) {
       // A single associated organization with no tenant mapping must be synced first. Decide that from cheap
       // evidence so the slow full Albi enumeration (which exceeds the detail deadline) is not needed to show it.
-      if (associated.length === 1 && !mappings.organizations.some(item => item?.portal_id === row.portal_id && mappedSource(item) === associated[0])) {
-        const companies = await hubspot.getCompanies([associated[0]])
-        if (Array.isArray(companies) && companies.length === 1 && companies[0]?.id === associated[0] &&
+      if (allAssociated.length === 1 && !mappings.organizations.some(item => item?.portal_id === row.portal_id && mappedSource(item) === allAssociated[0])) {
+        const companies = await hubspot.getCompanies([allAssociated[0]])
+        if (Array.isArray(companies) && companies.length === 1 && companies[0]?.id === allAssociated[0] &&
           companies[0]?.archived !== true && record(companies[0]?.properties)) {
           const found = typeof repository.findDryRunReviewBySource === 'function'
-            ? await repository.findDryRunReviewBySource(row.company_id, row.run_id, 'companies', associated[0]) : null
+            ? await repository.findDryRunReviewBySource(row.company_id, row.run_id, 'companies', allAssociated[0]) : null
           return { ...unavailable, organizationOptions: [],
-            organizationGate: { sourceId: associated[0], reviewId: typeof found?.id === 'string' ? found.id : null } }
+            organizationGate: { sourceId: allAssociated[0], reviewId: typeof found?.id === 'string' ? found.id : null } }
         }
         return unavailable
       }
@@ -107,7 +109,7 @@ export async function loadReviewResolutionOptions({ row, repository, reads, prog
       let gate = null
       const mappedSources = mappings.organizations.filter(item => item?.portal_id === row.portal_id && providerId(mappedSource(item)))
         .map(mappedSource)
-      for (const sourceId of [...new Set([...associated, ...mappedSources])].slice(0, 25)) {
+      for (const sourceId of [...new Set([...allAssociated, ...mappedSources])].slice(0, 25)) {
         const companies = await hubspot.getCompanies([sourceId])
         if (!Array.isArray(companies) || companies.length !== 1 || companies[0]?.id !== sourceId ||
           companies[0]?.archived === true || !record(companies[0]?.properties)) continue
@@ -119,7 +121,7 @@ export async function loadReviewResolutionOptions({ row, repository, reads, prog
         const targetId = match.action === 'link' ? match.targetId : null
         if (!providerId(targetId) || !organizations.some(item => item.id === targetId)) {
           // An associated organization with no Albi record must be created first, on its own review.
-          if (!gate && associated.includes(sourceId) && organizationMappings.length === 0) {
+          if (!gate && allAssociated.includes(sourceId) && organizationMappings.length === 0) {
             const found = typeof repository.findDryRunReviewBySource === 'function'
               ? await repository.findDryRunReviewBySource(row.company_id, row.run_id, 'companies', sourceId) : null
             gate = { sourceId, reviewId: typeof found?.id === 'string' ? found.id : null }
@@ -127,7 +129,7 @@ export async function loadReviewResolutionOptions({ row, repository, reads, prog
           continue
         }
         organizationOptions.push({ sourceId, targetId, contactTargetId, currentOrganizationTargetId,
-          associated: associated.includes(sourceId),
+          associated: allAssociated.includes(sourceId),
           contactUrl: buildAlbiRecordUrl('contacts', contactTargetId), organizationUrl: buildAlbiRecordUrl('companies', targetId) })
       }
       return { ...unavailable, organizationOptions, ...(organizationOptions.length === 0 && gate ? { organizationGate: gate } : {}) }

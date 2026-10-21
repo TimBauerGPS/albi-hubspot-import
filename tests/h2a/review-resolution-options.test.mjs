@@ -66,7 +66,8 @@ test('create readiness trusts the last recheck (no full Albi scan) and names why
   assert.deepEqual(failing.createReadiness, { ready: false, blockedReason: 'evidence_unavailable', evidence: { step: 'hubspot_record' } })
   const several = await load({ reads: { ...currentReads, hubspotRead: { ...currentReads.hubspotRead,
     getAssociations: async () => [{ fromId: '123', toObjectType: 'companies', toIds: ['777', '778'] }] } } })
-  assert.deepEqual(several.createReadiness, { ready: false, blockedReason: 'multiple_organizations' })
+  // Several organizations: the first (HubSpot's primary, mapped here) is used.
+  assert.equal(several.createReadiness.ready, true)
 })
 
 test('a contact behind a mapped organization is ready without scanning Albi organizations', async () => {
@@ -272,14 +273,15 @@ test('an unmapped associated organization is gated from cheap evidence without e
   assert.equal(mapped.organizationOptions.length, 1)
 })
 
-test('separate-record creation names why it is unavailable for a mapped source or several organizations', async () => {
+test('separate-record creation names why it is unavailable for a mapped source, and uses the first of several organizations', async () => {
   const forceRow = { ...row, reason: 'name_only_candidate', candidate_snapshots: [{ id: '456', firstName: 'Alex', lastName: 'Stone' }],
     source_snapshot: { id: '123', firstName: 'Alex', lastName: 'Stone' } }
   const mapped = await loadReviewResolutionOptions({ row: forceRow, repository: { getMappings: async () => mappings }, reads })
   assert.deepEqual(mapped.forceCreateReadiness, { eligible: false, ready: false, blockedReason: 'source_already_mapped' })
   const several = await loadReviewResolutionOptions({ row: forceRow, repository: { getMappings: async () => ({ ...mappings, contacts: [] }) },
     reads: { ...reads, hubspotRead: { ...reads.hubspotRead, getAssociations: async () => [{ fromId: '123', toObjectType: 'companies', toIds: ['777', '778'] }] } } })
-  assert.deepEqual(several.forceCreateReadiness, { eligible: false, ready: false, blockedReason: 'multiple_organizations' })
+  assert.equal(several.forceCreateReadiness.eligible, true)
+  assert.notEqual(several.forceCreateReadiness.blockedReason, 'multiple_organizations')
 })
 
 import { loadOrgFirstCreate } from '../../netlify/functions/_h2a/reviewResolutionOptions.js'

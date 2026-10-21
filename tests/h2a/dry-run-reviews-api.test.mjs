@@ -424,8 +424,8 @@ test('an already mapped organization needs no preparation', async () => {
   assert.equal(f.recorded.length, 0)
 })
 
-test('preparing refuses stale reviews, non-contacts and anything but exactly one associated organization', async () => {
-  for (const [f, extra, status] of [[prepareFixture({ companies: [] }), {}, 409], [prepareFixture({ companies: ['30', '31'] }), {}, 409],
+test('preparing refuses stale reviews, non-contacts and a contact with no associated organization', async () => {
+  for (const [f, extra, status] of [[prepareFixture({ companies: [] }), {}, 409],
     [prepareFixture(), { expectedUpdatedAt: '2026-10-12T10:00:01.000000Z' }, 409], [prepareFixture(), { reviewId: '00000000-0000-4000-8000-0000000000ee' }, 404],
     [prepareFixture(), { prepareOrganization: 'yes' }, 400]]) {
     const response = await prepare(f, extra)

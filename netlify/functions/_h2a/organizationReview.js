@@ -24,7 +24,7 @@ export async function prepareOrganizationReview({ repository, options, companyId
   const associations = await hubspotRead.getAssociations({ objectType: 'contacts', objectIds: [row.source_id], toObjectTypes: ['companies'] })
   const toIds = Array.isArray(associations) && associations.length === 1 && associations[0]?.fromId === row.source_id &&
     associations[0]?.toObjectType === 'companies' && Array.isArray(associations[0].toIds) ? [...new Set(associations[0].toIds)] : null
-  if (!toIds || toIds.length !== 1 || !providerId(toIds[0])) fail(409, 'This contact needs exactly one associated organization.')
+  if (!toIds || !toIds.length || !providerId(toIds[0])) fail(409, 'This contact has no associated organization.')
   const [sourceId] = toIds
   const mappings = await repository.getMappings(companyId)
   const mapped = (mappings?.organizations ?? []).some(item => item?.portal_id === row.portal_id && item?.hubspot_id === sourceId)
