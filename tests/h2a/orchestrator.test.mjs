@@ -922,7 +922,7 @@ for (const invalid of ['absent', 'missing', 'deleted', 'cross-tenant', 'wrong po
   })
 }
 
-test('reviewed broad context cannot bypass organization field review', async () => {
+test('a linked organization whose fields differ in Albi does not hold its contact; live sync still creates nothing', async () => {
   const deps = reviewedSyncFixture()
   deps.albi.listOrganizations = async () => ({ records: [
     { id: '100', name: 'Company20', phoneNumber: '4155550123' },
@@ -930,7 +930,7 @@ test('reviewed broad context cannot bypass organization field review', async () 
   ], cursor: null })
   await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
   assert.equal(deps.contactPayload, undefined)
-  assert.ok(deps.events.includes('conflict:organization_unresolved'))
+  assert.ok(!deps.events.includes('conflict:organization_unresolved'))
 })
 
 for (const existing of [true, false]) test(`reviewed dry-run company creation ${existing ? 'cannot preview an existing contact link' : 'permits new contact creation'}`, async () => {

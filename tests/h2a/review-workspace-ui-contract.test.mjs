@@ -127,6 +127,14 @@ test('a finished record says it is done and offers no more create or link action
   for (const pattern of [/Can’t create yet/, /Accept suggestion/, /Link and ignore/, /Create new contact in Albi/, />Link</]) assert.doesNotMatch(out, pattern)
 })
 
+test('a done record lists Albi’s differing fields as an optional Albi edit', async () => {
+  const out = await html({ ...base, status: 'cleared', recheckOutcome: 'safe_to_link', triageBucket: 'done',
+    proposedChanges: { updates: { jobTitle: 'Property Manager' }, conflicts: { city: { current: 'Irvine', proposed: 'Corona' } } } })
+  assert.match(out, /Optional/); assert.match(out, /Job title/); assert.match(out, /City/)
+  const clean = await html({ ...base, status: 'cleared', recheckOutcome: 'safe_to_link', triageBucket: 'done', proposedChanges: { updates: {}, conflicts: {} } })
+  assert.doesNotMatch(clean, /Optional/)
+})
+
 test('blocked record shows named blocked copy', async () => {
   const out = await html({ ...none, createReadiness: { ready: false, blockedReason: 'salesperson_not_found' } })
   assert.match(out, /Can’t create yet/); assert.match(out, /exactly match one Albi salesperson/)

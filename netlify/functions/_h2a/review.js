@@ -159,7 +159,9 @@ export function evaluateOrganizationReview({ source, candidates = [], mappings =
   const related = selectReviewCandidates(input, decision, 'organization')
   const conflict = (type, result = decision, selected = related) => reviewResult('needs_review', type, result, selected, 'organization')
   if (decision.action === 'conflict') return conflict('organization_match')
-  if (decision.action === 'link' && hasChanges(decision.proposedChanges)) {
+  // Once linked (a stored mapping), field differences never hold the record: Albi has no update, so they are shown
+  // as an optional Albi edit instead of being reviewed again on every run.
+  if (decision.action === 'link' && hasChanges(decision.proposedChanges) && decision.reason !== 'existing_mapping') {
     return conflict('organization_fields', { ...decision, reason: Object.keys(decision.proposedChanges.updates).length
       ? 'albi_organization_update_contract_unverified' : 'nonblank_field_difference' })
   }
@@ -203,7 +205,7 @@ export function evaluateContactReview({ source, candidates = [], mappings = [], 
   const related = selectReviewCandidates(input, decision, 'contact')
   if (decision.action === 'conflict') return conflict('contact_match', decision, related)
   if (decision.action === 'link') {
-    if (hasChanges(decision.proposedChanges)) return conflict('contact_fields', { ...decision,
+    if (hasChanges(decision.proposedChanges) && decision.reason !== 'existing_mapping') return conflict('contact_fields', { ...decision,
       reason: Object.keys(decision.proposedChanges.updates).length ? 'albi_contact_update_contract_unverified' : 'nonblank_field_difference' }, related)
     const target = candidates.find(candidate => identity(valueOf(candidate, ['id', 'targetId', 'albiId'], true)) === decision.targetId)
     const organizationTargetId = identity(organization?.targetId)

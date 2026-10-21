@@ -465,7 +465,7 @@ test('missing or unsupported review scope rejects before any event or credential
   }
 })
 
-test('a reviewed email-match link clears later rechecks whose only differences are phone or address', async () => {
+test('a linked contact clears rechecks whatever its field differences (Albi cannot be updated from here)', async () => {
   const albi = { id: '20', firstName: 'A', lastName: 'Person', email: 'a@example.com', phoneNumber: '555-000-0000', city: 'Old Town' }
   const run = async (resolution, extra = {}) => {
     const f = fixture({ contacts: [albi], source: { id: '10', properties: { firstname: 'A', lastname: 'Person', email: 'a@example.com', phone: '5551112222', city: 'New Town', ...extra } } })
@@ -477,9 +477,8 @@ test('a reviewed email-match link clears later rechecks whose only differences a
   const accepted = { review_id: reviewId, action: 'link_existing', status: 'ready_to_recheck',
     decision: { action: 'link_existing', candidateId: '20', approveManyToOne: true, ignoreContactDifferences: true } }
   assert.equal((await run(accepted)).outcome, 'safe_to_link')
-  assert.equal((await run(null)).outcome, 'still_needs_review')
-  assert.equal((await run(accepted, { jobtitle: 'Engineer' })).outcome, 'still_needs_review')
-  assert.equal((await run({ ...accepted, decision: { ...accepted.decision, candidateId: '21' } })).outcome, 'still_needs_review')
+  assert.equal((await run(null)).outcome, 'safe_to_link')
+  assert.equal((await run(accepted, { jobtitle: 'Engineer' })).outcome, 'safe_to_link')
 })
 
 // Live rows are owned by the live run that captured them; the sample gate never applies to them.
@@ -570,7 +569,7 @@ test('a link that ignored chosen differences clears later rechecks of contacts a
   }
   const ignoreTitle = { action: 'link_existing', candidateId: '20', ignoredFields: ['jobTitle'] }
   assert.equal(await contact(ignoreTitle), 'safe_to_link')
-  assert.equal(await contact(ignoreTitle, { city: 'Elsewhere' }), 'still_needs_review')
+  assert.equal(await contact(ignoreTitle, { city: 'Elsewhere' }), 'safe_to_link')
   const organization = async decision => {
     const albi = { id: '30', name: 'Acme', phoneNumber: '555-000-0000', organizationTypeIds: ['7'] }
     const f = fixture({ objectType: 'companies', organizations: [albi], options: [{ mapping_kind: 'default_organization_type', source_key: 'default', albi_id: '7', confirmed: true }],
@@ -582,5 +581,5 @@ test('a link that ignored chosen differences clears later rechecks of contacts a
     return f.applied.at(-1)?.[1]?.outcome
   }
   assert.equal(await organization({ action: 'link_existing', candidateId: '30', ignoredFields: ['phoneNumber'] }), 'safe_to_link')
-  assert.equal(await organization(null), 'still_needs_review')
+  assert.equal(await organization(null), 'safe_to_link')
 })

@@ -338,3 +338,18 @@ test('event projector retains only fixed outcome/category/code details', () => {
   })
   assert.deepEqual(projectReviewEvent({ sanitized_details: { outcome: 'SECRET', category: { apiKey: 'SECRET' }, code: 'SECRET' } }).details, {})
 })
+
+test('a record already linked to Albi passes even when its fields differ, keeping the differences to show', () => {
+  const source = { id: 'hs-1', firstName: 'Estela', lastName: 'Alday', email: 'e@x.test', jobTitle: 'Property Manager', city: 'Corona' }
+  const albi = { id: '20', firstName: 'Estela', lastName: 'Alday', email: 'e@x.test', city: 'Irvine' }
+  const mappings = [{ portal_id: '123', hubspot_id: 'hs-1', albi_contact_id: '20' }]
+  const linked = evaluateContactReview({ source, candidates: [albi], mappings, portalId: '123' })
+  assert.equal(linked.outcome, 'safe_to_link')
+  assert.ok(Object.keys(linked.proposedChanges.conflicts).includes('city'))
+  assert.ok(Object.keys(linked.proposedChanges.updates).includes('jobTitle'))
+  // Not linked yet: an exact match whose fields differ still asks the reviewer.
+  assert.equal(evaluateContactReview({ source, candidates: [albi], mappings: [], portalId: '123' }).outcome, 'needs_review')
+  const organization = evaluateOrganizationReview({ source: { id: 'hs-org', name: 'Acme', city: 'Corona' },
+    candidates: [{ id: '50', name: 'Acme', city: 'Irvine' }], mappings: [{ portal_id: '123', hubspot_id: 'hs-org', albi_organization_id: '50' }], portalId: '123' })
+  assert.equal(organization.outcome, 'safe_to_link')
+})

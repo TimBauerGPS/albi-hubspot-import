@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { blockedReasonCopy } from '../../../shared/h2aBlockedReasons.js'
 import { presentSampleReviewItem } from './sampleReview.js'
-import { fieldDiffRows } from './reviewWorkspace.js'
+import { fieldDiffRows, fieldLabel } from './reviewWorkspace.js'
 import CandidateList from './CandidateList.jsx'
 import FieldDiff from './FieldDiff.jsx'
 import ManyToOneDialog from './ManyToOneDialog.jsx'
@@ -78,6 +78,9 @@ export default function ReviewRecord({
   // In Done the work is finished (linked, or created and linked): nothing more is offered, so a saved record is never
   // re-created or re-linked. Recheck stays available to confirm it.
   const finished = item?.triageBucket === 'done'
+  // Fields where Albi's linked record differs from HubSpot: an optional Albi edit, never a hold.
+  const changes = item?.proposedChanges && typeof item.proposedChanges === 'object' ? item.proposedChanges : {}
+  const albiDiffers = [...new Set([...Object.keys(changes.updates ?? {}), ...Object.keys(changes.conflicts ?? {})])]
   const canAct = !finished && capability.canResolve && review.actions.length > 0 && (review.status === 'needs_review' ||
     review.status === 'cleared' && ['safe_to_create', 'safe_to_link'].includes(item?.recheckOutcome))
   const disabled = pending || busy
@@ -182,7 +185,9 @@ export default function ReviewRecord({
       {finished && <div className="rounded-lg border border-green-200 bg-green-50 p-3 text-sm text-green-900" role="status">
         <p className="font-semibold">Done</p>
         <p className="mt-1 text-xs">{review.status === 'no_longer_in_scope' ? `This ${objectLabel} is no longer in scope. Nothing else to do.`
-          : `This ${objectLabel} is linked in Albi. Nothing else to do${item?.triageDetails?.recheckPending ? '; Recheck all confirms it later.' : '.'}`}</p></div>}
+          : `This ${objectLabel} is linked in Albi. Nothing else to do${item?.triageDetails?.recheckPending ? '; Recheck all confirms it later.' : '.'}`}</p>
+        {albiDiffers.length > 0 && <p className="mt-2 text-xs text-green-900">Optional: Albi differs from HubSpot on {albiDiffers.map(fieldLabel).join(', ')}.
+          Update it in Albi if you want them to match{review.candidateLinks.length === 1 ? <> (<Link url={review.candidateLinks[0].url}>open in Albi</Link>)</> : null}. This never holds the record or its activities.</p>}</div>}
       {!capability.canResolve && <p className="text-xs leading-5 text-gray-600" role="status">Resolution is {capability.enabled ? 'read-only for your role.' : 'unavailable in the current mode.'} {capability.hubspotWrites === 'rejected' ? 'Recent HubSpot write authorization was rejected.' : ''}</p>}
       {merged && <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm">
         <p className="font-semibold text-amber-950">Merged in HubSpot into {objectLabel} {merged.sourceId}</p>

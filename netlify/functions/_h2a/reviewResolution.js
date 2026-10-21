@@ -207,11 +207,10 @@ function createPayload(input, hubspot, type, associations) {
   const payload = {}
   const nameOf = field => String(fieldValue(hubspot, [FIELD_METADATA.contacts[field].hubspot, field], false) ?? '').trim()
   const singleName = type === 'contacts' && Boolean(nameOf('firstName') || nameOf('lastName'))
-  // Only properties accepted by the existing Albi create contracts are copied.
-  // Keep creates on the same minimal contract exercised by the production sync.
-  // Richer provider fields remain available for comparison and manual resolution,
-  // but have not been proven safe on Albi's create endpoints.
-  for (const field of type === 'contacts' ? ['firstName', 'lastName', 'email', 'phoneNumber'] : ['name', 'phoneNumber']) {
+  // Every property Albi's create accepts is copied, including job title and address: Albi has no update, so a
+  // value left out at create can never be added later from here.
+  const ADDRESS = ['address1', 'address2', 'city', 'state', 'zipcode', 'country']
+  for (const field of type === 'contacts' ? ['firstName', 'lastName', 'email', 'phoneNumber', 'jobTitle', ...ADDRESS] : ['name', 'phoneNumber', ...ADDRESS]) {
     const meta = FIELD_METADATA[type][field]
     let value = fieldValue(hubspot, [meta.hubspot, field], false)
     if (value !== null) value = value.trim()

@@ -168,7 +168,7 @@ test('create plans rebuild supported payloads from current HubSpot and confirmed
   const input = createInput('contacts'); input.hubspot.properties.mobilephone = '111'; input.hubspot.properties.zip = '90001'
   const result = plan(input)
   assert.equal(result.providerOperation.payload.mobileNumber, undefined)
-  assert.equal(result.providerOperation.payload.zipCode, undefined)
+  assert.equal(result.providerOperation.payload.zipCode, '90001')
 })
 
 test('create plans canonicalize surrounding HubSpot whitespace before comparing captured evidence', () => {
@@ -180,20 +180,27 @@ test('create plans canonicalize surrounding HubSpot whitespace before comparing 
 
   assert.deepEqual(plan(input).providerOperation.payload, {
     firstName: 'John', lastName: 'Robinson', email: 'john@example.com', phoneNumber: '949-662-6181',
+    jobTitle: 'Director of engineering', address1: '1 Main St', city: 'Newport Beach',
     contactTypeIds: ['12'], referralSourceId: '5', relationshipStatusId: '2', salespersonId: '70',
   })
 })
 
-test('create plans use the production-proven minimal Albi contact contract', () => {
+test('create plans send job title and address, which Albi cannot be given later', () => {
   const input = createInput('contacts')
   Object.assign(input.hubspot.properties, {
     jobtitle: 'Director of engineering', address: '1 Main St', address2: 'Suite 2', city: 'Newport Beach',
-    state: 'CA', zip: '92663', country: 'US',
+    state: 'CA', zip: '92663', country: 'US', mobilephone: '5559990000',
   })
-
   assert.deepEqual(plan(input).providerOperation.payload, {
-    firstName: 'A', lastName: 'B', email: 'a@example.com', phoneNumber: '555-111-2222', contactTypeIds: ['12'], referralSourceId: '5', relationshipStatusId: '2', salespersonId: '70',
+    firstName: 'A', lastName: 'B', email: 'a@example.com', phoneNumber: '555-111-2222', jobTitle: 'Director of engineering',
+    address1: '1 Main St', address2: 'Suite 2', city: 'Newport Beach', state: 'CA', zipCode: '92663', country: 'US',
+    contactTypeIds: ['12'], referralSourceId: '5', relationshipStatusId: '2', salespersonId: '70',
   })
+  const company = createInput('companies')
+  Object.assign(company.hubspot.properties, { address: '9 Elm St', city: 'Irvine', state: 'CA', zip: '92602', country: 'US', domain: 'x.example' })
+  assert.deepEqual(plan(company).providerOperation.payload, { name: 'Company', phoneNumber: '555-111-2222',
+    address1: '9 Elm St', city: 'Irvine', state: 'CA', zipCode: '92602', country: 'US',
+    organizationTypeIds: ['12'], referralSourceId: '5', relationshipStatusId: '2', salespersonId: '70' })
 })
 
 test('a contact with only one name is created with a "." in the other name, which Albi requires', () => {
