@@ -233,12 +233,14 @@ function liveFixture({ contactIds = ['10'], companyIds = ['20'], activities = [{
     { mapping_kind: 'activity_type', source_key: 'calls', albi_id: '3', confirmed_at: '2026-10-01T00:00:00Z' },
   ] }
   const deliveries = new Map(), conflicts = [], liveReviews = [], liveLinks = []
+  let runCount = 0
   const repository = {
     claimLease: async () => true, releaseLease: async () => { events.push('release') }, heartbeatLease: async () => true,
     getConfig: async () => ({ state: 'live', portal_id: '123', selected_start_date: '2026-10-01', preflight_status: 'valid' }),
-    getMappings: async () => mappings, startRun: async () => ({ id: 'run1' }), getCursor: async () => null,
-    getRunCheckpoint: async (_company, _run, type) => runCheckpoints.get(type) ?? null,
-    saveRunCheckpoint: async (_company, _run, type, checkpoint) => { runCheckpoints.set(type, structuredClone(checkpoint)); return checkpoint },
+    // A new run gets a fresh id (run1, run2, …), as in storage; a resume keeps its run's id.
+    getMappings: async () => mappings, startRun: async (_company, input) => ({ id: input?.runId ?? (runCount++ ? `run${runCount}` : 'run1') }), getCursor: async () => null,
+    getRunCheckpoint: async (_company, run, type) => runCheckpoints.get(`${run}:${type}`) ?? null,
+    saveRunCheckpoint: async (_company, run, type, checkpoint) => { runCheckpoints.set(`${run}:${type}`, structuredClone(checkpoint)); return checkpoint },
     saveCursor: async (_company, type, cursor) => { cursors.push({ type, cursor }) },
     getItemOutcomes: async (_company, _run, type, id) => items.filter(row => row.object_type === type && row.source_id === id),
     recordItem: async (companyId, row) => {
@@ -681,6 +683,50 @@ test('dry-run continuation persists the next HubSpot page cursor at a budget bou
   assert.equal(second.status, 'completed')
   assert.deepEqual(processed, ['50', '51'])
   assert.equal(new Set(upperBounds).size, 1)
+})
+
+test('a live run resumes where it paused instead of re-reading from its first held activity', async () => {
+  const deps = liveFixture({ contactIds: [], companyIds: [], activities: [] })
+  const checkpoints = new Map(), cursors = []
+  deps.repository.getRunCheckpoint = async (_companyId, _runId, objectType) => checkpoints.get(objectType) ?? null
+  deps.repository.saveRunCheckpoint = async (_companyId, _runId, objectType, checkpoint) => {
+    checkpoints.set(objectType, structuredClone(checkpoint))
+    return checkpoint
+  }
+  deps.repository.saveCursor = async (_company, objectType, cursor) => { cursors.push([objectType, cursor]) }
+  let clock = 0
+  deps.clockMs = () => clock
+  deps.now = () => new Date('2026-10-09T20:00:00.000Z')
+  const processed = [], upperBounds = []
+  deps.hubspot.getAssociations = async ({ objectType, objectIds }) => {
+    if (objectType === 'calls') processed.push(objectIds[0])
+    return []
+  }
+  deps.hubspot.listActivities = async ({ objectType, after, occurredAtLt }) => {
+    if (objectType !== 'calls') return { records: [], after: null }
+    upperBounds.push(occurredAtLt)
+    if (!after) return { records: [{ id: '50', occurredAt: '2026-10-02T12:00:00Z', objectType: 'calls', properties: {} }], after: 'page-2' }
+    assert.equal(after, 'page-2')
+    return { records: [{ id: '51', occurredAt: '2026-10-02T12:01:00Z', objectType: 'calls', properties: {} }], after: null }
+  }
+  const recordItem = deps.repository.recordItem
+  deps.repository.recordItem = async (companyId, row) => {
+    await recordItem(companyId, row)
+    if (row.object_type === 'calls' && row.source_id === '50') clock = 2000
+  }
+  deps.dispatchContinuation = async () => {}
+
+  const first = await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual', timeBudgetMs: 6000 })
+  assert.equal(first.status, 'paused')
+  clock = 0
+  const second = await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'resume', runId: 'run1' })
+  assert.notEqual(second.status, 'paused')
+  // Each activity is handled once across the pause, and the run keeps one time window.
+  assert.deepEqual(processed, ['50', '51'])
+  assert.equal(new Set(upperBounds).size, 1)
+  assert.equal(checkpoints.get('calls')?.completed, true)
+  // 50 is held (no person to attach it to), so the durable cursor never moves past it.
+  assert.ok(cursors.every(([, cursor]) => cursor.objectId !== '51'))
 })
 
 test('backfill divides a seeded range into Pacific day reads across spring DST', async () => {
@@ -1187,7 +1233,7 @@ for (const objectType of ['contacts', 'companies']) test(`${objectType} capture 
   await assert.rejects(() => runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'manual' }))
   assert.deepEqual(deps.transitions.map(row => row.status), ['failed'])
   assert.equal(deps.prunes.length, 0)
-  assert.equal(deps.runCheckpoints.has('calls'), false)
+  assert.equal([...deps.runCheckpoints.keys()].some(key => key.endsWith(':calls')), false)
   assert.ok(!deps.items.some(row => row.sanitized_details.proposedAction === 'review_conflict'))
 })
 

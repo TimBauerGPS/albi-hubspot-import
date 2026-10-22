@@ -458,7 +458,9 @@ export async function runCompanySync(deps, input = {}) {
     }
     for (const objectType of HUBSPOT_ACTIVITY_TYPES) {
       if (clockMs(deps) >= deadline - 5000) { continuation = true; break }
-      const runCheckpoint = mode === 'dry_run' && typeof repo.getRunCheckpoint === 'function'
+      // Dry and live runs both keep a per-run bookmark, so a run resumed after its time limit continues where it
+      // stopped. (A live run's durable cursor stops at its first held activity; resuming from it repeated work forever.)
+      const runCheckpoint = (mode === 'dry_run' || mode === 'live') && typeof repo.getRunCheckpoint === 'function'
         ? await repo.getRunCheckpoint(companyId, run.id, objectType) : null
       if (runCheckpoint?.completed) continue
       let sampleProcessedCount = sampleLimitPerType === null ? 0 : runCheckpoint?.processedCount ?? 0
@@ -480,14 +482,20 @@ export async function runCompanySync(deps, input = {}) {
       for (const window of windows) {
         if (clockMs(deps) >= deadline - 5000) { continuation = true; break }
         const lowerBound = window?.start_at ?? pacificStartOfDate(config.selected_start_date)
-        const upperBound = window?.end_at ?? (mode === 'dry_run' && runCheckpoint?.upperBound
+        const upperBound = window?.end_at ?? (runCheckpoint?.upperBound
           ? runCheckpoint.upperBound : new Date((deps.now?.() ?? new Date()).getTime() + 1).toISOString())
         let checkpoint = window?.checkpoint_timestamp ? { timestamp: window.checkpoint_timestamp, objectId: window.checkpoint_object_id }
           : mode === 'live' ? await repo.getCursor(companyId, objectType)
             : runCheckpoint?.timestamp && runCheckpoint?.objectId
               ? { timestamp: runCheckpoint.timestamp, objectId: runCheckpoint.objectId } : null
-        let after = mode === 'dry_run' ? runCheckpoint?.pageAfter ?? null : null
-        let blocked = window ? blockedSeeds.has(window.id) : false, pendingOutcomes = []
+        const liveRun = mode === 'live' && !window
+        // How far this live run has already got (every activity handled, held or not).
+        let runBoundary = liveRun && runCheckpoint?.timestamp && runCheckpoint?.objectId
+          ? { timestamp: runCheckpoint.timestamp, objectId: runCheckpoint.objectId } : null
+        let after = mode === 'dry_run' || liveRun ? runCheckpoint?.pageAfter ?? null : null
+        // A resumed live run that had passed a held activity keeps its durable cursor where it stopped.
+        let blocked = window ? blockedSeeds.has(window.id) : Boolean(runBoundary && !(checkpoint && compareBoundary(checkpoint, runBoundary) >= 0))
+        let pendingOutcomes = []
         const seen = new Set()
         for (let pageNo = 0; pageNo < 1000; pageNo += 1) {
           if (clockMs(deps) >= deadline - 5000) { continuation = true; break }
@@ -509,6 +517,7 @@ export async function runCompanySync(deps, input = {}) {
             if (!activity.occurredAt || Date.parse(activity.occurredAt) < Date.parse(lowerBound) ||
               Date.parse(activity.occurredAt) >= Date.parse(upperBound)) continue
             const itemBoundary = { timestamp: activity.occurredAt, objectId: String(activity.id) }
+            if (runBoundary && compareBoundary(itemBoundary, runBoundary) <= 0) continue
             if (checkpoint && !blocked && (mode === 'dry_run'
               ? compareBoundary(itemBoundary, checkpoint) <= 0
               : Date.parse(activity.occurredAt) <= Date.parse(checkpoint.timestamp) && itemBoundary.objectId === checkpoint.objectId)) continue
@@ -561,6 +570,11 @@ export async function runCompanySync(deps, input = {}) {
               checkpoint = next
             }
             if (ready.some(item => !item.resolved)) blocked = true
+          }
+          if (liveRun && typeof repo.saveRunCheckpoint === 'function') {
+            runBoundary = advanceCheckpoint({ current: runBoundary, items: outcomes.map(item => ({ ...item, resolved: true })) })
+            await repo.saveRunCheckpoint(companyId, run.id, objectType, { upperBound, pageAfter: continuation ? after : page.after ?? null,
+              processedCount: 0, ...(runBoundary ?? {}), completed: !continuation && !page.after })
           }
           if (!(await repo.heartbeatLease(companyId, ownerToken, 900))) throw new Error('H2A lease was lost')
           if (continuation) break
