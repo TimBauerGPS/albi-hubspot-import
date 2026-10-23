@@ -125,6 +125,12 @@ export function createRunHandler(options = {}, { background = false } = {}) {
         const clients = await clientsFor(companyId, repository, options)
         const result = await (options.runSync ?? runCompanySync)({ ...clients, repository, logger: options.logger,
           dispatchContinuation: payload => dispatchBackground(payload, options) }, { companyId, mode: 'live', trigger: 'conflict_resolution', resumeId: body.resumeId })
+        // Another sync holds the company: put the release back in the queue (the nightly job resends it) rather than
+        // drop it while it is marked sent.
+        if (result?.status === 'already_running') {
+          const requeued = await repository.requeueConflictResume?.(companyId, intent.id)
+          return reply(200, { status: requeued ? 'requeued' : 'already_running', companyId, resumeId: intent.id })
+        }
         await notifyAfterRun(options, auth, companyId, result)
         return reply(200, result)
       }

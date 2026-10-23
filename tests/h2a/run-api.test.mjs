@@ -282,6 +282,25 @@ test('internal targeted resume validates persisted identity and invokes only the
   assert.deepEqual(accepted, [{ companyId: 'c1', mode: 'live', trigger: 'conflict_resolution', resumeId }])
 })
 
+test('a targeted resume that finds a sync already running goes back in the queue instead of being dropped', async () => {
+  const resumeId = '00000000-0000-4000-8000-000000000001'
+  const requeued = []
+  const intent = { id: resumeId, company_id: 'c1', status: 'dispatched', resolution_action: 'create_new',
+    source_object_type: 'contacts', source_id: '10', activity_object_type: 'calls', activity_id: '50',
+    originating_run_id: null, activity_delivery_id: null }
+  const handler = createRunHandler({
+    requireRequest: async () => ({ companyId: 'c1', supabase: {} }),
+    repository: { getConflictResume: async () => intent, requeueConflictResume: async (companyId, id) => { requeued.push([companyId, id]); return true } },
+    makeClients: async () => ({ hubspot: {}, albi: {} }), runSync: async () => ({ status: 'already_running', companyId: 'c1' }),
+  }, { background: true })
+  const response = await handler({ httpMethod: 'POST', body: JSON.stringify({
+    companyId: 'c1', mode: 'live', trigger: 'conflict_resolution', resumeId, sourceObjectType: 'contacts', sourceId: '10',
+    activityObjectType: 'calls', activityId: '50' }) })
+  assert.equal(response.statusCode, 200)
+  assert.equal(JSON.parse(response.body).status, 'requeued')
+  assert.deepEqual(requeued, [['c1', resumeId]])
+})
+
 test('targeted resume rejects tampered or extra payload fields before processing', async () => {
   let invoked = false
   const resumeId = '00000000-0000-4000-8000-000000000001'
