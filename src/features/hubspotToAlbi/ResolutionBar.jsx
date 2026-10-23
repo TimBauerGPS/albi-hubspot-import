@@ -7,7 +7,7 @@ export const Kbd = ({ children }) => <kbd className="ml-1.5 rounded border borde
 export default function ResolutionBar({
   disabled = false, fieldMode = false, applyDisabled = false, onAllHubSpot, onAllAlbi, onApplyFields,
   suggestion = null, onAccept, selectedLink = null, onLinkSelected,
-  create = null, referralSources = [], referralSourceId = '', onReferral, referralRef, onCreate,
+  create = null, referralSources = [], referralSourceId = '', referralHint = '', onReferral, referralRef, onCreate,
   showSkip = false, onSkip, showRecheck = false, onRecheck, showIgnoreAndLink = false, onIgnoreAndLink,
 }) {
   const hasOther = Boolean(suggestion || selectedLink)
@@ -34,6 +34,7 @@ export default function ResolutionBar({
         <option value="">Referral source…</option>
         {referralSources.map(source => <option key={source.id} value={source.id}>{source.label}</option>)}
       </select>
+      {referralHint && <span className="text-xs text-gray-500">{referralHint}</span>}
       <button type="button" data-shortcut="create" className={hasOther || fieldMode ? btn : primary} disabled={disabled || !referralSourceId} onClick={onCreate}>
         {create.label}<Kbd>n</Kbd></button>
     </span>}

@@ -327,3 +327,30 @@ test('a failed check names the read that failed and the provider error code', as
   const plain = await load({ getOwnerId: async () => { throw new Error('secret token abc in message') } })
   assert.deepEqual(plain.forceCreateReadiness.evidence, { step: 'hubspot_owner' })
 })
+
+test('the create referral source is prefilled from the contact’s Albi organization, else the owner’s sales-team default', async () => {
+  const createRow = { ...row, company_id: null, reason: 'no_match', recheck_outcome: null, candidate_snapshots: [],
+    source_snapshot: { id: '123', firstName: 'Alex', lastName: 'Stone' } }
+  const currentMappings = { ...mappings, contacts: [], options: [{ mapping_kind: 'default_contact_type', albi_id: '12', confirmed: true }] }
+  const owners = [{ id: '9', firstName: 'Victoria', lastName: 'Dunn', email: 'victoria@allied.test' }]
+  const sources = [{ id: '5', label: 'Network' }, { id: '6', label: 'Property Management' }, { id: '7', label: 'Insurance' }]
+  const load = ({ organization, team = { 'victoria@allied.test': '6' }, ownerId = '9' } = {}) => loadReviewResolutionOptions({ row: createRow,
+    repository: { getMappings: async () => currentMappings, getSalesTeamReferralDefaults: async () => team },
+    reads: { hubspotRead: { ...reads.hubspotRead, getContacts: async () => [{ id: '123', properties: { firstname: 'Alex', lastname: 'Stone' } }],
+      getOwnerId: async () => ownerId, listOwners: async () => owners },
+    albiRead: { ...reads.albiRead, listReferralSources: async () => sources,
+      listCreateOptions: async () => ({ relationshipTypes: [{ id: '12', label: 'Referrer' }], relationshipStatuses: [{ id: '2', label: 'Active' }], salespeople: [{ id: '70', label: 'Victoria Dunn' }] }),
+      getOrganization: async id => organization === undefined ? null : organization instanceof Error ? (() => { throw organization })() : { id, ...organization } } } })
+  // The contact's organization (777 -> Albi 888) has a referral source in Albi.
+  const inherited = (await load({ organization: { referralSourceID: '7' } })).createReadiness
+  assert.equal(inherited.ready, true)
+  assert.equal(inherited.defaultReferralSourceId, '7'); assert.equal(inherited.defaultReferralFrom, 'organization')
+  // No referral source on the organization (or it can't be read): the owner's sales-team default.
+  for (const organization of [{}, new Error('403')]) {
+    const fallback = (await load({ organization })).createReadiness
+    assert.equal(fallback.defaultReferralSourceId, '6'); assert.equal(fallback.defaultReferralFrom, 'salesperson')
+  }
+  // A default that is not one of Albi's current referral sources, or no match at all, prefills nothing.
+  assert.equal((await load({ organization: { referralSourceID: '99' }, team: {} })).createReadiness.defaultReferralSourceId, undefined)
+  assert.equal((await load({ organization: {}, team: { 'someone@else.test': '6' } })).createReadiness.defaultReferralSourceId, undefined)
+})

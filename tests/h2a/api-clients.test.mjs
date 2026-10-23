@@ -566,3 +566,20 @@ test('an Albi create reply carrying the new record as an object still yields its
   await assert.rejects(new AlbiClient({ apiKey: 'k', fetch: f.fetch }).createActivity({ contactId: 101, typeId: 6711, date: '2026-10-02T12:00:00Z', notes: 'Test' }),
     error => error.code === 'malformed_response' && error.protocolIssue === 'reply_no_id' && /data=object\(created,secret\)/.test(error.providerShape) && !/value/.test(error.providerShape))
 })
+
+test('one Albi organization is read by id with its referral source; a missing one is null', async () => {
+  for (const reply of [{ status: 1, data: { id: 465682, name: 'Pure Insurance', referralSourceID: 29513 } }, { id: 465682, name: 'Pure Insurance', referralSourceID: 29513 }]) {
+    const f = transport([accessibleCompany, reply])
+    const organization = await new AlbiClient({ apiKey: 'k', fetch: f.fetch }).getOrganization('465682')
+    assert.equal(organization.id, '465682'); assert.equal(organization.referralSourceID, '29513')
+    assert.match(f.calls.at(-1).url.pathname, /\/organizations\/465682$/)
+  }
+  const missing = transport([accessibleCompany, { statusCode: 404, body: { detail: 'Not found' } }])
+  assert.equal(await new AlbiClient({ apiKey: 'k', fetch: missing.fetch }).getOrganization('1'), null)
+})
+
+test('HubSpot owners carry their email, for matching the sales team', async () => {
+  const f = transport([{ results: [{ id: '42', firstName: 'Victoria', lastName: 'Dunn', email: 'Victoria@Allied.test' }, { id: '43', firstName: 'A', lastName: 'B' }] }])
+  const owners = await new HubSpotClient({ token: 'token', fetch: f.fetch }).listOwners()
+  assert.deepEqual(owners.map(owner => owner.email), ['victoria@allied.test', ''])
+})

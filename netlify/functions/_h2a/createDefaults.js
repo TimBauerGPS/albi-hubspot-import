@@ -55,7 +55,31 @@ export async function loadCreateDefaults({ hubspotRead, albiRead, objectType, so
     stepped('hubspot_owner', () => hubspotRead.getOwnerId(objectType === 'contacts' ? 'contacts' : 'companies', sourceId)),
   ])
   const owners = ownerId ? await stepped('hubspot_owners', () => cachedRead(cacheKey && `${cacheKey}:hubspot-owners`, () => hubspotRead.listOwners())) : []
-  return resolveCreateDefaults({ ...options, ownerId, owners })
+  const owner = (Array.isArray(owners) ? owners : []).find(item => item?.id === ownerId)
+  // The owner's email also picks the sales-team default referral source.
+  return { ...resolveCreateDefaults({ ...options, ownerId, owners }), ownerEmail: typeof owner?.email === 'string' ? owner.email.trim().toLocaleLowerCase('en-US') : '' }
+}
+
+// The referral source a new record starts with (always editable): a contact's Albi organization's referral
+// source, else the HubSpot owner's sales-team default. Only a source Albi currently offers is suggested; any
+// failed read just means no suggestion.
+export async function suggestReferralSource({ organizationTargetId = null, ownerEmail = '', referralSources = [], albiRead, repository, companyId, cacheKey = null }) {
+  const offered = new Set(referralSources.map(source => source.id))
+  if (organizationTargetId && typeof albiRead?.getOrganization === 'function') {
+    try {
+      const organization = await cachedRead(cacheKey && `${cacheKey}:albi-organization:${organizationTargetId}`, () => albiRead.getOrganization(organizationTargetId))
+      const id = organization?.referralSourceID ?? organization?.referralSourceId
+      if (offered.has(String(id ?? ''))) return { id: String(id), from: 'organization' }
+    } catch { /* No inherited default. */ }
+  }
+  if (ownerEmail && typeof repository?.getSalesTeamReferralDefaults === 'function') {
+    try {
+      const team = await cachedRead(cacheKey && `${cacheKey}:sales-team-referrals`, () => repository.getSalesTeamReferralDefaults(companyId), { ttlMs: 60000 })
+      const id = team && typeof team === 'object' && Object.hasOwn(team, ownerEmail) ? team[ownerEmail] : null
+      if (offered.has(String(id ?? ''))) return { id: String(id), from: 'salesperson' }
+    } catch { /* No sales-team default. */ }
+  }
+  return null
 }
 
 // Bounded, id/label-only copy of Albi's live referral-source list.

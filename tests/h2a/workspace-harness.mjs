@@ -16,7 +16,7 @@ export function stub(name) {
 // effects run after each render, timers are manual, and hook-free local components render inline.
 export async function mountComponent(file, { bindings = {}, props = {}, context = {}, storage: seed = {} } = {}) {
   const source = await readFile(new URL(file, dir), 'utf8')
-  const name = file.replace(/\.jsx$/, '')
+  const name = file.replace(/\.jsx$/, '').split('/').pop()
   const code = transformSync(source.replace(/^import[\s\S]*?from ['"][^'"]+['"]\s*$/gm, '')
     .replace('export default function', 'function').replace(/^export (?=const|function)/gm, ''),
   { loader: 'jsx', jsxFactory: 'h', jsxFragment: 'Fragment' }).code

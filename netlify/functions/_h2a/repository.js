@@ -938,6 +938,20 @@ export function createH2ARepository(supabase) {
         finished_at: now, error_summary: 'already_running', updated_at: now })
         .eq('company_id', companyId).eq('id', runId).eq('status', 'queued').select('*').maybeSingle())
     },
+    // Default Albi referral source per HubSpot email, from the company's Sales Team settings. An email listed
+    // with two different defaults is left out rather than guessed.
+    async getSalesTeamReferralDefaults(companyId) {
+      const rows = checked(await supabase.from('hs_user_config').select('sales_team').eq('company_id', companyId).limit(50))
+      const found = new Map(), conflicting = new Set()
+      for (const row of Array.isArray(rows) ? rows : []) for (const member of Array.isArray(row?.sales_team) ? row.sales_team : []) {
+        const email = typeof member?.email === 'string' ? member.email.trim().toLocaleLowerCase('en-US') : ''
+        const id = typeof member?.referralSourceId === 'string' && /^[1-9]\d{0,99}$/.test(member.referralSourceId) ? member.referralSourceId : null
+        if (!email || !id) continue
+        if (found.has(email) && found.get(email) !== id) conflicting.add(email)
+        found.set(email, id)
+      }
+      return Object.fromEntries([...found].filter(([email]) => !conflicting.has(email)))
+    },
     async getMappings(companyId) {
       const [contacts, organizations, options] = await Promise.all([
         readAll(supabase, 'h2a_contact_mappings', companyId),

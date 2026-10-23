@@ -174,6 +174,8 @@ export default function Configuration({ session, isAdmin, companyName: companyNa
         {tab === 'Settings' && (
           <UserSettings
             userId={session.user.id}
+            session={session}
+            companyId={companyId}
             initialConfig={config}
             onSaved={loadConfig}
           />

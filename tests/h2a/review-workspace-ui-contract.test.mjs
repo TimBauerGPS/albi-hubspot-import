@@ -227,6 +227,24 @@ test('the referral select blurs after a change and create sends the chosen sourc
   assert.deepEqual(j(calls), [{ referralSourceId: '9' }])
 })
 
+test('the referral source starts at the record’s default and says where it came from, until another is chosen', async () => {
+  const calls = []
+  const item = { ...none, createReadiness: { ready: true, referralSources: SOURCES, defaultReferralSourceId: '9', defaultReferralFrom: 'organization' } }
+  const ui = await mount(item, { onCreate: value => calls.push(value) })
+  assert.equal(ui.nodes().find(node => node.type === 'select').props.value, '9')
+  assert.match(ui.text(), /Default from the organization in Albi/)
+  ui.find('button', 'Create in Albi').props.onClick()
+  assert.deepEqual(j(calls), [{ referralSourceId: '9' }])
+  const chosen = await mount(item, { referralSourceId: '5' })
+  assert.equal(chosen.nodes().find(node => node.type === 'select').props.value, '5')
+  assert.doesNotMatch(chosen.text(), /Default from/)
+  const salesperson = await mount({ ...none, createReadiness: { ready: true, referralSources: SOURCES, defaultReferralSourceId: '5', defaultReferralFrom: 'salesperson' } })
+  assert.match(salesperson.text(), /Default for the salesperson/)
+  // A default that is not offered is ignored.
+  const stale = await mount({ ...none, createReadiness: { ready: true, referralSources: SOURCES, defaultReferralSourceId: '77', defaultReferralFrom: 'salesperson' } })
+  assert.equal(stale.nodes().find(node => node.type === 'select').props.value, '')
+})
+
 test('create new in Albi is the force-create path and passes every ignored candidate', async () => {
   const calls = []
   const ui = await mount({ ...base, suggestedCandidateId: null }, { referralSourceId: '5', onForceCreate: value => calls.push(value) })

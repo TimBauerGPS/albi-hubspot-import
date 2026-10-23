@@ -11,7 +11,7 @@ const CAPABILITIES = Object.freeze({
 })
 const SCOPES = Object.freeze({
   listContacts: 'contacts:list', createContact: 'contacts:create',
-  listOrganizations: 'organizations:list', createOrganization: 'organizations:create',
+  listOrganizations: 'organizations:list', createOrganization: 'organizations:create', getOrganization: 'organizations:get',
   listActivities: 'activities:list', createActivity: 'activities:create',
   listRelationshipTypes: 'options.relationship-types:list',
   listReferralSources: 'options.referral-sources:list',
@@ -212,6 +212,18 @@ export class AlbiClient {
   async listContacts(args = {}) {
     if (!isRecord(args) || Object.keys(args).some(key => !['cursor', 'pageSize'].includes(key))) invalid('listContacts')
     return this.#list('contacts', CONTACT_FIELDS, 'listContacts', args)
+  }
+  // One organization by id (with its referral source), or null when Albi has none with that id.
+  async getOrganization(organizationId) {
+    const organization = id(organizationId, 'getOrganization')
+    let data
+    try {
+      data = await this.#scopedRequest(await this.#path(`organizations/${encodeURIComponent(organization)}`), { operation: 'getOrganization' }, SCOPES.getOrganization)
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return null
+      throw error
+    }
+    return normalizeRecord(isRecord(data) && isRecord(data.data) ? data.data : data, ORGANIZATION_FIELDS, 'getOrganization')
   }
   async listOrganizations(args = {}) {
     if (!isRecord(args) || Object.keys(args).some(key => !['cursor', 'pageSize'].includes(key))) invalid('listOrganizations')

@@ -4,7 +4,7 @@ import { buildAlbiRecordUrl } from '../../../shared/h2aProviderLinks.js'
 import { resolveContactType } from './options.js'
 import { decideContactMatch, decideOrganizationMatch } from './match.js'
 import { safeReviewSnapshot } from './review.js'
-import { buildCreateReadiness, evidenceOf, loadCreateDefaults, safeReferralSources, stepped } from './createDefaults.js'
+import { buildCreateReadiness, evidenceOf, loadCreateDefaults, safeReferralSources, stepped, suggestReferralSource } from './createDefaults.js'
 import { cachedRead } from './readCache.js'
 
 const providerId = value => typeof value === 'string' && /^[1-9]\d{0,99}$/.test(value)
@@ -160,12 +160,13 @@ export async function loadReviewResolutionOptions({ row, repository, reads, prog
       // One name is enough for a contact: the create fills Albi's other required name with a placeholder.
       const nameReady = row.object_type === 'contacts' ? Boolean(String(props.firstname ?? '').trim() || String(props.lastname ?? '').trim())
         : Boolean(String(props.name ?? '').trim())
-      let organizationTypeId = null, organizationReady = true, organizationBlock = null
+      let organizationTypeId = null, organizationReady = true, organizationBlock = null, organizationTargetId = null
       if (associated.length === 1) {
         const sourceId = associated[0]
         const associationMappings = mappings.organizations.filter(item => item?.portal_id === row.portal_id && mappedSource(item) === sourceId)
         if (associationMappings.length > 1) return blocked('organization_mapping_ambiguous')
         const targetId = exactMapping(mappings.organizations, row.portal_id, sourceId, 'companies')
+        organizationTargetId = targetId
         const companies = await step('hubspot_organization', () => hubspot.getCompanies([sourceId]))
         const companyReady = Array.isArray(companies) && companies.length === 1 && companies[0]?.id === sourceId &&
           companies[0]?.archived !== true && record(companies[0]?.properties)
@@ -195,7 +196,10 @@ export async function loadReviewResolutionOptions({ row, repository, reads, prog
         step('create_defaults', () => loadCreateDefaults({ hubspotRead: hubspot, albiRead: reads.albiRead, objectType: row.object_type, sourceId: row.source_id, cacheKey })),
       ]) : [[], null]
       const referralSources = safeReferralSources(sources)
-      const details = buildCreateReadiness({ baseReady, organizationBlock, referralSources, defaults, notReadyReason })
+      const built = buildCreateReadiness({ baseReady, organizationBlock, referralSources, defaults, notReadyReason })
+      const suggestion = built.ready ? await suggestReferralSource({ organizationTargetId: row.object_type === 'contacts' ? organizationTargetId : null,
+        ownerEmail: defaults?.ownerEmail ?? '', referralSources, albiRead: reads.albiRead, repository, companyId: row.company_id, cacheKey }) : null
+      const details = suggestion ? { ...built, defaultReferralSourceId: suggestion.id, defaultReferralFrom: suggestion.from } : built
       return { ...unavailable, ...(forced ? { forceCreateReadiness: { eligible: true, ...details } } : { createReadiness: details }) }
     }
     if (normal || forced) return named(sourceMapped ? 'source_already_mapped' : associated.length > 1 ? 'multiple_organizations' : 'evidence_unavailable')
@@ -236,6 +240,8 @@ export async function loadOrgFirstCreate({ row, readiness, repository, reads, lo
     if (loaded?.createReadiness?.ready !== true) return no
     const name = typeof candidate.source_snapshot?.name === 'string' ? candidate.source_snapshot.name.trim().slice(0, 200) : ''
     return { eligible: true, ...(organization?.id ? { organizationReviewId: organization.id } : {}),
-      ...(name ? { organizationName: name } : {}), referralSources: safeReferralSources(loaded.createReadiness.referralSources) }
+      ...(name ? { organizationName: name } : {}), referralSources: safeReferralSources(loaded.createReadiness.referralSources),
+      ...(loaded.createReadiness.defaultReferralSourceId ? { defaultReferralSourceId: loaded.createReadiness.defaultReferralSourceId,
+        defaultReferralFrom: loaded.createReadiness.defaultReferralFrom } : {}) }
   } catch { return no }
 }

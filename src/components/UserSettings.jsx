@@ -3,11 +3,12 @@
  * Mirrors the Config tab in the Google Sheet:
  *   - Pipeline mapping: job suffix → HubSpot pipeline name
  *   - Excluded suffixes: job types to skip on import
- *   - Sales team: name + email pairs for owner validation
+ *   - Sales team: name + email pairs for owner validation, each with an optional default Albi referral source
  *   - HubSpot Partner/Portal ID
  */
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { supabase } from '../lib/supabase'
+import { getH2ACreateBatch } from '../lib/hubspotToAlbi'
 
 // Default values for new users — match Google Script reference
 const DEFAULT_PIPELINE_MAPPING = {
@@ -197,7 +198,26 @@ function BlacklistInput({ tags, onChange, placeholder }) {
   )
 }
 
-function SalesTeamEditor({ team, onChange }) {
+// A member's default Albi referral source: what a new Albi record they own starts with (always editable).
+function ReferralSelect({ member, sources, unavailable, onChange }) {
+  const value = typeof member.referralSourceId === 'string' ? member.referralSourceId : ''
+  const known = sources.some(source => source.id === value)
+  return (
+    <select
+      value={value}
+      disabled={unavailable}
+      aria-label={`Default referral source for ${member.name || 'team member'}`}
+      onChange={e => onChange(e.target.value)}
+      className="flex-1 text-xs border border-gray-300 rounded-lg px-2 py-1.5 bg-white focus:outline-none focus:ring-2 focus:ring-brand-500 disabled:bg-gray-50"
+    >
+      <option value="">No default referral source</option>
+      {value && !known && <option value={value}>{unavailable ? 'Saved default' : 'No longer in Albi'}</option>}
+      {sources.map(source => <option key={source.id} value={source.id}>{source.label}</option>)}
+    </select>
+  )
+}
+
+function SalesTeamEditor({ team, onChange, sources = [], sourcesUnavailable = false }) {
   const [newName, setNewName] = useState('')
   const [newEmail, setNewEmail] = useState('')
 
@@ -216,6 +236,14 @@ function SalesTeamEditor({ team, onChange }) {
 
   return (
     <div className="space-y-2">
+      {team.length > 0 && (
+        <div className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-wide text-gray-400">
+          <span className="flex-1">Name</span><span className="flex-1">HubSpot email</span><span className="flex-1">Default referral source</span><span className="w-4" />
+        </div>
+      )}
+      {sourcesUnavailable && (
+        <p className="text-xs text-amber-700">Albi referral sources could not be loaded, so defaults can't be changed right now. Saved defaults are kept.</p>
+      )}
       {team.map((member, idx) => (
         <div key={idx} className="flex items-center gap-2">
           <input
@@ -239,6 +267,17 @@ function SalesTeamEditor({ team, onChange }) {
             }}
             className="flex-1 text-xs border border-gray-300 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-brand-500"
             placeholder="email@example.com"
+          />
+          <ReferralSelect
+            member={member}
+            sources={sources}
+            unavailable={sourcesUnavailable}
+            onChange={referralSourceId => {
+              const next = [...team]
+              const { referralSourceId: _previous, ...rest } = next[idx]
+              next[idx] = referralSourceId ? { ...rest, referralSourceId } : rest
+              onChange(next)
+            }}
           />
           <button
             type="button"
@@ -280,7 +319,7 @@ function SalesTeamEditor({ team, onChange }) {
   )
 }
 
-export default function UserSettings({ userId, initialConfig, onSaved }) {
+export default function UserSettings({ userId, initialConfig, onSaved, session = null, companyId = null }) {
   const [pipelineMapping, setPipelineMapping] = useState(
     initialConfig?.pipeline_mapping && Object.keys(initialConfig.pipeline_mapping).length > 0
       ? initialConfig.pipeline_mapping
@@ -292,6 +331,21 @@ export default function UserSettings({ userId, initialConfig, onSaved }) {
       : DEFAULT_EXCLUDED
   )
   const [salesTeam, setSalesTeam] = useState(initialConfig?.sales_team || [])
+  // Albi's referral sources, for each member's default (read through the HubSpot-to-Albi connection).
+  const [referralSources, setReferralSources] = useState([])
+  const [sourcesUnavailable, setSourcesUnavailable] = useState(false)
+  useEffect(() => {
+    if (!session || !companyId) { setSourcesUnavailable(true); return undefined }
+    let active = true
+    getH2ACreateBatch(session, companyId).then(result => {
+      if (!active) return
+      const sources = (Array.isArray(result?.referralSources) ? result.referralSources : [])
+        .filter(source => typeof source?.id === 'string' && typeof source?.label === 'string')
+      setReferralSources(sources)
+      setSourcesUnavailable(sources.length === 0)
+    }).catch(() => { if (active) setSourcesUnavailable(true) })
+    return () => { active = false }
+  }, [session, companyId])
   const [blacklist, setBlacklist] = useState(initialConfig?.blacklist || [])
   const [partnerID, setPartnerID] = useState(initialConfig?.hubspot_partner_id || '')
   const [saving, setSaving] = useState(false)
@@ -377,9 +431,9 @@ export default function UserSettings({ userId, initialConfig, onSaved }) {
         <div>
           <SectionHeader
             title="Sales Team"
-            description="Your team members and their HubSpot email addresses. Used to validate owners during the config check and map deal ownership during import."
+            description="Your team members and their HubSpot email addresses. Used to validate owners during the config check and map deal ownership during import. A default referral source prefills new Albi records that person owns (a contact uses its organization's referral source first)."
           />
-          <SalesTeamEditor team={salesTeam} onChange={setSalesTeam} />
+          <SalesTeamEditor team={salesTeam} onChange={setSalesTeam} sources={referralSources} sourcesUnavailable={sourcesUnavailable} />
         </div>
 
         {/* Blacklist */}

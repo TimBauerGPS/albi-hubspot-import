@@ -1197,3 +1197,12 @@ test('earlier create receipts for a review are read from its resolutions’ clai
   assert.deepEqual(await empty.repository.listPriorCreateReceipts('company-1', reviewId), [])
   assert.equal(empty.calls.length, 1)
 })
+
+test('sales-team default referral sources are read by HubSpot email; conflicting entries are left out', async () => {
+  const team = [{ name: 'Victoria Dunn', email: 'Victoria@Allied.test', referralSourceId: '6' }, { name: 'No Default', email: 'n@allied.test' },
+    { name: 'Bad', email: 'b@allied.test', referralSourceId: 'x' }, { name: 'Twice', email: 't@allied.test', referralSourceId: '7' }]
+  const { repository, calls } = reviewRepositoryFixture([data([{ sales_team: team }, { sales_team: [{ email: 't@allied.test', referralSourceId: '8' }] }])])
+  assert.deepEqual(await repository.getSalesTeamReferralDefaults('company-1'), { 'victoria@allied.test': '6' })
+  assert.equal(calls[0].table, 'hs_user_config')
+  assert.deepEqual(equalityFilters(calls[0]), [['company_id', 'company-1']])
+})

@@ -48,7 +48,7 @@ function withEvidence(copy, evidence) {
 }
 
 export default function ReviewRecord({
-  item, kind = 'sample', candidateIndex = 0, onPickCandidate, referralSourceId = '', onReferral, referralRef,
+  item, kind = 'sample', candidateIndex = 0, onPickCandidate, referralSourceId: chosenReferralSourceId = '', onReferral, referralRef,
   pending = false, busy = false, readOnly = false,
   onAccept, onLink, onCreate, onForceCreate, onCreateWithOrganization, onApplyFields, onIgnoreAndLink, onChooseOrganization,
   onSkip, onRecheck, onOpenOrganization, onOpenMergedSurvivor,
@@ -90,6 +90,12 @@ export default function ReviewRecord({
   // The org-first create is blocked on the contact's own readiness, so its sources may ride on orgFirstCreate.
   const sourceList = orgFirst ? item?.orgFirstCreate?.referralSources ?? readiness?.referralSources : readiness?.referralSources
   const referralSources = (Array.isArray(sourceList) ? sourceList : []).filter(source => idPattern.test(source?.id) && typeof source?.label === 'string' && source.label.trim() !== '').slice(0, 100)
+  // Until a source is chosen, the record's default (its organization's in Albi, else its salesperson's) is used.
+  const defaultSource = orgFirst ? item?.orgFirstCreate : readiness
+  const defaultReferralId = referralSources.some(source => source.id === defaultSource?.defaultReferralSourceId) ? defaultSource.defaultReferralSourceId : ''
+  const referralSourceId = chosenReferralSourceId || defaultReferralId
+  const referralHint = !chosenReferralSourceId && defaultReferralId
+    ? defaultSource.defaultReferralFrom === 'organization' ? 'Default from the organization in Albi' : 'Default for the salesperson' : ''
   const blockedCopy = withEvidence(blockedReasonCopy(readiness?.blockedReason), readiness?.evidence)
   const unsyncedOrganization = readiness?.blockedReason === 'organization_not_synced' && idPattern.test(readiness?.organization?.sourceId)
     ? { sourceId: readiness.organization.sourceId, reviewId: typeof readiness.organization.reviewId === 'string' && readiness.organization.reviewId ? readiness.organization.reviewId : null } : null
@@ -261,7 +267,7 @@ export default function ReviewRecord({
         ...filledChoices.map(key => [key, 'albi'])]))}
       suggestion={suggestion} onAccept={() => suggestion && requestAccept(suggestion.candidate, suggestion.emailMatch)}
       selectedLink={selectedLink} onLinkSelected={() => selectedLink && requestLink(selectedLink)}
-      create={create} referralSources={referralSources} referralSourceId={referralSourceId} onReferral={onReferral} referralRef={referralRef} onCreate={onCreateClick}
+      create={create} referralSources={referralSources} referralSourceId={referralSourceId} referralHint={referralHint} onReferral={onReferral} referralRef={referralRef} onCreate={onCreateClick}
       showSkip={kind === 'live'} onSkip={onSkip} showRecheck onRecheck={onRecheck} />}
 
     <ManyToOneDialog candidate={candidates.find(candidate => candidate.id === manyToOne?.id) ?? null} objectLabel={objectLabel} busy={disabled}

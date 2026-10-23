@@ -104,7 +104,8 @@ export class HubSpotClient {
         if (!isRecord(value)) malformed('listOwners')
         // HubSpot leaves names off some owners (for example, email-only users); such an owner just matches no salesperson.
         const name = key => typeof value[key] === 'string' ? value[key] : ''
-        owners.push({ id: responseId(value.id, 'listOwners'), firstName: name('firstName'), lastName: name('lastName'), archived: value.archived === true })
+        owners.push({ id: responseId(value.id, 'listOwners'), firstName: name('firstName'), lastName: name('lastName'),
+          email: name('email').trim().toLocaleLowerCase('en-US'), archived: value.archived === true })
       }
       after = data.after
       cursorSeen(seen, after)
