@@ -114,3 +114,37 @@ test('a worker near its time limit hands the rest to a continuation', async () =
   assert.deepEqual(f.deps.continued, { companyId: 'c1' })
   assert.deepEqual(f.executed, [UUID(101)])
 })
+
+test('a create queued with its default referral source uses the record’s default, then the fallback, or fails with the reason', async () => {
+  const rows = [item(1, { kind: 'create_default_referral' }), item(2, { kind: 'create_default_referral', fallbackReferralSourceId: '5' }),
+    item(3, { kind: 'create_default_referral' }), item(4, { kind: 'create_default_referral' })]
+  const f = fixture(rows)
+  const decisions = []
+  const readiness = { [UUID(101)]: { ready: true, defaultReferralSourceId: '7' }, [UUID(102)]: { ready: true }, [UUID(103)]: { ready: true },
+    [UUID(104)]: { ready: false, blockedReason: 'organization_not_synced' } }
+  f.deps.loadCreateDefault = async row => readiness[row.review_id]
+  f.deps.executeResolution = async (_deps, input) => { decisions.push([input.reviewId, input.decision]); return { resolution: { id: 'r', status: 'ready_to_recheck' } } }
+  await runReviewOutbox(f.deps, { companyId: 'c1' })
+  assert.deepEqual(decisions, [[UUID(101), { action: 'create_albi', referralSourceId: '7' }], [UUID(102), { action: 'create_albi', referralSourceId: '5' }]])
+  assert.deepEqual(f.finished.filter(row => row.status === 'failed').map(row => [row.id, row.errorCode]),
+    [[UUID(3), 'no_default_referral'], [UUID(4), 'organization_not_synced']])
+  assert.deepEqual(normalizeOutboxAction({ kind: 'create_default_referral', fallbackReferralSourceId: '5' }), { kind: 'create_default_referral', fallbackReferralSourceId: '5' })
+  assert.throws(() => normalizeOutboxAction({ kind: 'create_default_referral', fallbackReferralSourceId: 'x' }), TypeError)
+})
+
+test('queued creates share one Albi read per run instead of each reading Albi', async () => {
+  const rows = [item(1), item(2), item(3, { kind: 'resolution', decision: { action: 'link_existing', candidateId: '20', approveManyToOne: false } })]
+  const f = fixture(rows)
+  const reads = [], snapshots = []
+  f.deps.readAlbiList = async kind => { reads.push(kind); return [{ id: '900' }] }
+  f.deps.executeResolution = async (deps, input) => {
+    snapshots.push(deps.albiSnapshot ? deps.albiSnapshot.contacts.length : null)
+    // A create adds the new record to the shared read, as the resolution does.
+    if (deps.albiSnapshot) deps.albiSnapshot.contacts.push({ id: `new-${input.reviewId}` })
+    return { resolution: { id: 'r', status: 'ready_to_recheck' } }
+  }
+  await runReviewOutbox(f.deps, { companyId: 'c1' })
+  assert.deepEqual(reads, ['contacts'])
+  // The second create sees the first; the link reads Albi itself.
+  assert.deepEqual(snapshots, [1, 2, null])
+})

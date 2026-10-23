@@ -344,6 +344,16 @@ export function queueH2AOutbox(session, companyId, input = {}, { signal } = {}) 
   return request(session, 'h2a-review-outbox', { method: 'POST', companyId: resolutionCompany(companyId), body: { op: 'enqueue', items: [item] }, signal })
 }
 
+// "Create selected": queues up to 50 creates in the outbox at once. Each uses its own default referral source
+// (useRecordDefaults; referralSourceId is then an optional fallback) or referralSourceId for all.
+export function queueH2AOutboxCreates(session, companyId, { items = [], useRecordDefaults = false, referralSourceId = null } = {}, { signal } = {}) {
+  const action = useRecordDefaults === true
+    ? { kind: 'create_default_referral', ...(referralSourceId ? { fallbackReferralSourceId: referralSourceId } : {}) }
+    : { kind: 'resolution', decision: { action: 'create_albi', referralSourceId } }
+  const clean = (Array.isArray(items) ? items : []).map(item => ({ ...pick(item, ['reviewId', 'expectedUpdatedAt', 'clientRequestId']), action }))
+  return request(session, 'h2a-review-outbox', { method: 'POST', companyId: resolutionCompany(companyId), body: { op: 'enqueue', items: clean }, signal })
+}
+
 export function getH2AOutbox(session, companyId, kind = 'live', { signal } = {}) {
   return request(session, 'h2a-review-outbox', { companyId, query: { kind: kind === 'sample' ? 'sample' : 'live' }, signal })
 }

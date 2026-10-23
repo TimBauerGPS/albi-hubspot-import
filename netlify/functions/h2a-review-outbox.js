@@ -5,6 +5,8 @@ import { H2AReviewError, resolveReviewSample } from './_h2a/reviewService.js'
 import { canResolve, resolutionMode } from './_h2a/resolutionCapability.js'
 import { normalizeOutboxAction, runReviewOutbox } from './_h2a/outbox.js'
 import { prepareOrganizationReview } from './_h2a/organizationReview.js'
+import { loadReviewResolutionOptions } from './_h2a/reviewResolutionOptions.js'
+import { listAll } from './_h2a/createBatch.js'
 import { refreshReviewTriage } from './_h2a/triage.js'
 import { defaultDispatchResume } from './h2a-conflict-resolve.js'
 import { ApiError } from './_h2a/http.js'
@@ -30,7 +32,7 @@ export function projectOutboxItem(row) {
   const snapshot = object(row?.review?.source_snapshot) ? row.review.source_snapshot : {}
   const name = text(snapshot.name) || [text(snapshot.firstName), text(snapshot.lastName)].filter(Boolean).join(' ') || 'Unnamed record'
   const action = object(row?.action) ? row.action : {}
-  const kind = action.kind === 'create_with_organization' ? 'create_with_organization'
+  const kind = action.kind === 'create_with_organization' ? 'create_with_organization' : action.kind === 'create_default_referral' ? 'create_albi'
     : typeof action.decision?.action === 'string' ? action.decision.action : 'unknown'
   return { id: row.id, reviewId: row.review_id, name: name.slice(0, 200),
     objectType: row?.review?.object_type === 'companies' ? 'companies' : 'contacts', action: kind,
@@ -96,13 +98,31 @@ async function dispatchWorker(companyId, options) {
 export function outboxWorkerDeps(options, repository, companyId) {
   const makeClients = () => options.makeClients ? options.makeClients(companyId)
     : createH2AProviderClients({ companyId, repository, keyring: options.keyring, env: options.env, fetch: options.fetch })
+  const getResolutionClients = async (_company, config) => {
+    const clients = await makeClients()
+    if (!options.makeClients && (await clients.hubspot.getAccountInfo()).portalId !== config.portal_id) throw new ApiError('permission', { code: 'authorization_rejected' })
+    return reviewResolutionProviderCapabilities(clients)
+  }
+  // Reads for queued creates (the shared Albi lists, each record's create checks) reuse one set of clients per run.
+  let reads = null
+  const readClients = () => (reads ??= repository.getConfig(companyId).then(config => getResolutionClients(companyId, config))
+    .catch(error => { reads = null; throw error }))
   return { repository, now: options.now, clockMs: options.clockMs, sleep: options.sleep, paceMs: options.paceMs, budgetMs: options.budgetMs,
     dispatchResume: options.dispatchResume ?? (intent => defaultDispatchResume(intent, options)),
     dispatchContinuation: () => dispatchWorker(companyId, options),
-    getResolutionClients: async (_company, config) => {
-      const clients = await makeClients()
-      if (!options.makeClients && (await clients.hubspot.getAccountInfo()).portalId !== config.portal_id) throw new ApiError('permission', { code: 'authorization_rejected' })
-      return reviewResolutionProviderCapabilities(clients)
+    getResolutionClients,
+    readAlbiList: async kind => {
+      const clients = await readClients()
+      return listAll(args => kind === 'organizations' ? clients.albiRead.listOrganizations(args) : clients.albiRead.listContacts(args))
+    },
+    // A "create with its default referral source" action: the record's own create checks and suggested source.
+    loadCreateDefault: async item => {
+      const row = await repository.getReview(companyId, item.review_id)
+      if (!row) fail(404, 'Review item not found.')
+      if (row.updated_at !== item.expected_updated_at) fail(409, 'This review changed.')
+      if (Array.isArray(row.candidate_snapshots) && row.candidate_snapshots.length) return { ready: false, blockedReason: 'possible_match' }
+      const loaded = await loadReviewResolutionOptions({ row: { ...row, company_id: companyId }, repository, reads: await readClients() })
+      return loaded?.createReadiness ?? { ready: false, blockedReason: 'not_ready' }
     },
     // A sample contact's organization review is captured first, as the workspace's direct path does.
     prepareOrganization: async row => {

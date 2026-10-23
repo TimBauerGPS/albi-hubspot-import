@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { bulkLinkH2AReviews, getH2ACreateBatch, startH2ACreateBatch, getH2ADryRunReview, getH2AReviews, prepareH2AMergedSurvivorReview,
-  prepareH2AOrganizationReview, recheckH2ADryRunReview, queueH2AOutbox, startH2ARecheckAll } from '../../lib/hubspotToAlbi'
+import { bulkLinkH2AReviews, getH2ACreateBatch, getH2ADryRunReview, getH2AReviews, prepareH2AMergedSurvivorReview,
+  prepareH2AOrganizationReview, recheckH2ADryRunReview, queueH2AOutbox, queueH2AOutboxCreates, startH2ARecheckAll } from '../../lib/hubspotToAlbi'
 import { BUCKETS, createDeferredQueue, fieldLabel, nextRecordId, shortcutFor } from './reviewWorkspace.js'
 import { presentSampleReviewItem, SAMPLE_REVIEW_REASON_OPTIONS } from './sampleReview.js'
 import { buildResolutionConfirmation } from './sampleReviewResolution.js'
@@ -10,23 +10,9 @@ import OutboxPanel from './OutboxPanel.jsx'
 import ReviewQueue from './ReviewQueue.jsx'
 import ReviewRecord from './ReviewRecord.jsx'
 import ShortcutHelp from './ShortcutHelp.jsx'
-import { blockedReasonCopy } from '../../../shared/h2aBlockedReasons.js'
 
-// Why Create selected left a record alone (the batch's reason codes), in the page's words.
-const CREATE_SKIP_COPY = {
-  changed: 'It changed after it was selected. Open it to see the latest.',
-  has_candidates: 'Albi now has a possible match for it. Open it to decide.',
-  not_open: 'It is no longer waiting to be created.',
-  not_creatable: 'It can’t be created from Quick wins. Open it to see why.',
-  not_found: 'It could not be found.',
-  not_ready: 'Its create checks did not pass. Open it to see why.',
-  no_default_referral: 'It has no default referral source. Open it to choose one.',
-  create_failed: 'Albi did not confirm the create. Open it to check.',
-  error: 'Creating it failed. Open it and try again.',
-}
 // The Create selected dialog's first choice: each record's own default referral source.
 const RECORD_DEFAULTS = 'record-defaults'
-const createSkipCopy = code => blockedReasonCopy(code) ?? CREATE_SKIP_COPY[code] ?? CREATE_SKIP_COPY.not_ready
 
 const UNDO_MS = 5000
 const BULK_CHUNK = 25
@@ -103,7 +89,7 @@ function UndoToasts({ entries, onUndo, onSendNow }) {
 // One review workspace for both queues: kind "sample" (dry-run sample rows) and kind "live" (Conflicts).
 export default function ReviewWorkspace({
   kind = 'sample', session, companyId, tenantRevision = 0, completeTenantTransition, isAdmin = false, readOnly = !isAdmin,
-  initialFilters, reloadToken = 0, renderHeader, renderBeforeQueue, renderGate, renderFooter, onBatchStarted, createBatchPollMs = 3000, recheckReloadMs = 5000,
+  initialFilters, reloadToken = 0, renderHeader, renderBeforeQueue, renderGate, renderFooter, onBatchStarted, recheckReloadMs = 5000,
 }) {
   const tenantKey = `${companyId ?? 'none'}:${tenantRevision}`
   const tenantKeyRef = useRef(tenantKey)
@@ -163,11 +149,8 @@ export default function ReviewWorkspace({
   const [checked, setChecked] = useState(() => new Set())
   const [bulk, setBulk] = useState(null)
   const [bulkSummary, setBulkSummary] = useState('')
-  // The records Create selected left alone, shown under its summary (only while that summary is shown).
-  const [createSkips, setCreateSkips] = useState({ summary: '', rows: [] })
-  // "Create selected": the open choice dialog, then the running background batch's progress.
+  // "Create selected": the open choice dialog (the creates then go to the Outbox).
   const [createDialog, setCreateDialog] = useState(null)
-  const [createProgress, setCreateProgress] = useState(null)
   const [help, setHelp] = useState(false)
 
   const same = startedFor => mountedRef.current && tenantKeyRef.current === startedFor
@@ -760,12 +743,12 @@ export default function ReviewWorkspace({
   }
   // Create selected: ticked Quick-wins rows that are plain creates (no Albi match). Each uses the referral source it
   // would default to on its own (its organization's in Albi, else its salesperson's), unless one is chosen for all;
-  // a background batch reads Albi once and runs the normal checked create for each.
+  // they are queued in the Outbox, whose worker reads Albi once and runs the normal checked create for each.
   const createEligible = view === 'quick' ? items.filter(item => item.triageBucket === 'quick' && item.triageDetails?.quickKind === 'create' && !pendingSet.has(item.id)) : []
   // Like bulk link: the ticked no-match rows, or every one in Quick wins when none are ticked.
   const createTargets = (checked.size ? createEligible.filter(item => checked.has(item.id)) : createEligible).slice(0, 50)
   async function openCreateSelected() {
-    if (!createTargets.length || bulk || createProgress) return
+    if (!createTargets.length || bulk) return
     const startedFor = tenantKey, targets = [...createTargets]
     setActionError(''); setNotice('')
     try {
@@ -776,42 +759,23 @@ export default function ReviewWorkspace({
       setCreateDialog({ targets, sources, referralSourceId: RECORD_DEFAULTS, fallbackId: '' })
     } catch (cause) { if (same(startedFor)) setActionError(cause.message) }
   }
-  async function pollCreateBatch(startedFor, names = new Map()) {
-    for (;;) {
-      await new Promise(resolve => setTimeout(resolve, createBatchPollMs))
-      if (!same(startedFor)) return
-      let batch = null
-      try { batch = (await getH2ACreateBatch(session, companyId, kind))?.batch ?? null } catch { continue }
-      if (!same(startedFor)) return
-      if (batch) setCreateProgress(batch)
-      if (batch && ['completed', 'failed'].includes(batch.status)) {
-        setCreateProgress(null)
-        const summary = batch.status === 'completed'
-          ? `Create selected finished: ${batch.created} created, ${batch.skipped} skipped, ${batch.failed} failed.${batch.created ? ' Recheck them to clear them.' : ''}`
-          : `Create selected stopped early: ${batch.created} created, ${batch.skipped} skipped, ${batch.failed} failed.`
-        setBulkSummary(summary)
-        setCreateSkips({ summary, rows: list(batch.results).filter(result => result?.outcome !== 'created')
-          .map(result => ({ id: result.reviewId, name: names.get(result.reviewId) ?? 'A selected record', outcome: result.outcome, reason: createSkipCopy(result.reason) })) })
-        setRetryToken(value => value + 1)
-        return
-      }
-    }
-  }
+  // Queues the creates in the Outbox and moves the records there at once; nothing waits on Albi.
   async function runCreateSelected() {
     const current = createDialog
-    if (!current?.referralSourceId) return
+    if (!current) return
     setCreateDialog(null)
     const startedFor = tenantKey
+    setActionError(''); setNotice('')
+    const defaults = current.referralSourceId === RECORD_DEFAULTS
     try {
-      const defaults = current.referralSourceId === RECORD_DEFAULTS
-      const result = await startH2ACreateBatch(session, companyId, { kind,
-        ...(defaults ? { useRecordDefaults: true, ...(current.fallbackId ? { referralSourceId: current.fallbackId } : {}) } : { referralSourceId: current.referralSourceId }),
-        items: current.targets.map(item => ({ reviewId: item.id, expectedUpdatedAt: item.updatedAt })) })
+      const result = await queueH2AOutboxCreates(session, companyId, {
+        ...(defaults ? { useRecordDefaults: true, referralSourceId: current.fallbackId || null } : { referralSourceId: current.referralSourceId }),
+        items: current.targets.map(item => ({ reviewId: item.id, expectedUpdatedAt: item.updatedAt, clientRequestId: crypto.randomUUID() })) })
       if (!same(startedFor)) return
+      const queued = list(result?.items).filter(row => ['queued', 'sending'].includes(row?.status))
+      for (const row of queued) movedToOutbox(row.reviewId, startedFor)
       setChecked(new Set())
-      setCreateProgress(result?.batch ?? { status: 'queued', total: current.targets.length, done: 0 })
-      if (result?.status === 'already_running') setNotice('A create batch is already running. Its progress is shown here.')
-      pollCreateBatch(startedFor, new Map(current.targets.map(item => [item.id, nameOf(item)])))
+      setNotice(`${plural(queued.length, 'create')} queued in the Outbox. They are sent to Albi in the background, so you can keep working; any that can’t be created stay in the Outbox with the reason.`)
     } catch (cause) { if (same(startedFor)) setActionError(cause.message) }
   }
   function openRecheckSelected() {
@@ -921,16 +885,8 @@ export default function ReviewWorkspace({
           <p>{`Linking exact matches… ${bulk.done} / ${bulk.total}`}</p>
           <div className="mt-2 h-2 overflow-hidden rounded-full bg-white" role="progressbar" aria-label="Bulk link progress" aria-valuemin={0} aria-valuemax={bulk.total} aria-valuenow={bulk.done}>
             <div className="h-full rounded-full bg-brand-600 transition-all" style={{ width: `${bulk.total ? Math.round(bulk.done / bulk.total * 100) : 0}%` }} /></div></div>}
-        {visible && createProgress && <p className="rounded-lg border border-brand-200 bg-brand-50 px-4 py-3 text-brand-800" role="status">
-          {`Creating in Albi: ${createProgress.done ?? 0} of ${createProgress.total ?? 0} done${createProgress.created ? ` (${createProgress.created} created)` : ''}. Albi is read once; each record is still checked before it is created.`}</p>}
         {visible && bulkSummary && <div className="rounded-lg border border-gray-200 bg-white px-4 py-3 text-gray-800" role="status">
           <p>{bulkSummary}</p>
-          {createSkips.summary === bulkSummary && createSkips.rows.length > 0 && <ul className="mt-2 space-y-1 text-sm">
-            {createSkips.rows.map(row => <li key={row.id}>
-              <button type="button" className="font-medium text-brand-700 hover:underline" onClick={() => selectRecord(row.id)}>{row.name}</button>
-              <span className="text-gray-600"> — {row.outcome === 'failed' ? 'Not created' : 'Skipped'}: {row.reason}</span>
-            </li>)}
-          </ul>}
         </div>}
         {visible && actionError && <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-red-800" role="alert"><p>{actionError}</p>
           <button type="button" onClick={() => setRetryToken(value => value + 1)} className={`${btn} mt-3`}>Reload queue</button></div>}
@@ -946,7 +902,7 @@ export default function ReviewWorkspace({
             : <div className="grid gap-4 lg:grid-cols-[20rem_minmax(0,1fr)] lg:items-start">
               <ReviewQueue items={items} bucket={view} selectedId={selectedId} pendingIds={pendingSet} sendingIds={sendingSet} errors={recordErrors} checked={checked}
                 bulkEnabled={!readOnly} onSelect={selectRecord} onToggle={toggle} onSelectAll={selectAll} bulkLinkCount={bulkTargets.length}
-                onBulkLink={openBulkLink} onRecheckSelected={openRecheckSelected} busy={Boolean(bulk) || Boolean(createProgress)}
+                onBulkLink={openBulkLink} onRecheckSelected={openRecheckSelected} busy={Boolean(bulk)}
                 createSelectedCount={createTargets.length} onCreateSelected={readOnly ? undefined : openCreateSelected}
                 nextCursor={nextCursor} loadingMore={loadingMore} loadMoreDisabled={Boolean(busyId) || Boolean(bulk)} onLoadMore={loadMore} />
               <div className="min-w-0 space-y-3">
@@ -987,9 +943,9 @@ export default function ReviewWorkspace({
             className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900">
             <option value="">Skip them (open each to choose)</option>
             {createDialog.sources.map(source => <option key={source.id} value={source.id}>{source.label}</option>)}</select></label>}
-        <p className="mt-3 text-xs text-gray-600">Each record is checked against Albi first; any that now match an Albi record, or changed, are skipped. New records are Type Referrer and Status Active, with the owner’s salesperson.</p>
+        <p className="mt-3 text-xs text-gray-600">They go to the Outbox and are sent to Albi in the background, so you can keep working. Each record is checked against Albi first; any that now match an Albi record, or changed, stay in the Outbox with the reason. New records are Type Referrer and Status Active, with the owner’s salesperson.</p>
         <div className="mt-5 flex flex-row-reverse gap-2">
-          <button type="button" className={primary} disabled={!createDialog.referralSourceId} onClick={runCreateSelected}>{`Create ${createDialog.targets.length} in Albi`}</button>
+          <button type="button" className={primary} disabled={!createDialog.referralSourceId} onClick={runCreateSelected}>{`Queue ${createDialog.targets.length} creates`}</button>
           <button type="button" className={btn} onClick={() => setCreateDialog(null)}>Cancel</button></div>
       </div></div>}
     {dialog && <ConfirmDialog dialog={dialog} panelRef={dialogPanelRef} confirmRef={dialogConfirmRef} onConfirm={confirmDialog} onCancel={closeDialog} />}

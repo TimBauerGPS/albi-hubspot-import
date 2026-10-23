@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { getH2AOutbox, retryH2AOutbox, returnH2AOutbox } from '../../lib/hubspotToAlbi'
 import { btn, primary } from './ResolutionBar.jsx'
+import { blockedReasonCopy } from '../../../shared/h2aBlockedReasons.js'
 
 // The Outbox: actions waiting to be sent to Albi by the background worker, the one being sent, and any that
 // failed (with the reason). Failed actions stay here until retried or returned to review.
@@ -17,13 +18,15 @@ const REASONS = {
   not_allowed: 'This isn’t allowed for the record any more (permissions, or it was already handled).',
   albi_rejected: 'Albi rejected it (a required value is missing or invalid). Back to review to check the record.',
   not_found: 'The record no longer exists.',
+  no_default_referral: 'It has no default referral source (none on its organization or salesperson). Back to review to choose one.',
+  not_ready: 'Its create checks did not pass. Back to review to see why.',
   error: 'Something went wrong sending it. Retry, or send it back to review.',
 }
 const time = value => { const parsed = Date.parse(value ?? ''); return Number.isFinite(parsed) ? new Date(parsed).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '' }
 
 function statusText(item) {
   if (item.status === 'sending') return 'Sending…'
-  if (item.status === 'failed') return `Failed: ${REASONS[item.errorCode] ?? REASONS.error}`
+  if (item.status === 'failed') return `Failed: ${REASONS[item.errorCode] ?? blockedReasonCopy(item.errorCode) ?? REASONS.error}`
   const at = Date.parse(item.nextAttemptAt ?? '')
   if (item.errorCode === 'albi_busy' && Number.isFinite(at) && at > Date.now()) return `Waiting: Albi was busy, trying again at ${time(item.nextAttemptAt)}`
   return 'Waiting to send'

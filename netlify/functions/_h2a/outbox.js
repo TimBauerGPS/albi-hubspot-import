@@ -11,6 +11,9 @@ export const OUTBOX_PACE_MS = 1500
 export const OUTBOX_BUSY_START_MS = 30000
 export const OUTBOX_BUSY_MAX_MS = 10 * 60000
 export const OUTBOX_MAX_BUSY_ATTEMPTS = 8
+// Queued creates share one read of Albi's lists (grown with each record created) instead of each walking Albi;
+// it is read again once it is this old.
+export const OUTBOX_SNAPSHOT_MS = 5 * 60000
 const LEASE_SECONDS = 300
 const WORKER_SECONDS = 900
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -19,8 +22,12 @@ const SENT = new Set(['ready_to_recheck', 'completed', 'waiting_on_albi'])
 const clock = deps => (deps.clockMs ?? Date.now)()
 const sleepFor = deps => deps.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)))
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
+const providerId = value => typeof value === 'string' && /^[1-9]\d{0,99}$/.test(value)
+const reasonCode = value => typeof value === 'string' && /^[a-z_]{1,40}$/.test(value) ? value : null
 
-// What a queued action may be: a review resolution decision, or "create the organization, then the contact".
+// What a queued action may be: a review resolution decision, "create the organization, then the contact", or
+// "create with the record's default referral source" (its Albi organization's, else its salesperson's; the
+// optional fallback covers a record without one).
 export function normalizeOutboxAction(input) {
   if (!object(input)) throw new TypeError('Invalid outbox action')
   if (input.kind === 'resolution' && Object.keys(input).every(key => ['kind', 'decision'].includes(key))) {
@@ -35,7 +42,17 @@ export function normalizeOutboxAction(input) {
     return { kind: 'create_with_organization', referralSourceId,
       ...(input.organizationReviewId ? { organizationReviewId: input.organizationReviewId, organizationExpectedUpdatedAt: input.organizationExpectedUpdatedAt } : {}) }
   }
+  if (input.kind === 'create_default_referral' && Object.keys(input).every(key => ['kind', 'fallbackReferralSourceId'].includes(key))) {
+    if (input.fallbackReferralSourceId === undefined) return { kind: 'create_default_referral' }
+    const { referralSourceId } = normalizeResolutionDecision({ action: 'create_albi', referralSourceId: input.fallbackReferralSourceId })
+    return { kind: 'create_default_referral', fallbackReferralSourceId: referralSourceId }
+  }
   throw new TypeError('Invalid outbox action')
+}
+
+// Whether a queued action creates one record in Albi (and so can use the shared Albi read).
+export function outboxCreates(action) {
+  return object(action) && (action.kind === 'create_default_referral' || action.kind === 'resolution' && action.decision?.action === 'create_albi')
 }
 
 // A failed resolution's reason, from its last failed event (sanitized details only).
@@ -85,8 +102,18 @@ export async function runOutboxItem(deps, row) {
       if (SENT.has(status)) return { outcome: 'sent' }
       return status === 'failed' ? classify(await failureOf(deps, companyId, result.contact.resolution)) : { outcome: 'failed', errorCode: 'error', detail: {} }
     }
+    let decision = action.decision
+    if (action.kind === 'create_default_referral') {
+      // The same create checks and default the record shows; a record that is not ready fails with its reason.
+      if (typeof deps.loadCreateDefault !== 'function') return { outcome: 'failed', errorCode: 'not_allowed', detail: {} }
+      const readiness = await deps.loadCreateDefault(row)
+      if (readiness?.ready !== true) return { outcome: 'failed', errorCode: reasonCode(readiness?.blockedReason) ?? 'not_ready', detail: {} }
+      const referralSourceId = providerId(readiness.defaultReferralSourceId) ? readiness.defaultReferralSourceId : action.fallbackReferralSourceId
+      if (!providerId(referralSourceId)) return { outcome: 'failed', errorCode: 'no_default_referral', detail: {} }
+      decision = { action: 'create_albi', referralSourceId }
+    }
     const result = await (deps.executeResolution ?? executeReviewResolution)(deps, { companyId, actorId: row.requested_by, reviewId: row.review_id,
-      expectedUpdatedAt: row.expected_updated_at, clientRequestId: row.client_request_id, decision: action.decision })
+      expectedUpdatedAt: row.expected_updated_at, clientRequestId: row.client_request_id, decision })
     const status = result?.resolution?.status
     if (SENT.has(status)) return { outcome: 'sent' }
     if (status === 'superseded') return { outcome: 'failed', errorCode: 'record_changed', detail: {} }
@@ -119,6 +146,18 @@ export async function runReviewOutbox(deps, { companyId }) {
   const maxBusy = Number.isInteger(deps.maxBusyAttempts) ? deps.maxBusyAttempts : OUTBOX_MAX_BUSY_ATTEMPTS
   const deadline = clock(deps) + Math.min(13 * 60000, Math.max(1000, deps.budgetMs ?? 13 * 60000))
   let busyMs = 0, sent = 0, failed = 0, status = 'idle'
+  // One Albi read per list for this run's creates; any failed read just leaves that create to read Albi itself.
+  let shared = null
+  const snapshotFor = async row => {
+    if (typeof deps.readAlbiList !== 'function' || !outboxCreates(row.action)) return null
+    if (!shared || clock(deps) - shared.at >= OUTBOX_SNAPSHOT_MS) shared = { at: clock(deps), lists: {} }
+    try {
+      const review = await repository.getReview(companyId, row.review_id)
+      const kind = review?.object_type === 'companies' ? 'organizations' : 'contacts'
+      if (!Array.isArray(shared.lists[kind])) shared.lists[kind] = await deps.readAlbiList(kind)
+      return shared.lists
+    } catch { return null }
+  }
   try {
     for (;;) {
       if (clock(deps) >= deadline - 30000) { status = 'continued'; break }
@@ -131,7 +170,8 @@ export async function runReviewOutbox(deps, { companyId }) {
         await sleep(wait)
         continue
       }
-      const result = await runOutboxItem(deps, row)
+      const snapshot = await snapshotFor(row)
+      const result = await runOutboxItem(snapshot ? { ...deps, albiSnapshot: snapshot } : deps, row)
       const now = clock(deps)
       if (result.outcome === 'sent') {
         busyMs = 0; sent++

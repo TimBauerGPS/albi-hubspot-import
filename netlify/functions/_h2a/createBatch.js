@@ -11,7 +11,7 @@ export const MAX_CREATE_BATCH_ITEMS = 50
 const providerId = value => typeof value === 'string' && /^[1-9]\d{0,99}$/.test(value)
 const clock = deps => (deps.clockMs ?? Date.now)()
 
-async function listAll(read) {
+export async function listAll(read) {
   const records = [], seen = new Set()
   let cursor = '1'
   for (let page = 0; page < 1000; page++) {

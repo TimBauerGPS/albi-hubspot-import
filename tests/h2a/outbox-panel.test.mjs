@@ -13,6 +13,7 @@ async function mountPanel(items, extra = {}) {
       queued: current.filter(item => item.status === 'queued').length, sending: current.filter(item => item.status === 'sending').length,
       failed: current.filter(item => item.status === 'failed').length } } },
     retryH2AOutbox: async (_s, _c, ids) => { calls.push(['retry', ids]); current = current.map(item => ids.includes(item.id) ? { ...item, status: 'queued', errorCode: null } : item); return { retried: ids.length } },
+    blockedReasonCopy: () => null,
     returnH2AOutbox: async (_s, _c, ids) => { calls.push(['return', ids]); current = current.filter(item => !ids.includes(item.id)); return { returned: ids.length } },
   }
   const changed = []

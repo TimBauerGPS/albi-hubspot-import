@@ -361,7 +361,7 @@ test('org-first create is enabled once a source from orgFirstCreate is chosen', 
 
 // ---- Task 14: workspace, queue, Albi to-do, bulk and pages ----
 
-const CLIENTS = ['getH2ACreateBatch', 'startH2ACreateBatch', 'getH2AReviews', 'getH2ADryRunReview', 'recheckH2ADryRunReview', 'queueH2AOutbox', 'bulkLinkH2AReviews',
+const CLIENTS = ['getH2ACreateBatch', 'queueH2AOutboxCreates', 'getH2AReviews', 'getH2ADryRunReview', 'recheckH2ADryRunReview', 'queueH2AOutbox', 'bulkLinkH2AReviews',
   'createH2AOrganizationThenContact', 'queueH2AOutbox', 'startH2ARecheckAll', 'getH2ARecheckAll', 'prepareH2AOrganizationReview',
   'prepareH2AMergedSurvivorReview', 'getH2AConflicts', 'getH2AOverview', 'prepareH2ALiveReviews']
 function clients(overrides, calls, defaults) {
@@ -879,33 +879,29 @@ test('quick wins offers Create selected for no-match rows', async () => {
   assert.doesNotMatch(await rendered('ReviewQueue.jsx', { ...props, bucket: 'decision' }), /Create selected/)
 })
 
-test('Create selected uses each record’s default referral source unless one is chosen for all, and reports the outcome', async () => {
+test('Create selected queues each record’s default-referral create in the Outbox and moves the records there', async () => {
   const rows = [listRow('a', 'Jane Doe', { triageDetails: { quickKind: 'create' } }), listRow('b', 'Marcus Lee', { triageDetails: { quickKind: 'create' } }), listRow('c', 'Linky')]
-  let polls = 0
   const ui = await mountWorkspace({ rows,
     getH2ADryRunReview: async (_s, _c, id) => ({ item: detailOf(id, { updatedAt: '2026-10-12T12:00:00.000Z',
       triageDetails: { quickKind: id === 'c' ? 'link' : 'create' } }) }),
-    getH2ACreateBatch: async () => ({ referralSources: [{ id: '5', label: 'Network' }],
-      batch: polls++ === 0 ? null : { id: 'b1', status: 'completed', total: 2, done: 2, created: 1, skipped: 1, failed: 0,
-        results: [{ reviewId: 'a', outcome: 'created' }, { reviewId: 'b', outcome: 'skipped', reason: 'organization_not_synced' }] } }),
-    startH2ACreateBatch: async () => ({ status: 'queued', batch: { id: 'b1', status: 'queued', total: 2, done: 0, created: 0, skipped: 0, failed: 0 } }) },
-  { createBatchPollMs: 1 })
+    getH2ACreateBatch: async () => ({ referralSources: [{ id: '5', label: 'Network' }], batch: null }),
+    queueH2AOutboxCreates: async (_s, _c, input) => ({ items: input.items.map(item => ({ id: `o-${item.reviewId}`, reviewId: item.reviewId, status: 'queued' })) }) })
   assert.equal(ui.queue().props.createSelectedCount, 2)
   await ui.queue().props.onCreateSelected(); await ui.flush()
   assert.match(ui.text(), /Jane Doe/); assert.match(ui.text(), /Marcus Lee/)
-  // Each record's own default is the starting choice, so no choice is needed to create.
-  assert.equal(ui.find('button', 'Create 2 in Albi').props.disabled, false)
+  // Each record's own default is the starting choice, so no choice is needed.
+  assert.equal(ui.find('button', 'Queue 2 creates').props.disabled, false)
   assert.match(ui.text(), /Each record’s default/)
   ui.find('select', 'Skip them').props.onChange({ target: { value: '5' } }); await ui.flush()
-  ui.find('button', 'Create 2 in Albi').props.onClick(); await ui.flush()
-  const started = ui.calls.find(call => call.name === 'startH2ACreateBatch')
-  assert.deepEqual(j(started.args[2]), { kind: 'sample', useRecordDefaults: true, referralSourceId: '5', items: [{ reviewId: 'a', expectedUpdatedAt: '2026-10-12T12:00:00.000Z' }, { reviewId: 'b', expectedUpdatedAt: '2026-10-12T12:00:00.000Z' }] })
-  assert.match(ui.text(), /Creating in Albi: 0 of 2 done/)
-  for (let i = 0; i < 5 && !/Create selected finished/.test(ui.text()); i++) await ui.tick()
-  assert.match(ui.text(), /Create selected finished: 1 created, 1 skipped, 0 failed/)
-  // The record it left alone is named, with the reason, and opens on click.
-  assert.match(ui.text(), /Marcus Lee — Skipped: This contact’s HubSpot organization is not in Albi yet/)
-  assert.doesNotMatch(ui.text(), /Jane Doe — /)
+  ui.find('button', 'Queue 2 creates').props.onClick(); await ui.flush()
+  const queued = ui.calls.find(call => call.name === 'queueH2AOutboxCreates')
+  const input = j(queued.args[2])
+  assert.deepEqual([input.useRecordDefaults, input.referralSourceId], [true, '5'])
+  assert.deepEqual(input.items.map(item => [item.reviewId, item.expectedUpdatedAt]), [['a', '2026-10-12T12:00:00.000Z'], ['b', '2026-10-12T12:00:00.000Z']])
+  assert.ok(input.items.every(item => /^[0-9a-f-]{36}$/.test(item.clientRequestId)))
+  assert.match(ui.text(), /2 creates queued in the Outbox/)
+  // The queued records leave Quick wins at once; nothing waits on Albi.
+  assert.deepEqual(ui.queue().props.items.map(item => item.id), ['c'])
   ui.unmount()
 })
 

@@ -266,6 +266,16 @@ Apps 1 and 3 both query the same `super_admins` table (same Supabase project). A
 
 ---
 
+## HubSpot Importer — Albi Writes Go Through the Outbox
+
+In the HubSpot-to-Albi review workspace, **every action that creates records in Albi is queued in the review Outbox** (`h2a_review_outbox`, `netlify/functions/h2a-review-outbox.js`, worker in `netlify/functions/_h2a/outbox.js`). This includes single creates, create organization and contact, and bulk creates (Create selected). The page never waits on Albi: the records move to the Outbox tab at once and the background worker sends them at a steady pace, backing off when Albi is busy.
+
+- New create features must enqueue outbox actions (`queueH2AOutbox` / `queueH2AOutboxCreates` in `src/lib/hubspotToAlbi.js`), not call the resolution endpoint or start their own background batch.
+- An action whose details are decided at send time (such as the record's default referral source) is a new outbox action kind resolved by the worker (see `create_default_referral`).
+- Failures stay in the Outbox with a reason code; give each new reason user-facing copy in `src/features/hubspotToAlbi/OutboxPanel.jsx`.
+
+---
+
 ## What NOT to Do
 
 - Do not create a new Supabase project for a new app — add a new slug to `user_app_access`
@@ -275,6 +285,7 @@ Apps 1 and 3 both query the same `super_admins` table (same Supabase project). A
 - Do not replace app-specific role tables with `user_app_access.role` — they serve different purposes
 - Do not add a new `grant-app-access` function if one already exists in the project
 - Do not conflate Master Admin (App 1 partner tier) with Super Admin — they are unrelated concepts
+- Do not create Albi records directly from the HubSpot Importer page (or in a page-driven batch) — queue them in the review Outbox
 
 ---
 
