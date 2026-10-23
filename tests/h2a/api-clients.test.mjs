@@ -556,3 +556,13 @@ test('a contact’s primary HubSpot company is listed first among its associatio
   assert.deepEqual(await c.getAssociations({ objectType: 'contacts', objectIds: ['10'], toObjectTypes: ['companies'] }),
     [{ fromId: '10', toObjectType: 'companies', toIds: ['502', '501'] }])
 })
+
+test('an Albi create reply carrying the new record as an object still yields its id; an unknown shape names its fields', async () => {
+  for (const reply of [{ status: 1, data: 402 }, { status: 1, data: { id: 402, notes: 'x' } }, { status: 1, data: { activityId: '402' } }, { status: 1, id: 402 }]) {
+    const f = transport([accessibleCompany, reply])
+    assert.deepEqual(await new AlbiClient({ apiKey: 'k', fetch: f.fetch }).createActivity({ contactId: 101, typeId: 6711, date: '2026-10-02T12:00:00Z', notes: 'Test' }), { id: '402' })
+  }
+  const f = transport([accessibleCompany, { status: 1, data: { created: true, secret: 'value' } }])
+  await assert.rejects(new AlbiClient({ apiKey: 'k', fetch: f.fetch }).createActivity({ contactId: 101, typeId: 6711, date: '2026-10-02T12:00:00Z', notes: 'Test' }),
+    error => error.code === 'malformed_response' && error.protocolIssue === 'reply_no_id' && /data=object\(created,secret\)/.test(error.providerShape) && !/value/.test(error.providerShape))
+})

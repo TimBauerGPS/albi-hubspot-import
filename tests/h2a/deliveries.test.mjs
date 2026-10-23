@@ -98,6 +98,23 @@ test('uncertain write with no match schedules bounded retry and locks reconcilia
   assert.equal(store.current().next_attempt_at, '2026-10-01T00:00:30.000Z')
 })
 
+test('an unreadable create reply is treated as unknown: reconciled when Albi has it, retried when not', async () => {
+  const unreadable = { category: 'permanent', code: 'malformed_response' }
+  const found = storeHarness()
+  const reserved = await reserveDelivery({ identity, store: found })
+  const result = await completeDelivery({ reservation: reserved, store: found, error: unreadable,
+    albi: { async listActivities() { return { records: [{ id: '501', notes: 'Source: HubSpot email 42' }], cursor: null } } },
+    now: () => '2026-10-01T00:00:01Z' })
+  assert.equal(result.disposition, 'reconciled')
+  assert.equal(found.current().albi_activity_id, '501')
+  const missing = storeHarness()
+  const again = await reserveDelivery({ identity, store: missing })
+  const retry = await completeDelivery({ reservation: again, store: missing, error: unreadable,
+    albi: { async listActivities() { return { records: [], cursor: null } } }, now: () => '2026-10-01T00:00:00Z' })
+  assert.equal(retry.disposition, 'retry_scheduled')
+  assert.ok(missing.current().next_attempt_at)
+})
+
 test('successful create is fenced by reservation attempt version', async () => {
   const store = storeHarness()
   const reservation = await reserveDelivery({ identity, store })
@@ -192,4 +209,12 @@ test('failed retry reservation is unavailable before next_attempt_at and reconci
   assert.equal(due.safeToCreate, true)
   assert.equal(due.reconciledBeforeCreate, true)
   assert.equal(reads, 1)
+})
+
+test('a failed delivery records an unreadable reply’s field names, never its values', async () => {
+  const store = storeHarness()
+  const reservation = await reserveDelivery({ identity, store })
+  await completeDelivery({ reservation, store, error: { category: 'permanent', code: 'malformed_response', providerShape: 'reply=status,data;data=object(created)' },
+    albi: { async listActivities() { return { records: [], cursor: null } } }, now: () => '2026-10-01T00:00:00Z' })
+  assert.equal(store.current().last_error_summary, 'permanent:malformed_response:reply=status,data;data=object(created)')
 })

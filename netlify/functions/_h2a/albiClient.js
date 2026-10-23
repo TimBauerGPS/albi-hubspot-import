@@ -238,9 +238,19 @@ export class AlbiClient {
       if (error instanceof ApiError && error.providerShape) error.providerShape = `${requestShape(payload)};${error.providerShape}`.slice(0, 240)
       throw error
     }
-    if (!isRecord(data)) malformed(operation)
+    if (!isRecord(data)) malformed(operation, 'reply_not_object')
     if (data.status !== 1) throw new ApiError('validation', { operation, code: 'application_error' })
-    return { id: responseId(data.data, operation) }
+    // Albi answers a create with the new id, or (activities) with the new record; take the id from either.
+    const nested = isRecord(data.data) ? data.data : {}
+    const found = [data.data, nested.id, nested.activityId, nested.contactId, nested.organizationId, data.id]
+      .find(value => /^[1-9][0-9]*$/.test(String(value ?? '')) && (typeof value === 'string' || Number.isSafeInteger(value)))
+    if (found === undefined) {
+      // Field names only, never values, so an unexpected reply can be recognized and supported.
+      const names = value => Object.keys(value).filter(key => /^\w{1,30}$/.test(key)).slice(0, 10).join(',')
+      const shape = `reply=${names(data)};data=${isRecord(data.data) ? `object(${names(data.data)})` : Array.isArray(data.data) ? 'array' : typeof data.data}`
+      throw new ApiError('permanent', { operation, code: 'malformed_response', protocolIssue: 'reply_no_id', providerShape: shape.slice(0, 240) })
+    }
+    return { id: String(found) }
   }
   async createContact(payload) { return this.#create('contacts', validatePayload(payload, ['firstName', 'lastName', 'contactTypeIds'], 'createContact'), 'createContact') }
   async createOrganization(payload) { return this.#create('organizations', validatePayload(payload, ['name', 'organizationTypeIds'], 'createOrganization'), 'createOrganization') }

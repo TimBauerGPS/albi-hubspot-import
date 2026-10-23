@@ -32,7 +32,9 @@ function safeSummary(error) {
   const clean = value => asText(value).replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 60)
   const code = clean(error?.code)
   const category = clean(error?.category)
-  return [category, code].filter(Boolean).join(':').slice(0, 120) || 'provider_error'
+  // An unreadable reply also records its field names (never values), so it can be supported.
+  const shape = asText(error?.providerShape).replace(/[^a-zA-Z0-9_,=;()]/g, '_').slice(0, 80)
+  return [category, code, shape].filter(Boolean).join(':').slice(0, 120) || 'provider_error'
 }
 
 function matchingActivity(records, reservation, nativeExternalIdSupported) {
@@ -162,7 +164,10 @@ export async function completeDelivery(input = {}) {
   }
 
   const error = input.error
-  if (retryableCategories.has(error.category) && input.albi) {
+  // A reply that could not be read comes after Albi accepted the request, so the activity may exist: treat it
+  // like a lost reply (find it by its marker, or retry later), never as a final failure.
+  const unknownOutcome = retryableCategories.has(error.category) || error.code === 'malformed_response'
+  if (unknownOutcome && input.albi) {
     try {
       const reconciled = await reconcileDelivery({
         reservation, store, albi: input.albi,
@@ -176,7 +181,7 @@ export async function completeDelivery(input = {}) {
     }
   }
 
-  const retryable = retryableCategories.has(error.category)
+  const retryable = unknownOutcome
   const retryNumber = Math.max(1, Number(reservation.attemptCount) || 1)
   const delayMs = Math.min(30 * 60_000, 30_000 * (2 ** Math.min(6, retryNumber - 1)))
   const nextAttemptAt = retryable
