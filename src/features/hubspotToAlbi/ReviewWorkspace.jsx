@@ -41,6 +41,8 @@ const inside = (target, selector) => !!target && typeof target.closest === 'func
 const text = value => typeof value === 'string' && value.trim() ? value.trim() : ''
 const list = value => Array.isArray(value) ? value : []
 const without = (record, key) => { if (!Object.hasOwn(record, key)) return record; const next = { ...record }; delete next[key]; return next }
+// How many records are loaded ahead of the one open.
+const PRELOAD_AHEAD = 3
 const nameOf = item => text(item?.displayName) || presentSampleReviewItem(item).displayName
 const plural = (count, one, many = `${one}s`) => `${count} ${count === 1 ? one : many}`
 
@@ -277,25 +279,36 @@ export default function ReviewWorkspace({
     return () => { controller.abort(); controllers.current.delete(controller) }
   }, [companyId, session, tenantKey, selectedId, detailRetry, replaceItem, writeDetail])
 
-  // Prefetch the record auto-advance will open next, with the same tenant and list-generation guards.
+  // Preload the records auto-advance will open next (several ahead: each takes a few seconds to load, so one
+  // ahead was overtaken when working quickly), with the same tenant and list-generation guards.
   const selectedLoaded = Boolean(selectedId && details[selectedId])
   useEffect(() => {
     if (!selectedLoaded || view === 'todo') return
-    const next = nextRecordId(itemsRef.current.map(item => item.id), selectedId, new Set(pending.map(entry => entry.id)))
-    if (!next || detailsRef.current[next] || prefetching.current.has(next)) return
-    const controller = new AbortController()
-    controllers.current.add(controller)
-    prefetching.current.add(next)
-    const listRequest = requestRevision.current
-    const startedFor = tenantKey
-    const version = versions.current.get(next)
-    getH2ADryRunReview(session, companyId, next, { signal: controller.signal }).then(result => {
-      if (!controller.signal.aborted && listRequest === requestRevision.current && tenantKeyRef.current === startedFor &&
-        versions.current.get(next) === version && result?.item?.id === next) setDetails(current => current[next] ? current : { ...current, [next]: result.item })
-    }).catch(() => { /* A failed prefetch just means the record loads when it is opened. */ }).finally(() => {
-      controllers.current.delete(controller)
-      prefetching.current.delete(next)
-    })
+    const order = itemsRef.current.map(item => item.id)
+    const excluded = new Set(pending.map(entry => entry.id))
+    const ahead = []
+    for (let from = selectedId; ahead.length < PRELOAD_AHEAD;) {
+      const next = nextRecordId(order, from, excluded)
+      if (!next || next === selectedId || ahead.includes(next)) break
+      ahead.push(next)
+      from = next
+    }
+    for (const next of ahead) {
+      if (detailsRef.current[next] || prefetching.current.has(next)) continue
+      const controller = new AbortController()
+      controllers.current.add(controller)
+      prefetching.current.add(next)
+      const listRequest = requestRevision.current
+      const startedFor = tenantKey
+      const version = versions.current.get(next)
+      getH2ADryRunReview(session, companyId, next, { signal: controller.signal }).then(result => {
+        if (!controller.signal.aborted && listRequest === requestRevision.current && tenantKeyRef.current === startedFor &&
+          versions.current.get(next) === version && result?.item?.id === next) setDetails(current => current[next] ? current : { ...current, [next]: result.item })
+      }).catch(() => { /* A failed prefetch just means the record loads when it is opened. */ }).finally(() => {
+        controllers.current.delete(controller)
+        prefetching.current.delete(next)
+      })
+    }
   }, [selectedId, selectedLoaded, items, pending, view, session, companyId, tenantKey])
 
   useEffect(() => {

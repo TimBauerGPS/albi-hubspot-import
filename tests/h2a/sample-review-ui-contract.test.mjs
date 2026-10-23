@@ -394,6 +394,18 @@ test('the next record is prefetched so it opens without a wait', async () => {
   ui.unmount()
 })
 
+test('the next three records are preloaded so working quickly never waits on a load', async () => {
+  const ui = await mount({ getH2AReviews: () => Promise.resolve(page(['review-1', 'review-2', 'review-3', 'review-4', 'review-5'].map(id => row(id)))) })
+  for (let i = 0; i < 6; i++) await ui.flush()
+  assert.deepEqual(ui.calls.filter(call => call.name === 'getH2ADryRunReview').map(call => call.args[2]), ['review-1', 'review-2', 'review-3', 'review-4'])
+  ui.select('review-4'); await ui.flush()
+  assert.equal(ui.detail().props.item.id, 'review-4')
+  // Moving on keeps three loaded ahead: only the newly needed record is fetched.
+  for (let i = 0; i < 6; i++) await ui.flush()
+  assert.deepEqual(ui.calls.filter(call => call.name === 'getH2ADryRunReview').map(call => call.args[2]).slice(4), ['review-5'])
+  ui.unmount()
+})
+
 test('a tenant switch aborts recheck and ignores late progress and record changes', async () => {
   const pending = deferred()
   const ui = await mount({ recheckH2ADryRunReview: () => pending.promise,
