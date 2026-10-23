@@ -35,7 +35,7 @@ test('labels and buckets', () => {
   assert.equal(REASON_LABELS.same_domain, 'Same domain')
   assert.equal(REASON_LABELS.same_email, 'Same email')
   assert.equal(WARNING_LABELS.different_email, 'Different email')
-  assert.deepEqual(BUCKETS.map(b => b[0]), ['quick', 'decision', 'blocked', 'todo', 'done'])
+  assert.deepEqual(BUCKETS.map(b => b[0]), ['quick', 'decision', 'blocked', 'todo', 'outbox', 'done'])
 })
 test('nextRecordId wraps and skips pending', () => {
   const order = ['a', 'b', 'c', 'd']

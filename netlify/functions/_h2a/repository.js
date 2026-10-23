@@ -14,7 +14,9 @@ const REVIEW_STATUSES = new Set(['needs_review', 'cleared', 'no_longer_in_scope'
 const REVIEW_KINDS = new Set(['sample', 'live'])
 const LIVE_CLOSE_OUTCOMES = new Set(['resolved', 'resolved_by_sync', 'skipped', 'source_missing'])
 const LIVE_CLOSE_ACTIONS = new Set(['link_existing', 'create_new', 'skip'])
-const TRIAGE_BUCKETS = ['quick', 'todo', 'decision', 'blocked', 'done']
+const TRIAGE_BUCKETS = ['quick', 'todo', 'decision', 'blocked', 'done', 'outbox']
+const OUTBOX_TABLE = 'h2a_review_outbox'
+const OUTBOX_COLUMNS = 'id,company_id,review_id,review_kind,expected_updated_at,client_request_id,action,requested_by,status,attempts,next_attempt_at,lease_expires_at,error_code,error_detail,sent_at,created_at,updated_at'
 const REVIEW_OBJECT_TYPES = new Set(['contacts', 'companies'])
 const REVIEW_EVENT_TYPES = new Set(['captured', 'recheck_started', 'still_needs_review', 'cleared', 'no_longer_in_scope', 'recheck_failed'])
 const RECHECK_ERRORS = new Set(['not_found', 'stale', 'superseded', 'invalid_recheck'])
@@ -265,6 +267,7 @@ function safeTriageDetails(details) {
   if (['link', 'create'].includes(details.quickKind)) safe.quickKind = details.quickKind
   if (details.closePending === true) safe.closePending = true
   if (details.recheckPending === true) safe.recheckPending = true
+  if (['queued', 'failed'].includes(details.outbox)) safe.outbox = details.outbox
   if (typeof details.mergedIntoSourceId === 'string' && /^[1-9]\d{0,99}$/.test(details.mergedIntoSourceId)) safe.mergedIntoSourceId = details.mergedIntoSourceId
   return safe
 }
@@ -682,6 +685,92 @@ export function createH2ARepository(supabase) {
         return { error: 'active', batch: active ?? null }
       }
       return { batch: checked(inserted) }
+    },
+    // ---- Review outbox (see _h2a/outbox.js) ----
+    // Queues actions; a record that already has an open action keeps it (the existing row is returned).
+    async enqueueOutboxItems(companyId, items, { actorId, now = new Date().toISOString() } = {}) {
+      requireReviewIdentity(companyId)
+      requireReviewIdentity(actorId)
+      if (!Array.isArray(items) || items.length < 1 || items.length > 50 || items.some(item => !item || !UUID_SHAPE.test(item.reviewId ?? '') ||
+        !UUID_SHAPE.test(item.clientRequestId ?? '') || !TIMESTAMP_SHAPE.test(item.expectedUpdatedAt ?? '') ||
+        !REVIEW_KINDS.has(item.reviewKind) || !item.action || typeof item.action !== 'object') ||
+        new Set(items.map(item => item.reviewId)).size !== items.length) throw new TypeError('Invalid outbox items')
+      const open = async ids => checked(await supabase.from(OUTBOX_TABLE).select(OUTBOX_COLUMNS).eq('company_id', companyId)
+        .in('review_id', ids).in('status', ['queued', 'sending', 'failed'])) ?? []
+      const existing = new Map((await open(items.map(item => item.reviewId))).map(row => [row.review_id, row]))
+      const rows = []
+      for (const item of items) {
+        if (existing.has(item.reviewId)) { rows.push({ row: existing.get(item.reviewId), queued: false }); continue }
+        const inserted = await supabase.from(OUTBOX_TABLE).insert({ company_id: companyId, review_id: item.reviewId, review_kind: item.reviewKind,
+          expected_updated_at: item.expectedUpdatedAt, client_request_id: item.clientRequestId, action: item.action, requested_by: actorId,
+          status: 'queued', next_attempt_at: now, created_at: now, updated_at: now }).select(OUTBOX_COLUMNS).single()
+        if (inserted?.error?.code === '23505') { rows.push({ row: (await open([item.reviewId]))[0] ?? null, queued: false }); continue }
+        rows.push({ row: checked(inserted), queued: true })
+      }
+      return rows
+    },
+    async listOutboxItems(companyId, kind = 'live') {
+      requireReviewIdentity(companyId)
+      requireReviewValue(kind, REVIEW_KINDS, 'kind')
+      const rows = checked(await supabase.from(OUTBOX_TABLE).select(OUTBOX_COLUMNS).eq('company_id', companyId).eq('review_kind', kind)
+        .in('status', ['queued', 'sending', 'failed']).order('created_at', { ascending: true }).limit(500)) ?? []
+      const ids = [...new Set(rows.map(row => row.review_id))]
+      const reviews = []
+      for (let start = 0; start < ids.length; start += 100) {
+        reviews.push(...(checked(await supabase.from('h2a_dry_run_reviews').select('id,object_type,source_id,source_snapshot,updated_at')
+          .eq('company_id', companyId).in('id', ids.slice(start, start + 100))) ?? []))
+      }
+      const byId = new Map(reviews.map(review => [review.id, review]))
+      return rows.map(row => ({ ...row, review: byId.get(row.review_id) ?? null }))
+    },
+    async claimOutboxWorker(companyId, ownerToken, ttlSeconds = 900) {
+      requireReviewIdentity(companyId)
+      requireReviewIdentity(ownerToken)
+      return checked(await supabase.rpc('h2a_claim_review_outbox_worker', { p_company_id: companyId, p_owner_token: ownerToken, p_ttl_seconds: ttlSeconds })) === true
+    },
+    async releaseOutboxWorker(companyId, ownerToken) {
+      requireReviewIdentity(companyId)
+      requireReviewIdentity(ownerToken)
+      checked(await supabase.from('h2a_review_outbox_workers').delete().eq('company_id', companyId).eq('owner_token', ownerToken))
+    },
+    async claimOutboxItem(companyId, leaseSeconds = 300) {
+      requireReviewIdentity(companyId)
+      const rows = checked(await supabase.rpc('h2a_claim_review_outbox_item', { p_company_id: companyId, p_lease_seconds: leaseSeconds }))
+      return Array.isArray(rows) ? rows[0] ?? null : rows ?? null
+    },
+    async nextOutboxDue(companyId) {
+      requireReviewIdentity(companyId)
+      const row = checked(await supabase.from(OUTBOX_TABLE).select('next_attempt_at').eq('company_id', companyId).eq('status', 'queued')
+        .order('next_attempt_at', { ascending: true }).limit(1).maybeSingle())
+      return row?.next_attempt_at ?? null
+    },
+    async finishOutboxItem(companyId, itemId, { status, nextAttemptAt = null, errorCode = null, errorDetail = {}, now = new Date().toISOString() }) {
+      requireReviewIdentity(companyId)
+      requireReviewIdentity(itemId)
+      if (!['sent', 'queued', 'failed'].includes(status) || errorCode !== null && !/^[a-z_]{1,40}$/.test(errorCode) ||
+        !errorDetail || typeof errorDetail !== 'object' || Array.isArray(errorDetail)) throw new TypeError('Invalid outbox finish')
+      const rows = checked(await supabase.from(OUTBOX_TABLE).update({ status, lease_expires_at: null, error_code: status === 'sent' ? null : errorCode,
+        error_detail: status === 'sent' ? {} : errorDetail, ...(status === 'sent' ? { sent_at: now } : {}),
+        ...(status === 'queued' ? { next_attempt_at: nextAttemptAt ?? now } : {}), updated_at: now })
+        .eq('company_id', companyId).eq('id', itemId).eq('status', 'sending').select('id'))
+      return Array.isArray(rows) && rows.length === 1
+    },
+    // Retry: failed actions go back in line (attempts reset). Return: failed or waiting actions are cancelled.
+    async retryOutboxItems(companyId, ids, now = new Date().toISOString()) {
+      requireReviewIdentity(companyId)
+      if (!Array.isArray(ids) || !ids.length || ids.length > 500 || ids.some(id => !UUID_SHAPE.test(id))) throw new TypeError('Invalid outbox ids')
+      return checked(await supabase.from(OUTBOX_TABLE).update({ status: 'queued', attempts: 0, next_attempt_at: now, error_code: null, error_detail: {}, updated_at: now })
+        .eq('company_id', companyId).in('id', ids).eq('status', 'failed').select('id,review_id')) ?? []
+    },
+    async cancelOutboxItems(companyId, ids, now = new Date().toISOString()) {
+      requireReviewIdentity(companyId)
+      if (!Array.isArray(ids) || !ids.length || ids.length > 500 || ids.some(id => !UUID_SHAPE.test(id))) throw new TypeError('Invalid outbox ids')
+      return checked(await supabase.from(OUTBOX_TABLE).update({ status: 'cancelled', updated_at: now })
+        .eq('company_id', companyId).in('id', ids).in('status', ['queued', 'failed']).select('id,review_id')) ?? []
+    },
+    async listCompaniesWithDueOutbox(now = new Date().toISOString()) {
+      const rows = checked(await supabase.from(OUTBOX_TABLE).select('company_id').eq('status', 'queued').lte('next_attempt_at', now).limit(500)) ?? []
+      return [...new Set(rows.map(row => row.company_id))]
     },
     async createReviewCreateBatch(companyId, { kind = 'sample', items, referralSourceId, actorId, now = new Date().toISOString(), staleBefore }) {
       requireReviewIdentity(companyId)

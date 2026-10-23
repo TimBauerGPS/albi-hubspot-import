@@ -4,7 +4,8 @@ import { rankReviewCandidates } from './ranking.js'
 import { safeReviewCandidates, safeReviewSnapshot } from './review.js'
 
 const SURVIVOR_ID = /^[1-9]\d{0,99}$/
-export const TRIAGE_BUCKETS = Object.freeze(['quick', 'todo', 'decision', 'blocked', 'done'])
+// outbox: the record's action is queued, sending, or failed in the outbox (set by the outbox, never computed).
+export const TRIAGE_BUCKETS = Object.freeze(['quick', 'todo', 'decision', 'blocked', 'done', 'outbox'])
 
 // Pure bucket decision. createReadiness undefined means "not known yet"; only the link rule can yield quick then.
 // mergedInto is optional because merge state is read live from HubSpot, not stored.
@@ -71,9 +72,11 @@ const sameTriage = (row, next) => row?.triage_bucket === next.bucket &&
 // Recomputes a stored review row's triage and writes it only when it changed. Best effort: triage is
 // advisory, so a failure here must never fail the recheck or resolution that triggered it.
 // Readiness the caller did not re-read is carried over from the stored details rather than guessed.
-export async function refreshReviewTriage(repository, { companyId, row, resolutionStatus, createReadiness, mergedInto } = {}) {
+export async function refreshReviewTriage(repository, { companyId, row, resolutionStatus, createReadiness, mergedInto, force = false } = {}) {
   try {
     if (!row || typeof repository?.setReviewTriage !== 'function') return null
+    // While its action is in the outbox, only the outbox moves the record (force) out of the Outbox tab.
+    if (row.triage_bucket === 'outbox' && !force) return null
     let status = resolutionStatus
     if (status === undefined && typeof repository.getCurrentReviewResolution === 'function') {
       status = (await repository.getCurrentReviewResolution(companyId, row.id))?.status

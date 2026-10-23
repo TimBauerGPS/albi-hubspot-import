@@ -5,7 +5,7 @@ export const REASON_LABELS = Object.freeze({
   same_name: 'Same name', same_first_name: 'Same first name only', same_organization: 'Same organization', same_domain: 'Same domain', same_address: 'Same address',
 })
 export const WARNING_LABELS = Object.freeze({ different_email: 'Different email', already_linked_elsewhere: 'Already linked to another HubSpot record' })
-export const BUCKETS = Object.freeze([['quick', 'Quick wins'], ['decision', 'Needs decision'], ['blocked', 'Blocked'], ['todo', 'Albi to-do'], ['done', 'Done']])
+export const BUCKETS = Object.freeze([['quick', 'Quick wins'], ['decision', 'Needs decision'], ['blocked', 'Blocked'], ['todo', 'Albi to-do'], ['outbox', 'Outbox'], ['done', 'Done']])
 
 const PHONE_KEYS = new Set(['phoneNumber', 'mobileNumber'])
 const LOWER_KEYS = new Set(['email', 'domain'])

@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { bulkLinkH2AReviews, createH2AOrganizationThenContact, getH2ACreateBatch, startH2ACreateBatch, getH2ADryRunReview, getH2AReviews, prepareH2AMergedSurvivorReview,
-  prepareH2AOrganizationReview, recheckH2ADryRunReview, resolveH2ADryRunReview, skipH2ALiveReview, startH2ARecheckAll } from '../../lib/hubspotToAlbi'
+import { bulkLinkH2AReviews, getH2ACreateBatch, startH2ACreateBatch, getH2ADryRunReview, getH2AReviews, prepareH2AMergedSurvivorReview,
+  prepareH2AOrganizationReview, recheckH2ADryRunReview, queueH2AOutbox, startH2ARecheckAll } from '../../lib/hubspotToAlbi'
 import { BUCKETS, createDeferredQueue, fieldLabel, nextRecordId, shortcutFor } from './reviewWorkspace.js'
 import { presentSampleReviewItem, SAMPLE_REVIEW_REASON_OPTIONS } from './sampleReview.js'
 import { buildResolutionConfirmation } from './sampleReviewResolution.js'
 import { btn, Kbd, primary } from './ResolutionBar.jsx'
 import AlbiTodo from './AlbiTodo.jsx'
+import OutboxPanel from './OutboxPanel.jsx'
 import ReviewQueue from './ReviewQueue.jsx'
 import ReviewRecord from './ReviewRecord.jsx'
 import ShortcutHelp from './ShortcutHelp.jsx'
@@ -283,7 +284,7 @@ export default function ReviewWorkspace({
   // ahead was overtaken when working quickly), with the same tenant and list-generation guards.
   const selectedLoaded = Boolean(selectedId && details[selectedId])
   useEffect(() => {
-    if (!selectedLoaded || view === 'todo') return
+    if (!selectedLoaded || view === 'todo' || view === 'outbox') return
     const order = itemsRef.current.map(item => item.id)
     const excluded = new Set(pending.map(entry => entry.id))
     const ahead = []
@@ -374,6 +375,12 @@ export default function ReviewWorkspace({
       let item = null
       try { item = (await getH2ADryRunReview(session, companyId, reviewId))?.item ?? null } catch { continue }
       if (!same(startedFor)) return
+      if (item?.triageBucket === 'outbox') {
+        movedToOutbox(reviewId, startedFor)
+        setRecordErrors(current => without(current, reviewId))
+        setNotice('Saved to the Outbox. The server finished after the page stopped waiting.')
+        return
+      }
       if (['ready_to_recheck', 'completed', 'waiting_on_albi'].includes(item?.resolution?.status)) {
         await afterWrite(reviewId, startedFor, session, companyId)
         setRecordErrors(current => without(current, reviewId))
@@ -401,20 +408,30 @@ export default function ReviewWorkspace({
     return requestIds.current.get(key)
   }
 
+  // Actions go to the outbox: a background worker sends them to Albi at a steady pace, so nothing here waits on
+  // Albi. The record moves to the Outbox tab at once; a failed send stays there with its reason.
+  function movedToOutbox(reviewId, startedFor) {
+    if (!same(startedFor)) return
+    const bucket = viewRef.current
+    if (bucket === 'outbox') return
+    setItems(current => current.filter(existing => existing.id !== reviewId))
+    setBucketCounts(counts => counts ? { ...counts, [bucket]: Math.max(0, Number(counts[bucket] ?? 0) - 1), outbox: Number(counts.outbox ?? 0) + 1 } : counts)
+    setChecked(current => { if (!current.has(reviewId)) return current; const next = new Set(current); next.delete(reviewId); return next })
+    setDetails(current => without(current, reviewId))
+  }
   // Each run captures the tenant it was made in, so a flushed send still reaches the right company.
   function resolveRun(item, decision) {
     const startedFor = tenantKey, auth = session, company = companyId, clientRequestId = requestIdFor(item, decision)
     return async () => {
-      await resolveH2ADryRunReview(auth, company, { reviewId: item.id, expectedUpdatedAt: item.updatedAt, clientRequestId, ...decision })
-      // No automatic recheck: each one re-reads all of Albi and was timing out. Recheck all settles saved records in one read.
-      await afterWrite(item.id, startedFor, auth, company)
+      await queueH2AOutbox(auth, company, { reviewId: item.id, expectedUpdatedAt: item.updatedAt, clientRequestId, ...decision })
+      movedToOutbox(item.id, startedFor)
     }
   }
   function skipRun(item) {
     const startedFor = tenantKey, auth = session, company = companyId, clientRequestId = requestIdFor(item, { action: 'skip_live' })
     return async () => {
-      await skipH2ALiveReview(auth, company, { reviewId: item.id, expectedUpdatedAt: item.updatedAt, clientRequestId })
-      await afterWrite(item.id, startedFor, auth, company)
+      await queueH2AOutbox(auth, company, { reviewId: item.id, expectedUpdatedAt: item.updatedAt, clientRequestId, action: 'skip_live' })
+      movedToOutbox(item.id, startedFor)
     }
   }
   function orgFirstRun(item, referralSourceId) {
@@ -426,17 +443,10 @@ export default function ReviewWorkspace({
         const loaded = await getH2ADryRunReview(auth, company, organizationReviewId)
         if (loaded?.item?.updatedAt) organization = { organizationReviewId, organizationExpectedUpdatedAt: loaded.item.updatedAt }
       }
-      const result = await createH2AOrganizationThenContact(auth, company, { reviewId: item.id, expectedUpdatedAt: item.updatedAt, clientRequestId,
+      await queueH2AOutbox(auth, company, { op: 'create_with_organization', reviewId: item.id, expectedUpdatedAt: item.updatedAt, clientRequestId,
         referralSourceId, ...organization })
-      if (!same(startedFor)) return
-      // The organization can succeed while the contact step fails: report that on the record, never as success.
-      if (result?.contact?.error || !result?.contact) {
-        const reason = result?.contact?.error ? ` The contact was not created: ${result.contact.error}` : ' The contact was not created yet. Recheck this record, then create the contact.'
-        setRecordErrors(current => ({ ...current, [item.id]: `The organization was created.${reason}` }))
-        await refreshRecord(item.id, startedFor)
-        return
-      }
-      await afterWrite(item.id, startedFor, auth, company)
+      // If the contact step fails after the organization is created, the outbox shows it; a retry resumes the contact.
+      movedToOutbox(item.id, startedFor)
     }
   }
 
@@ -843,7 +853,7 @@ export default function ReviewWorkspace({
     if (action === 'todo') { selectView('todo'); return }
     if (action === 'undo') { doUndo(); return }
     if (readOnly && WRITE_KEYS.has(action)) return
-    if (view === 'todo' || !detail) return
+    if (view === 'todo' || view === 'outbox' || !detail) return
     if (action === 'next' || action === 'prev') {
       event.preventDefault()
       const order = itemsRef.current.map(item => item.id)
@@ -921,6 +931,8 @@ export default function ReviewWorkspace({
       </div>
 
       {view === 'todo' ? <AlbiTodo session={session} companyId={companyId} tenantKey={tenantKey} readOnly={readOnly} />
+        : view === 'outbox' ? <OutboxPanel session={session} companyId={companyId} kind={kind} tenantKey={tenantKey} readOnly={readOnly}
+          onChanged={() => setRetryToken(value => value + 1)} />
         : loading || !visible ? <section className="rounded-xl border border-gray-200 bg-white px-5 py-10 text-sm text-gray-600" role="status">Loading reviews…</section>
           : loadError ? <section className="rounded-xl border border-red-200 bg-red-50 px-5 py-6" role="alert">
             <h3 className="font-semibold text-red-900">Reviews could not be loaded</h3><p className="mt-1 text-sm text-red-800">{loadError}</p>

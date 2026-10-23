@@ -104,3 +104,13 @@ test('schedule metadata uses the hourly Netlify cron expression', async () => {
   const mod = await import('../../netlify/functions/nightly-h2a-sync.js')
   assert.deepEqual(mod.config, { schedule: '17 * * * *' })
 })
+
+test('each hour, a company with outbox actions left waiting gets an outbox worker', async () => {
+  const dispatched = []
+  const handler = createNightlyScheduler({ supabase: { from: () => ({ select: () => ({ order: async () => ({ data: [], error: null }) }) }) },
+    now: () => new Date('2026-10-23T12:17:00Z'), repository: {}, listOutboxCompanies: async () => ['c1', 'c2'],
+    dispatchOutbox: async payload => { if (payload.companyId === 'c2') throw new Error('down'); dispatched.push(payload) } })
+  const body = JSON.parse((await handler()).body)
+  assert.deepEqual(dispatched, [{ companyId: 'c1' }])
+  assert.deepEqual(body.results.filter(row => row.kind === 'outbox'), [{ companyId: 'c1', kind: 'outbox', status: 'dispatched' }, { companyId: 'c2', kind: 'outbox', status: 'retryable' }])
+})

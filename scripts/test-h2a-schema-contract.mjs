@@ -11,7 +11,7 @@ const recheckBatchMigrationUrl = new URL('../supabase/h2a-review-recheck-batches
 const liveReviewMigrationUrl = new URL('../supabase/h2a-live-review-workspace.sql', import.meta.url)
 const mappingOwnershipMigrationUrl = new URL('../supabase/h2a-mapping-target-ownership.sql', import.meta.url)
 const requiredTables = [
-  'h2a_review_create_batches',
+  'h2a_review_create_batches', 'h2a_review_outbox', 'h2a_review_outbox_workers',
   'h2a_company_config', 'h2a_option_mappings', 'h2a_sync_runs',
   'h2a_cursors', 'h2a_backfill_windows', 'h2a_contact_mappings',
   'h2a_organization_mappings', 'h2a_activity_deliveries',
@@ -23,7 +23,7 @@ const requiredTables = [
   'h2a_review_recheck_batches', 'h2a_live_review_conflicts',
 ]
 const serviceOnlyTables = ['h2a_dry_run_reviews', 'h2a_dry_run_review_events']
-const batchTables = ['h2a_review_recheck_batches', 'h2a_live_review_conflicts', 'h2a_review_create_batches']
+const batchTables = ['h2a_review_recheck_batches', 'h2a_live_review_conflicts', 'h2a_review_create_batches', 'h2a_review_outbox', 'h2a_review_outbox_workers']
 const resolutionTables = ['h2a_dry_run_review_resolutions', 'h2a_dry_run_review_resolution_events', 'h2a_contact_organization_choices']
 const readSchema = () => readFileSync(schemaUrl, 'utf8').replace(/--[^\n]*/g, '').toLowerCase()
 const readSampleMigration = () => readFileSync(sampleMigrationUrl, 'utf8').replace(/--[^\n]*/g, '').toLowerCase()
@@ -653,7 +653,7 @@ test('live review workspace migration exists and is mirrored in h2a-schema.sql',
   const schema = readSchema()
   for (const sql of [migration, schema]) {
     assert.match(sql, /add column if not exists review_kind text not null default 'sample' check \(review_kind in \('sample', 'live'\)\)/)
-    assert.match(sql, /add column if not exists triage_bucket text not null default 'decision'\s+check \(triage_bucket in \('quick', 'todo', 'decision', 'blocked', 'done'\)\)/)
+    assert.match(sql, /add column if not exists triage_bucket text not null default 'decision'\s+check \(triage_bucket in \('quick', 'todo', 'decision', 'blocked', 'done'(?:, 'outbox')?\)\)/)
     assert.match(sql, /add column if not exists triage_details jsonb not null default '\{\}'::jsonb\s+check \(jsonb_typeof\(triage_details\) = 'object'\)/)
     assert.match(sql, /create or replace function public\.h2a_block_run_delete_with_open_live_reviews\(\)/)
     assert.match(sql, /create trigger h2a_block_run_delete_with_open_live_reviews\s+before delete on public\.h2a_sync_runs/)
@@ -793,5 +793,25 @@ test('create batches are service-only, bounded, and one active per company', () 
     assert.match(source, /create unique index (?:if not exists )?h2a_review_create_batches_one_active_idx\s+on public\.h2a_review_create_batches \(company_id\)\s+where status in \('queued', 'running'\)/)
     assert.match(source, /alter table public\.h2a_review_create_batches enable row level security;/)
     assert.match(source, /revoke all on table public\.h2a_review_create_batches from public, anon, authenticated, service_role;/)
+  }
+})
+
+test('the review outbox is service-only, one open action per record, one worker per company', () => {
+  const sql = readFileSync(new URL('../supabase/h2a-review-outbox.sql', import.meta.url), 'utf8').replace(/--[^\n]*/g, '').toLowerCase()
+  for (const source of [sql, readSchema()]) {
+    assert.match(source, /create table (?:if not exists )?public\.h2a_review_outbox \(/)
+    assert.match(source, /status text not null default 'queued' check \(status in \('queued', 'sending', 'sent', 'failed', 'cancelled'\)\)/)
+    assert.match(source, /create unique index (?:if not exists )?h2a_review_outbox_one_open_idx\s+on public\.h2a_review_outbox \(company_id, review_id\) where status in \('queued', 'sending', 'failed'\)/)
+    assert.match(source, /create table (?:if not exists )?public\.h2a_review_outbox_workers \(/)
+    for (const table of ['h2a_review_outbox', 'h2a_review_outbox_workers']) {
+      assert.match(source, new RegExp(`alter table public\\.${table} enable row level security;`))
+      assert.match(source, new RegExp(`revoke all on table public\\.${table} from public, anon, authenticated, service_role;`))
+    }
+    for (const fn of ['h2a_claim_review_outbox_worker\\(uuid, uuid, integer\\)', 'h2a_claim_review_outbox_item\\(uuid, integer\\)']) {
+      assert.match(source, new RegExp(`revoke all on function public\\.${fn} from public, anon, authenticated;`))
+      assert.match(source, new RegExp(`grant execute on function public\\.${fn} to service_role;`))
+    }
+    assert.match(source, /function public\.h2a_claim_review_outbox_item[\s\S]*?security definer set search_path = ''[\s\S]*?pg_advisory_xact_lock/)
+    assert.match(source, /triage_bucket in \('quick', 'todo', 'decision', 'blocked', 'done', 'outbox'\)/)
   }
 })

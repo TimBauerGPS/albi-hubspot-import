@@ -20,6 +20,16 @@ async function dispatchBackground(payload, options) {
   return response.status === 202 || response.ok
 }
 
+async function dispatchOutboxWorker(payload, options) {
+  const base = options.siteUrl ?? process.env.URL
+  const secret = options.internalCronSecret ?? process.env.INTERNAL_CRON_SECRET
+  if (!base || !secret) throw new Error('dispatch_not_configured')
+  const url = new URL('/.netlify/functions/h2a-review-outbox-background', base)
+  const response = await (options.fetch ?? fetch)(url.toString(), { method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Internal-Cron-Secret': secret }, body: JSON.stringify(payload) })
+  if (!(response.status === 202 || response.ok)) throw new Error('dispatch_failed')
+}
+
 function checked(result) {
   if (result?.error) throw new Error('scheduler_query_failed')
   return result?.data
@@ -122,6 +132,19 @@ export function createNightlyScheduler(options = {}) {
       } catch {
         results.push({ companyId, kind: 'daily', status: 'failed' })
       }
+    }
+    // An outbox left waiting (its worker stopped, or a pause outlasted it) gets a worker each hour.
+    const listOutbox = options.listOutboxCompanies ?? (typeof repository.listCompaniesWithDueOutbox === 'function'
+      ? () => repository.listCompaniesWithDueOutbox(instant.toISOString()) : null)
+    if (listOutbox) {
+      try {
+        for (const companyId of await listOutbox()) {
+          try {
+            await (options.dispatchOutbox ?? (payload => dispatchOutboxWorker(payload, options)))({ companyId })
+            results.push({ companyId, kind: 'outbox', status: 'dispatched' })
+          } catch { results.push({ companyId, kind: 'outbox', status: 'retryable' }) }
+        }
+      } catch { results.push({ kind: 'outbox', status: 'list_failed' }) }
     }
     return { statusCode: 200, body: JSON.stringify({ status: 'ok', businessDate: due.businessDate, results }) }
   }

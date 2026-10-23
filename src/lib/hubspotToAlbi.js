@@ -326,6 +326,34 @@ export function createH2AOrganizationThenContact(session, companyId, input, { si
       'organizationReviewId', 'organizationExpectedUpdatedAt']) }, signal })
 }
 
+// The review outbox: one workspace action is queued and sent to Albi in the background at a steady pace.
+// Takes the same fields as resolveH2ADryRunReview / createH2AOrganizationThenContact (op 'create_with_organization').
+export function queueH2AOutbox(session, companyId, input = {}, { signal } = {}) {
+  const { op, organizationReviewId, organizationExpectedUpdatedAt, ...rest } = input ?? {}
+  let item
+  if (op === 'create_with_organization') {
+    const { reviewId, expectedUpdatedAt, clientRequestId, referralSourceId } = rest
+    item = { reviewId, expectedUpdatedAt, clientRequestId,
+      action: withoutNullish({ kind: 'create_with_organization', referralSourceId, organizationReviewId, organizationExpectedUpdatedAt }) }
+  } else {
+    const { reviewId, expectedUpdatedAt, clientRequestId, ...decision } = buildResolutionRequest(rest)
+    item = { reviewId, expectedUpdatedAt, clientRequestId, action: { kind: 'resolution', decision } }
+  }
+  return request(session, 'h2a-review-outbox', { method: 'POST', companyId: resolutionCompany(companyId), body: { op: 'enqueue', items: [item] }, signal })
+}
+
+export function getH2AOutbox(session, companyId, kind = 'live', { signal } = {}) {
+  return request(session, 'h2a-review-outbox', { companyId, query: { kind: kind === 'sample' ? 'sample' : 'live' }, signal })
+}
+
+export function retryH2AOutbox(session, companyId, ids, { signal } = {}) {
+  return request(session, 'h2a-review-outbox', { method: 'POST', companyId: resolutionCompany(companyId), body: { op: 'retry', ids }, signal })
+}
+
+export function returnH2AOutbox(session, companyId, ids, { signal } = {}) {
+  return request(session, 'h2a-review-outbox', { method: 'POST', companyId: resolutionCompany(companyId), body: { op: 'return', ids }, signal })
+}
+
 // Skip on a live row: an audited resolution that marks every linked conflict skipped.
 export function skipH2ALiveReview(session, companyId, { reviewId, expectedUpdatedAt, clientRequestId } = {}, { signal } = {}) {
   return resolveH2ADryRunReview(session, companyId, { reviewId, expectedUpdatedAt, clientRequestId, action: 'skip_live' }, { signal })

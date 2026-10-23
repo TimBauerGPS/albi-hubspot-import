@@ -361,8 +361,8 @@ test('org-first create is enabled once a source from orgFirstCreate is chosen', 
 
 // ---- Task 14: workspace, queue, Albi to-do, bulk and pages ----
 
-const CLIENTS = ['getH2ACreateBatch', 'startH2ACreateBatch', 'getH2AReviews', 'getH2ADryRunReview', 'recheckH2ADryRunReview', 'resolveH2ADryRunReview', 'bulkLinkH2AReviews',
-  'createH2AOrganizationThenContact', 'skipH2ALiveReview', 'startH2ARecheckAll', 'getH2ARecheckAll', 'prepareH2AOrganizationReview',
+const CLIENTS = ['getH2ACreateBatch', 'startH2ACreateBatch', 'getH2AReviews', 'getH2ADryRunReview', 'recheckH2ADryRunReview', 'queueH2AOutbox', 'bulkLinkH2AReviews',
+  'createH2AOrganizationThenContact', 'queueH2AOutbox', 'startH2ARecheckAll', 'getH2ARecheckAll', 'prepareH2AOrganizationReview',
   'prepareH2AMergedSurvivorReview', 'getH2AConflicts', 'getH2AOverview', 'prepareH2ALiveReviews']
 function clients(overrides, calls, defaults) {
   return Object.fromEntries(CLIENTS.map(name => [name, (...args) => {
@@ -462,10 +462,10 @@ test('bulk link sends chunks of 25 and recheck selected queues one batch for tho
 })
 
 test('409 on deferred send returns the record with the changed message', async () => {
-  const ui = await mountWorkspace({ resolveH2ADryRunReview: () => Promise.reject(Object.assign(new Error('Changed'), { status: 409 })) })
+  const ui = await mountWorkspace({ queueH2AOutbox: () => Promise.reject(Object.assign(new Error('Changed'), { status: 409 })) })
   assert.equal(ui.record().props.item.id, 'review-1')
   ui.record().props.onAccept(candidate, { emailMatch: true }); await ui.flush()
-  assert.equal(ui.calls.filter(call => call.name === 'resolveH2ADryRunReview').length, 0, 'nothing is sent inside the undo window')
+  assert.equal(ui.calls.filter(call => call.name === 'queueH2AOutbox').length, 0, 'nothing is sent inside the undo window')
   assert.match(ui.text(), /Linking Name review-1 → Albi Jane Doe/); assert.match(ui.text(), /Undo/); assert.match(ui.text(), /Send now/)
   assert.equal(ui.record().props.item.id, 'review-2', 'auto-advances to the next record')
   assert.ok(ui.queue().props.pendingIds.has('review-1'))
@@ -476,7 +476,7 @@ test('409 on deferred send returns the record with the changed message', async (
   assert.equal(ui.record().props.item.id, 'review-1')
   assert.equal(ui.record().props.pending, true)
   await ui.tick(); await ui.flush()
-  const sent = ui.calls.filter(call => call.name === 'resolveH2ADryRunReview')
+  const sent = ui.calls.filter(call => call.name === 'queueH2AOutbox')
   assert.equal(sent.length, 1)
   assert.deepEqual({ ...sent[0].args[2] }, { reviewId: 'review-1', expectedUpdatedAt: detailOf('review-1').updatedAt,
     clientRequestId: sent[0].args[2].clientRequestId, action: 'link_existing', candidateId: '456', approveManyToOne: false, ignoreContactDifferences: true })
@@ -495,11 +495,11 @@ test('undo cancels a deferred action before anything is written; unmount flushes
   assert.match(ui.text(), /Nothing was written/)
   assert.equal(ui.record().props.item.id, 'review-1')
   await ui.tick()
-  assert.equal(ui.calls.filter(call => call.name === 'resolveH2ADryRunReview').length, 0)
+  assert.equal(ui.calls.filter(call => call.name === 'queueH2AOutbox').length, 0)
   ui.record().props.onCreate({ referralSourceId: '9' }); await ui.flush()
   assert.ok(ui.listeners.beforeunload?.size, 'beforeunload guard while pending')
   ui.unmount(); await ui.flush()
-  const sent = ui.calls.filter(call => call.name === 'resolveH2ADryRunReview')
+  const sent = ui.calls.filter(call => call.name === 'queueH2AOutbox')
   assert.equal(sent.length, 1); assert.equal(sent[0].args[2].action, 'create_albi'); assert.equal(sent[0].args[2].referralSourceId, '9')
 })
 
@@ -509,27 +509,28 @@ test('risky actions open a dialog and send immediately on confirm', async () => 
   assert.ok(ui.nodes().find(node => node.props?.role === 'dialog'))
   assert.match(ui.text(), /may create a duplicate/)
   ui.find('button', 'Create separate record').props.onClick(); await ui.flush()
-  const sent = ui.calls.filter(call => call.name === 'resolveH2ADryRunReview')
+  const sent = ui.calls.filter(call => call.name === 'queueH2AOutbox')
   assert.equal(sent.length, 1); assert.equal(sent[0].args[2].action, 'force_create_albi')
   assert.doesNotMatch(ui.text(), /Send now/)
   // The many-to-one dialog inside the record already confirmed; the link is sent at once with approval.
   ui.record().props.onLink(candidate, { approveManyToOne: true }); await ui.flush()
-  const link = ui.calls.filter(call => call.name === 'resolveH2ADryRunReview').at(-1).args[2]
+  const link = ui.calls.filter(call => call.name === 'queueH2AOutbox').at(-1).args[2]
   assert.equal(link.action, 'link_existing'); assert.equal(link.approveManyToOne, true)
   ui.unmount()
 })
 
-test('org-first contact error is shown on the record beside a created organization, never as success', async () => {
+test('creating an organization and its contact is queued in the Outbox as one action', async () => {
   const ui = await mountWorkspace({ getH2ADryRunReview: (_s, _c, id) => Promise.resolve({ item: detailOf(id, id === 'review-1'
     ? { orgFirstCreate: { eligible: true, organizationReviewId: 'org-review', organizationName: 'Acme' } } : {}) }),
-  createH2AOrganizationThenContact: () => Promise.resolve({ organization: { resolution: { status: 'completed' } }, contact: { error: 'Albi rejected the contact.', status: 409 } }) })
+  queueH2AOutbox: () => Promise.resolve({ items: [{ id: 'o1', reviewId: 'review-1', status: 'queued' }] }) })
   ui.record().props.onCreateWithOrganization({ referralSourceId: '9' }); await ui.flush()
   assert.match(ui.text(), /Creating organization Acme, then Name review-1/)
   await ui.tick(); await ui.flush(); await ui.flush()
-  const sent = ui.calls.find(call => call.name === 'createH2AOrganizationThenContact').args[2]
+  const sent = ui.calls.find(call => call.name === 'queueH2AOutbox').args[2]
+  assert.equal(sent.op, 'create_with_organization')
   assert.equal(sent.referralSourceId, '9'); assert.equal(sent.organizationReviewId, 'org-review'); assert.ok(sent.organizationExpectedUpdatedAt)
-  assert.match(ui.queue().props.errors['review-1'], /organization was created/i)
-  assert.match(ui.queue().props.errors['review-1'], /Albi rejected the contact\./)
+  // Queued: the record leaves this tab for the Outbox, where a failed contact step would be shown and retried.
+  assert.equal(ui.queue().props.items.some(item => item.id === 'review-1'), false)
   ui.unmount()
 })
 
@@ -614,7 +615,7 @@ test('after a StrictMode double mount, deferred sends still apply their result a
   let reject = true
   const moved = new Set()
   const ui = await mountWorkspace({
-    resolveH2ADryRunReview: (_s, _c, input) => { if (reject) return Promise.reject(Object.assign(new Error('Changed'), { status: 409 })); moved.add(input.reviewId); return Promise.resolve({}) },
+    queueH2AOutbox: (_s, _c, input) => { if (reject) return Promise.reject(Object.assign(new Error('Changed'), { status: 409 })); moved.add(input.reviewId); return Promise.resolve({}) },
     getH2ADryRunReview: (_s, _c, id) => Promise.resolve({ item: detailOf(id, moved.has(id) ? { triageBucket: 'done' } : {}) }),
   })
   await ui.strictRemount()
@@ -721,7 +722,7 @@ test('the confirm dialog starts focused on Confirm so Enter confirms; Enter else
   assert.ok(confirm.props.ref, 'Confirm holds the initial-focus ref')
   assert.ok(!ui.all('button').some(node => textOf(node).startsWith('Cancel') && node.props.ref), 'Cancel is not the initial focus')
   press(ui, 'Enter'); await ui.flush()
-  const sent = ui.calls.filter(call => call.name === 'resolveH2ADryRunReview')
+  const sent = ui.calls.filter(call => call.name === 'queueH2AOutbox')
   assert.equal(sent.length, 1); assert.equal(sent[0].args[2].action, 'force_create_albi')
   assert.equal(ui.nodes().find(node => node.props?.role === 'dialog'), undefined)
   ui.unmount()
@@ -771,7 +772,7 @@ test('workspace dialogs trap focus, close on Escape, and writes carry the audit 
   assert.match(many, /approveManyToOne|Approve/)
 })
 
-const sentResolutions = ui => ui.calls.filter(call => call.name === 'resolveH2ADryRunReview').map(call => call.args[2])
+const sentResolutions = ui => ui.calls.filter(call => call.name === 'queueH2AOutbox').map(call => call.args[2])
 
 test('HubSpot field writes are dialog-gated: nothing is sent until confirmed, then exactly once', async () => {
   const ui = await mountWorkspace()
@@ -803,7 +804,7 @@ test('adding a HubSpot association is dialog-gated: nothing is sent until confir
 
 test('retrying a failed send of the same decision reuses its clientRequestId', async () => {
   let attempt = 0
-  const ui = await mountWorkspace({ resolveH2ADryRunReview: () => (++attempt === 1 ? Promise.reject(new Error('Network down')) : Promise.resolve({ item: null })) })
+  const ui = await mountWorkspace({ queueH2AOutbox: () => (++attempt === 1 ? Promise.reject(new Error('Network down')) : Promise.resolve({ item: null })) })
   ui.record().props.onCreate({ referralSourceId: '9' }); await ui.flush()
   await ui.tick(); await ui.flush()
   assert.equal(sentResolutions(ui).length, 1)
@@ -851,7 +852,7 @@ test('ignoring differences asks once, listing the fields, then links', async () 
   assert.ok(ui.nodes().find(node => node.props?.role === 'dialog'))
   assert.match(ui.text(), /City/); assert.match(ui.text(), /Job title/)
   ui.find('button', 'Link and ignore').props.onClick(); await ui.flush()
-  const sent = ui.calls.filter(call => call.name === 'resolveH2ADryRunReview').at(-1).args[2]
+  const sent = ui.calls.filter(call => call.name === 'queueH2AOutbox').at(-1).args[2]
   assert.equal(sent.action, 'link_existing'); assert.deepEqual(j(sent.ignoredFields), ['city', 'jobTitle']); assert.equal(sent.candidateId, '456')
   ui.unmount()
 })

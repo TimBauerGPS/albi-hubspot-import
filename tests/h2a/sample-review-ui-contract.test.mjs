@@ -29,8 +29,8 @@ const metaOf = ui => ui.metas.at(-1) ?? null
 // Exercise the real workspace JSX and request handlers. Only React's scheduling, child components and the HTTP boundary are substituted.
 async function mount(overrides = {}) {
   const calls = [], completed = [], metas = []
-  const bound = Object.fromEntries(['getH2AReviews', 'getH2ADryRunReview', 'recheckH2ADryRunReview', 'resolveH2ADryRunReview', 'prepareH2AOrganizationReview', 'prepareH2AMergedSurvivorReview',
-    'getH2ARecheckAll', 'startH2ARecheckAll', 'bulkLinkH2AReviews', 'createH2AOrganizationThenContact', 'skipH2ALiveReview'].map(name => [name, (...args) => {
+  const bound = Object.fromEntries(['getH2AReviews', 'getH2ADryRunReview', 'recheckH2ADryRunReview', 'queueH2AOutbox', 'prepareH2AOrganizationReview', 'prepareH2AMergedSurvivorReview',
+    'getH2ARecheckAll', 'startH2ARecheckAll', 'bulkLinkH2AReviews', 'createH2AOrganizationThenContact', 'queueH2AOutbox'].map(name => [name, (...args) => {
     calls.push({ name, args })
     const override = overrides[name]
     if (override) return override(...args)
@@ -519,7 +519,7 @@ test('reviewing a merge survivor captures its review once and selects it', async
 
 test('a link or create is not followed by an automatic recheck (Recheck all settles them in one Albi read)', async () => {
   const flush = async ui => { for (let i = 0; i < 6; i++) await ui.flush() }
-  const ui = await mount({ resolveH2ADryRunReview: () => Promise.resolve({ resolution: { status: 'ready_to_recheck' } }) })
+  const ui = await mount({ queueH2AOutbox: () => Promise.resolve({ resolution: { status: 'ready_to_recheck' } }) })
   await ui.detail().props.onLink({ id: 'albi-1' }, { approveManyToOne: true }); await flush(ui)
   assert.equal(ui.calls.filter(call => call.name === 'recheckH2ADryRunReview').length, 0)
   assert.doesNotMatch(ui.text(), /automatic recheck/i)
@@ -532,7 +532,7 @@ test('an action the gateway timed out reloads the record until the server has sa
   const ui = await mount({ props: { recheckReloadMs: 1 },
     getH2ADryRunReview: (_s, _c, id) => Promise.resolve({ item: { ...full(id),
       ...(++details > 3 ? { resolution: { id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', status: 'ready_to_recheck' } } : {}) } }),
-    resolveH2ADryRunReview: () => Promise.reject(Object.assign(new Error('This took too long to answer, but it may still finish. Wait a moment, then reload the record.'),
+    queueH2AOutbox: () => Promise.reject(Object.assign(new Error('This took too long to answer, but it may still finish. Wait a moment, then reload the record.'),
       { status: 504, timedOut: true })) })
   await ui.detail().props.onLink({ id: 'albi-1' }, { approveManyToOne: true })
   for (let i = 0; i < 8; i++) await ui.flush()

@@ -19,7 +19,7 @@ function reviewRepositoryFixture(responses = []) {
       const call = { table, steps: [] }
       calls.push(call)
       const query = {}
-      for (const method of ['select', 'eq', 'neq', 'in', 'gt', 'lt', 'order', 'limit', 'range', 'or', 'insert', 'update', 'delete']) {
+      for (const method of ['select', 'eq', 'neq', 'in', 'gt', 'lt', 'lte', 'order', 'limit', 'range', 'or', 'insert', 'update', 'delete']) {
         query[method] = (...args) => { call.steps.push([method, ...args]); return query }
       }
       const finish = () => {
@@ -1108,10 +1108,10 @@ test('recheck batch writes reject unknown statuses, error codes and malformed co
 })
 
 test('listDryRunReviews filters by kind and bucket and returns bucketCounts', async () => {
-  const counts = [3, 1, 4, 0, 2].map(count => ({ count, error: null }))
+  const counts = [3, 1, 4, 0, 2, 5].map(count => ({ count, error: null }))
   const { repository, calls } = reviewRepositoryFixture([data([reviewRow]), ...counts])
   const result = await repository.listDryRunReviews('company-1', 'sample-2', { kind: 'live', bucket: 'quick', includeCounts: true })
-  assert.deepEqual(result.bucketCounts, { quick: 3, todo: 1, decision: 4, blocked: 0, done: 2 })
+  assert.deepEqual(result.bucketCounts, { quick: 3, todo: 1, decision: 4, blocked: 0, done: 2, outbox: 5 })
   assert.deepEqual(equalityFilters(calls[0]), [['company_id', 'company-1'], ['run_id', 'sample-2'],
     ['review_kind', 'live'], ['triage_bucket', 'quick']])
   for (const call of calls.slice(1)) {
@@ -1122,7 +1122,7 @@ test('listDryRunReviews filters by kind and bucket and returns bucketCounts', as
 })
 
 test('the live list (no run scope) is filtered to the configured portal, list and counts alike', async () => {
-  const counts = [0, 0, 1, 0, 0].map(count => ({ count, error: null }))
+  const counts = [0, 0, 1, 0, 0, 0].map(count => ({ count, error: null }))
   const { repository, calls } = reviewRepositoryFixture([data([reviewRow]), ...counts])
   await repository.listDryRunReviews('company-1', null, { kind: 'live', portalId: '123', includeCounts: true })
   assert.deepEqual(equalityFilters(calls[0]), [['company_id', 'company-1'], ['portal_id', '123'], ['review_kind', 'live']])
@@ -1205,4 +1205,25 @@ test('sales-team default referral sources are read by HubSpot email; conflicting
   assert.deepEqual(await repository.getSalesTeamReferralDefaults('company-1'), { 'victoria@allied.test': '6' })
   assert.equal(calls[0].table, 'hs_user_config')
   assert.deepEqual(equalityFilters(calls[0]), [['company_id', 'company-1']])
+})
+
+test('the outbox queues new actions, keeps a record’s open action, and fences claims and finishes', async () => {
+  const id = n => `00000000-0000-4000-8000-0000000000${String(n).padStart(2, '0')}`
+  const open = { id: id(10), company_id: 'company-1', review_id: id(1), status: 'failed' }
+  const inserted = { id: id(11), company_id: 'company-1', review_id: id(2), status: 'queued' }
+  const { repository, calls, rpcCalls } = reviewRepositoryFixture([data([open]), data(inserted), data(true), data([{ ...inserted, status: 'sending' }]), data([{ id: id(11) }])])
+  const action = { kind: 'resolution', decision: { action: 'create_albi', referralSourceId: '5' } }
+  const rows = await repository.enqueueOutboxItems('company-1', [
+    { reviewId: id(1), reviewKind: 'live', expectedUpdatedAt: REVIEW_TIME, clientRequestId: id(21), action },
+    { reviewId: id(2), reviewKind: 'live', expectedUpdatedAt: REVIEW_TIME, clientRequestId: id(22), action }], { actorId: ACTOR_ID, now: REVIEW_TIME })
+  assert.deepEqual(rows.map(row => [row.row.id, row.queued]), [[id(10), false], [id(11), true]])
+  assert.equal(calls[1].steps.find(step => step[0] === 'insert')[1].requested_by, ACTOR_ID)
+  assert.equal(await repository.claimOutboxWorker('company-1', id(30), 900), true)
+  assert.equal(rpcCalls[0].name, 'h2a_claim_review_outbox_worker')
+  assert.equal((await repository.claimOutboxItem('company-1', 300)).status, 'sending')
+  assert.equal(rpcCalls[1].name, 'h2a_claim_review_outbox_item')
+  assert.equal(await repository.finishOutboxItem('company-1', id(11), { status: 'failed', errorCode: 'albi_busy', errorDetail: { category: 'rate_limit' } }), true)
+  const finish = calls.at(-1)
+  assert.deepEqual(equalityFilters(finish), [['company_id', 'company-1'], ['id', id(11)], ['status', 'sending']])
+  await assert.rejects(repository.finishOutboxItem('company-1', id(11), { status: 'sent', errorCode: 'Bad Code' }), TypeError)
 })
