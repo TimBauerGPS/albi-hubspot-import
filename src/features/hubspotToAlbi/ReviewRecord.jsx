@@ -47,6 +47,18 @@ function withEvidence(copy, evidence) {
   return `${copy} Stopped at: ${EVIDENCE_STEPS[evidence.step]}${extra ? ` (${extra})` : ''}.`
 }
 
+// Plain words for a failed attempt: what was tried, why it failed, and what to do.
+function failureNote(action, details = {}) {
+  const what = ['create_albi', 'force_create_albi'].includes(action) ? 'create' : action === 'link_existing' ? 'link' : 'change'
+  const nothing = what === 'create' ? ' Nothing was created.' : what === 'link' ? ' Nothing was linked.' : ''
+  const detail = details?.category === 'rate_limit' ? `Albi was busy (too many requests at once).${nothing} Try again.`
+    : details?.staleCheck === 'candidates' ? `A possible match appeared in Albi since this record was checked.${nothing} Review the matches, then link or create.`
+      : details?.code === 'malformed_response' ? 'Albi’s reply couldn’t be read, so it may have gone through. Trying again checks Albi first, so nothing is duplicated.'
+        : details?.staleCheck ? `This record changed since it was checked.${nothing} Recheck it, then try again.`
+          : `Something went wrong on the way to Albi.${nothing} Try again.`
+  return { title: `The last ${what} didn’t go through`, detail }
+}
+
 export default function ReviewRecord({
   item, kind = 'sample', candidateIndex = 0, onPickCandidate, referralSourceId: chosenReferralSourceId = '', onReferral, referralRef,
   pending = false, busy = false, readOnly = false,
@@ -167,6 +179,8 @@ export default function ReviewRecord({
       {gate?.reviewId ? 'Open organization review' : 'Prepare organization review'}</button></div>
 
   const events = resolution?.events ?? []
+  // The last attempt failed: say so (and why) instead of the record just reappearing.
+  const failedNote = resolution?.status === 'failed' ? failureNote(resolution.action, [...events].reverse().find(event => event.eventType === 'failed')) : null
   const manualTasks = resolution?.status === 'waiting_on_albi' ? [...events].reverse().find(event => event.manualTasks?.length)?.manualTasks ?? [] : []
   const hubspotOrgs = review.objectType === 'contacts' && item?.hubspotOrganizations !== undefined
     ? Array.isArray(item.hubspotOrganizations)
@@ -215,6 +229,8 @@ export default function ReviewRecord({
       {orgFirst && canAct && <p className="rounded-lg border border-brand-200 bg-brand-50 px-3 py-2 text-sm text-gray-800">
         {item.orgFirstCreate.organizationName ? `${item.orgFirstCreate.organizationName} is not in Albi yet. ` : 'This contact’s HubSpot organization is not in Albi yet. '}
         Choose a referral source to create the organization and the contact together.</p>}
+      {failedNote && !finished && <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950" role="status">
+        <p className="font-semibold">{failedNote.title}</p><p className="mt-1 text-xs">{failedNote.detail}</p></div>}
       {resolution?.status === 'waiting_on_albi' && <div className="rounded-lg border-2 border-amber-400 bg-amber-50 p-3 text-sm">
         <p className="font-semibold text-amber-950">Update this {objectLabel} in Albi</p>
         {manualTasks.length === 0 && <p className="mt-1 text-xs text-amber-900">Albi needs a manual change. Make it in Albi, then recheck this record.</p>}

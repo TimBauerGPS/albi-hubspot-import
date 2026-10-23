@@ -127,7 +127,8 @@ export function presentReviewResolution(item) {
       return { id: uuid(event.id), actorId: uuid(event.actorId), eventType, label: EVENT_LABELS[eventType] ?? 'Resolution event',
         createdAt: time(event.createdAt), code: OUTCOMES.has(details.code) ? details.code : null,
         category: H2A_REVIEW_ERROR_CATEGORIES.includes(details.category) ? details.category : null,
-        outcome: OUTCOMES.has(details.outcome) ? details.outcome : null, manualTasks: manualTasks(details.manualTasks) }
+        outcome: OUTCOMES.has(details.outcome) ? details.outcome : null, manualTasks: manualTasks(details.manualTasks),
+        staleCheck: typeof details.staleCheck === 'string' && /^[a-z_]{1,30}$/.test(details.staleCheck) ? details.staleCheck : null }
     }) }
 }
 

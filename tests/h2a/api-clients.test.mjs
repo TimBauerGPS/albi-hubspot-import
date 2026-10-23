@@ -583,3 +583,22 @@ test('HubSpot owners carry their email, for matching the sales team', async () =
   const owners = await new HubSpotClient({ token: 'token', fetch: f.fetch }).listOwners()
   assert.deepEqual(owners.map(owner => owner.email), ['victoria@allied.test', ''])
 })
+
+test('a write the server refused as too busy (429) is retried after its delay; a timed-out write never is', async () => {
+  const replies = [new Response('', { status: 429, headers: { 'retry-after': '1' } }), new Response(JSON.stringify({ status: 1, data: 7 }), { status: 200 })]
+  const slept = []
+  const client = createHttpClient({ baseUrl: 'https://albi.example.com', fetch: async () => replies.shift(), sleep: async ms => { slept.push(ms) } })
+  assert.deepEqual(await client('/x', { method: 'POST', body: {}, operation: 'createContact', retryRefused: true }), { status: 1, data: 7 })
+  assert.equal(slept[0] >= 1000, true)
+  let attempts = 0
+  const slow = createHttpClient({ baseUrl: 'https://albi.example.com', timeoutMs: 5, sleep: async () => {},
+    fetch: async () => { attempts++; return new Promise(() => {}) } })
+  await assert.rejects(slow('/x', { method: 'POST', body: {}, operation: 'createContact', retryRefused: true }), { code: 'timeout' })
+  assert.equal(attempts, 1)
+})
+
+test('an Albi create refused as too busy is retried and succeeds', async () => {
+  const f = transport([accessibleCompany, { statusCode: 429, headers: { 'Retry-After': '1' }, body: {} }, { status: 1, data: 55 }])
+  const c = new AlbiClient({ apiKey: 'k', fetch: f.fetch, sleep: async () => {} })
+  assert.deepEqual(await c.createContact({ firstName: 'Costa', lastName: 'Costa', contactTypeIds: [12] }), { id: '55' })
+})

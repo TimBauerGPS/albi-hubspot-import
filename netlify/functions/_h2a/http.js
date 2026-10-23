@@ -73,7 +73,7 @@ export function createHttpClient({ baseUrl, headers = {}, fetch = globalThis.fet
   const retries = Math.max(0, Math.min(3, Number.isInteger(maxRetries) ? maxRetries : 2))
   const delayCap = Math.max(1, Math.min(10000, maxDelayMs))
   const deadline = Math.max(1, Math.min(30000, timeoutMs))
-  return async function request(path, { method = 'GET', body, operation = 'request', retrySafe = method === 'GET', statusOnly = false, timeoutMs: requestTimeoutMs } = {}) {
+  return async function request(path, { method = 'GET', body, operation = 'request', retrySafe = method === 'GET', retryRefused = false, statusOnly = false, timeoutMs: requestTimeoutMs } = {}) {
     // A single slow write may wait longer than reads (an abandoned create leaves its outcome unknown).
     const limit = Number.isFinite(requestTimeoutMs) ? Math.max(1, Math.min(30000, requestTimeoutMs)) : deadline
     const url = new URL(path, baseUrl)
@@ -116,7 +116,10 @@ export function createHttpClient({ baseUrl, headers = {}, fetch = globalThis.fet
       } catch (caught) {
         error = caught instanceof ApiError ? caught : new ApiError('transient', { operation, code: 'network' })
       } finally { clearTimeout(timer) }
-      if (!retrySafe || attempt >= retries || !['transient', 'rate_limit'].includes(error.category)) throw error
+      // A 429 is the server refusing the request outright, so a write that opts in (Albi creates) is safe to send
+      // again; any other failure of a write (a timeout, a lost connection) may have been applied and is never repeated.
+      const refused = retryRefused && error.category === 'rate_limit' && error.status === 429
+      if (!(retrySafe || refused) || attempt >= retries || !['transient', 'rate_limit'].includes(error.category)) throw error
       // A long server delay belongs in the durable job scheduler, never an early retry.
       if (error.retryAfterMs > delayCap) throw error
       const jitter = Math.max(0, Math.min(1, random()))

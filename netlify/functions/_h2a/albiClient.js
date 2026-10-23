@@ -245,7 +245,7 @@ export class AlbiClient {
     let data
     try {
       data = await this.#scopedRequest(await this.#path(resource),
-        { method: 'POST', body: payload, operation, retrySafe: false, timeoutMs: CREATE_TIMEOUT_MS }, SCOPES[operation])
+        { method: 'POST', body: payload, operation, retrySafe: false, retryRefused: true, timeoutMs: CREATE_TIMEOUT_MS }, SCOPES[operation])
     } catch (error) {
       if (error instanceof ApiError && error.providerShape) error.providerShape = `${requestShape(payload)};${error.providerShape}`.slice(0, 240)
       throw error

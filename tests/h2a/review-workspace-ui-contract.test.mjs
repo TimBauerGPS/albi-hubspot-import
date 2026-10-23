@@ -147,6 +147,19 @@ test('an organization mismatch says plainly which organization each side has and
   assert.match(noneInAlbi, /Albi organization:.*None/)
 })
 
+test('a record whose last create was refused says so, and that nothing was created', async () => {
+  const resolution = (details, action = 'create_albi') => ({ id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', reviewId: base.id, runId: base.runId, portalId: '321',
+    objectType: 'contacts', sourceId: '123', action, status: 'failed', decision: { action, referralSourceId: '5' }, providerOutcomeCode: 'operation_failed',
+    events: [{ id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', eventType: 'failed', details, createdAt: '2026-10-23T15:47:43.000Z' }] })
+  const busy = await html({ ...none, resolution: resolution({ code: 'operation_failed', category: 'rate_limit', providerStatus: 429 }) })
+  assert.match(busy, /The last create didn.t go through/); assert.match(busy, /Albi was busy/); assert.match(busy, /Nothing was created/)
+  const match = await html({ ...none, resolution: resolution({ code: 'operation_failed', category: 'error', staleCheck: 'candidates' }) })
+  assert.match(match, /A possible match appeared in Albi/)
+  const linked = await html({ ...none, resolution: resolution({ code: 'operation_failed', category: 'transient' }, 'link_existing') })
+  assert.match(linked, /The last link didn.t go through/)
+  assert.doesNotMatch(await html(none), /didn.t go through/)
+})
+
 test('blocked record shows named blocked copy', async () => {
   const out = await html({ ...none, createReadiness: { ready: false, blockedReason: 'salesperson_not_found' } })
   assert.match(out, /Can’t create yet/); assert.match(out, /exactly match one Albi salesperson/)
