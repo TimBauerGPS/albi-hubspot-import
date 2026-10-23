@@ -305,11 +305,13 @@ export function getH2ACreateBatch(session, companyId, kind = 'sample', { signal 
   return request(session, 'h2a-review-create-batch', { companyId, query: { kind: kind === 'live' ? 'live' : 'sample' }, signal })
 }
 
-// Starts a background batch creating the selected reviewed records in Albi with one referral source.
+// Starts a background batch creating the selected reviewed records in Albi, each with its own default referral
+// source (useRecordDefaults; referralSourceId is then an optional fallback) or one referral source for all.
 export function startH2ACreateBatch(session, companyId, input = {}, { signal } = {}) {
   const items = (Array.isArray(input?.items) ? input.items : []).map(item => pick(item, ['reviewId', 'expectedUpdatedAt']))
   return request(session, 'h2a-review-create-batch', { method: 'POST', companyId,
-    body: { kind: input?.kind === 'live' ? 'live' : 'sample', referralSourceId: input?.referralSourceId, items }, signal })
+    body: { kind: input?.kind === 'live' ? 'live' : 'sample', ...(input?.useRecordDefaults === true ? { useRecordDefaults: true } : {}),
+      ...(input?.referralSourceId ? { referralSourceId: input.referralSourceId } : {}), items }, signal })
 }
 
 export function bulkLinkH2AReviews(session, companyId, items, { signal } = {}) {

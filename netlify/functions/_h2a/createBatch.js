@@ -3,7 +3,8 @@ import { getH2AReviewRowActions } from '../../../shared/h2aReviewReasons.js'
 import { executeReviewResolution } from './reviewResolutionService.js'
 import { H2AReviewError } from './reviewService.js'
 
-// "Create selected": a background batch that creates many reviewed records in Albi with one referral source.
+// "Create selected": a background batch that creates many reviewed records in Albi, each with its own default
+// referral source (its Albi organization's, else its salesperson's) or with one referral source for all.
 // Albi is read once; every record is still checked against that read (which grows with each record created, so
 // two HubSpot records for the same person cannot both be created) by the normal audited create.
 export const MAX_CREATE_BATCH_ITEMS = 50
@@ -81,12 +82,17 @@ export async function runReviewCreateBatch(deps, { companyId, batchId }) {
       // The same checks the record shows (organization linked, owner, type, status), so a skip names its reason.
       let readiness = null
       try { readiness = deps.checkReadiness ? await deps.checkReadiness(row) : { ready: true } } catch { readiness = { ready: false, blockedReason: 'evidence_unavailable' } }
+      // Each record's default comes from the same readiness the record shows; the batch's source is the fallback.
+      const referralSourceId = batch.use_record_defaults === true
+        ? (providerId(readiness?.defaultReferralSourceId) ? readiness.defaultReferralSourceId : batch.referral_source_id ?? null)
+        : batch.referral_source_id
       if (readiness?.ready !== true) record('skipped', readiness?.blockedReason ?? 'not_ready')
+      else if (!providerId(referralSourceId)) record('skipped', 'no_default_referral')
       else {
         try {
           const result = await execute(rowDeps, { companyId, actorId: batch.requested_by, reviewId: item.reviewId,
             expectedUpdatedAt: item.expectedUpdatedAt, clientRequestId: randomUUID(),
-            decision: { action: 'create_albi', referralSourceId: batch.referral_source_id } })
+            decision: { action: 'create_albi', referralSourceId } })
           const status = result?.resolution?.status
           if (['ready_to_recheck', 'completed', 'waiting_on_albi'].includes(status)) record('created')
           else record('failed', 'create_failed')

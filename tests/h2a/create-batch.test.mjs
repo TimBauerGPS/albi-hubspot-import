@@ -9,7 +9,7 @@ const row = (id, objectType = 'contacts', extra = {}) => ({ id, object_type: obj
 
 function fixture({ rows, items, outcomes = {}, ...extra } = {}) {
   const calls = [], counts = [], finished = []
-  const batch = { id: 'batch-1', company_id: 'c', review_kind: 'sample', requested_by: 'actor', referral_source_id: '5',
+  const batch = { id: 'batch-1', company_id: 'c', review_kind: 'sample', requested_by: 'actor', referral_source_id: '5', ...extra.batch,
     items: items ?? rows.map(item => ({ reviewId: item.id, expectedUpdatedAt: item.updated_at })) }
   const byId = new Map(rows.map(item => [item.id, item]))
   const deps = {
@@ -79,4 +79,17 @@ test('each record is checked first; blocked ones are skipped with their reason a
     { reviewId: 'ok', outcome: 'created' },
     { reviewId: 'noorg', outcome: 'skipped', reason: 'organization_not_synced' },
     { reviewId: 'changed', outcome: 'skipped', reason: 'changed' }])
+})
+
+test('with record defaults each record uses its own default, then the fallback, and one without either is skipped', async () => {
+  const rows = [row('org'), row('rep'), row('none')]
+  const readiness = { org: { ready: true, defaultReferralSourceId: '7', defaultReferralFrom: 'organization' },
+    rep: { ready: true, defaultReferralSourceId: '8', defaultReferralFrom: 'salesperson' }, none: { ready: true } }
+  const f = fixture({ rows, readiness, batch: { use_record_defaults: true, referral_source_id: null } })
+  await runReviewCreateBatch(f.deps, { companyId: 'c', batchId: 'batch-1' })
+  assert.deepEqual(f.calls.filter(Array.isArray).map(call => [call[1], call[2].referralSourceId]), [['org', '7'], ['rep', '8']])
+  assert.deepEqual(f.finished.at(-1).results.find(result => result.reviewId === 'none'), { reviewId: 'none', outcome: 'skipped', reason: 'no_default_referral' })
+  const withFallback = fixture({ rows, readiness, batch: { use_record_defaults: true, referral_source_id: '5' } })
+  await runReviewCreateBatch(withFallback.deps, { companyId: 'c', batchId: 'batch-1' })
+  assert.deepEqual(withFallback.calls.filter(Array.isArray).map(call => call[2].referralSourceId), ['7', '8', '5'])
 })

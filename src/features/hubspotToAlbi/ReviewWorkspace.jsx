@@ -20,9 +20,12 @@ const CREATE_SKIP_COPY = {
   not_creatable: 'It can’t be created from Quick wins. Open it to see why.',
   not_found: 'It could not be found.',
   not_ready: 'Its create checks did not pass. Open it to see why.',
+  no_default_referral: 'It has no default referral source. Open it to choose one.',
   create_failed: 'Albi did not confirm the create. Open it to check.',
   error: 'Creating it failed. Open it and try again.',
 }
+// The Create selected dialog's first choice: each record's own default referral source.
+const RECORD_DEFAULTS = 'record-defaults'
 const createSkipCopy = code => blockedReasonCopy(code) ?? CREATE_SKIP_COPY[code] ?? CREATE_SKIP_COPY.not_ready
 
 const UNDO_MS = 5000
@@ -755,7 +758,8 @@ export default function ReviewWorkspace({
       if (same(startedFor)) setBulk(null)
     }
   }
-  // Create selected: ticked Quick-wins rows that are plain creates (no Albi match). One referral source for all;
+  // Create selected: ticked Quick-wins rows that are plain creates (no Albi match). Each uses the referral source it
+  // would default to on its own (its organization's in Albi, else its salesperson's), unless one is chosen for all;
   // a background batch reads Albi once and runs the normal checked create for each.
   const createEligible = view === 'quick' ? items.filter(item => item.triageBucket === 'quick' && item.triageDetails?.quickKind === 'create' && !pendingSet.has(item.id)) : []
   // Like bulk link: the ticked no-match rows, or every one in Quick wins when none are ticked.
@@ -769,7 +773,7 @@ export default function ReviewWorkspace({
       if (!same(startedFor)) return
       const sources = list(loaded?.referralSources).filter(source => typeof source?.id === 'string' && typeof source?.label === 'string')
       if (!sources.length) { setActionError('Albi’s referral sources could not be loaded. Try again.'); return }
-      setCreateDialog({ targets, sources, referralSourceId: '' })
+      setCreateDialog({ targets, sources, referralSourceId: RECORD_DEFAULTS, fallbackId: '' })
     } catch (cause) { if (same(startedFor)) setActionError(cause.message) }
   }
   async function pollCreateBatch(startedFor, names = new Map()) {
@@ -799,7 +803,9 @@ export default function ReviewWorkspace({
     setCreateDialog(null)
     const startedFor = tenantKey
     try {
-      const result = await startH2ACreateBatch(session, companyId, { kind, referralSourceId: current.referralSourceId,
+      const defaults = current.referralSourceId === RECORD_DEFAULTS
+      const result = await startH2ACreateBatch(session, companyId, { kind,
+        ...(defaults ? { useRecordDefaults: true, ...(current.fallbackId ? { referralSourceId: current.fallbackId } : {}) } : { referralSourceId: current.referralSourceId }),
         items: current.targets.map(item => ({ reviewId: item.id, expectedUpdatedAt: item.updatedAt })) })
       if (!same(startedFor)) return
       setChecked(new Set())
@@ -971,11 +977,16 @@ export default function ReviewWorkspace({
         <h3 className="text-lg font-semibold text-gray-900">{`Create ${plural(createDialog.targets.length, 'new record')} in Albi?`}</h3>
         <ul className="mt-3 space-y-1 text-sm text-gray-700">{createDialog.targets.slice(0, 8).map(item => <li key={item.id}>{nameOf(item)}</li>)}
           {createDialog.targets.length > 8 && <li>{`…and ${createDialog.targets.length - 8} more`}</li>}</ul>
-        <label className="mt-4 block text-xs font-medium text-gray-700">Referral source for all of them
+        <label className="mt-4 block text-xs font-medium text-gray-700">Referral source
           <select aria-label="Referral source" value={createDialog.referralSourceId} onChange={event => { const value = event.target.value; setCreateDialog(current => current ? { ...current, referralSourceId: value } : current) }}
             className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900">
-            <option value="">Referral source…</option>
-            {createDialog.sources.map(source => <option key={source.id} value={source.id}>{source.label}</option>)}</select></label>
+            <option value={RECORD_DEFAULTS}>Each record’s default (its organization’s, else its salesperson’s)</option>
+            {createDialog.sources.map(source => <option key={source.id} value={source.id}>{`${source.label} for all`}</option>)}</select></label>
+        {createDialog.referralSourceId === RECORD_DEFAULTS && <label className="mt-3 block text-xs font-medium text-gray-700">Records without a default
+          <select aria-label="Fallback referral source" value={createDialog.fallbackId} onChange={event => { const value = event.target.value; setCreateDialog(current => current ? { ...current, fallbackId: value } : current) }}
+            className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900">
+            <option value="">Skip them (open each to choose)</option>
+            {createDialog.sources.map(source => <option key={source.id} value={source.id}>{source.label}</option>)}</select></label>}
         <p className="mt-3 text-xs text-gray-600">Each record is checked against Albi first; any that now match an Albi record, or changed, are skipped. New records are Type Referrer and Status Active, with the owner’s salesperson.</p>
         <div className="mt-5 flex flex-row-reverse gap-2">
           <button type="button" className={primary} disabled={!createDialog.referralSourceId} onClick={runCreateSelected}>{`Create ${createDialog.targets.length} in Albi`}</button>

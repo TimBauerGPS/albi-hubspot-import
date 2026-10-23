@@ -879,7 +879,7 @@ test('quick wins offers Create selected for no-match rows', async () => {
   assert.doesNotMatch(await rendered('ReviewQueue.jsx', { ...props, bucket: 'decision' }), /Create selected/)
 })
 
-test('Create selected asks for one referral source, starts a background batch and reports the outcome', async () => {
+test('Create selected uses each record’s default referral source unless one is chosen for all, and reports the outcome', async () => {
   const rows = [listRow('a', 'Jane Doe', { triageDetails: { quickKind: 'create' } }), listRow('b', 'Marcus Lee', { triageDetails: { quickKind: 'create' } }), listRow('c', 'Linky')]
   let polls = 0
   const ui = await mountWorkspace({ rows,
@@ -893,12 +893,13 @@ test('Create selected asks for one referral source, starts a background batch an
   assert.equal(ui.queue().props.createSelectedCount, 2)
   await ui.queue().props.onCreateSelected(); await ui.flush()
   assert.match(ui.text(), /Jane Doe/); assert.match(ui.text(), /Marcus Lee/)
-  const confirm = ui.find('button', 'Create 2 in Albi')
-  assert.equal(confirm.props.disabled, true)
-  ui.find('select', 'Referral source').props.onChange({ target: { value: '5' } }); await ui.flush()
+  // Each record's own default is the starting choice, so no choice is needed to create.
+  assert.equal(ui.find('button', 'Create 2 in Albi').props.disabled, false)
+  assert.match(ui.text(), /Each record’s default/)
+  ui.find('select', 'Skip them').props.onChange({ target: { value: '5' } }); await ui.flush()
   ui.find('button', 'Create 2 in Albi').props.onClick(); await ui.flush()
   const started = ui.calls.find(call => call.name === 'startH2ACreateBatch')
-  assert.deepEqual(j(started.args[2]), { kind: 'sample', referralSourceId: '5', items: [{ reviewId: 'a', expectedUpdatedAt: '2026-10-12T12:00:00.000Z' }, { reviewId: 'b', expectedUpdatedAt: '2026-10-12T12:00:00.000Z' }] })
+  assert.deepEqual(j(started.args[2]), { kind: 'sample', useRecordDefaults: true, referralSourceId: '5', items: [{ reviewId: 'a', expectedUpdatedAt: '2026-10-12T12:00:00.000Z' }, { reviewId: 'b', expectedUpdatedAt: '2026-10-12T12:00:00.000Z' }] })
   assert.match(ui.text(), /Creating in Albi: 0 of 2 done/)
   for (let i = 0; i < 5 && !/Create selected finished/.test(ui.text()); i++) await ui.tick()
   assert.match(ui.text(), /Create selected finished: 1 created, 1 skipped, 0 failed/)

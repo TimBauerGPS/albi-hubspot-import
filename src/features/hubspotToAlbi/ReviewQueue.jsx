@@ -52,7 +52,7 @@ export default function ReviewQueue({
         <button type="button" className={btn} disabled={busy || !bulkLinkCount} onClick={onBulkLink}>Link all exact matches ({bulkLinkCount})</button>
         <button type="button" className={btn} disabled={busy || !checked.size} onClick={onRecheckSelected}>Recheck selected ({checked.size})</button>
         {onCreateSelected && <button type="button" className={btn} disabled={busy || !createSelectedCount} onClick={onCreateSelected}
-          title="Create the ticked no-match records in Albi with one referral source">Create selected ({createSelectedCount})</button>}
+          title="Create the ticked no-match records in Albi with their default referral sources">Create selected ({createSelectedCount})</button>}
       </div>
     </div>}
     <ol className="max-h-[38rem] divide-y divide-gray-100 overflow-y-auto">

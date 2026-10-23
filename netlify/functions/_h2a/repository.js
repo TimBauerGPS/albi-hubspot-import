@@ -81,7 +81,7 @@ function requireReviewValue(value, allowed, label) {
 }
 
 const CREATE_BATCH_TABLE = 'h2a_review_create_batches'
-const CREATE_BATCH_COLUMNS = 'id,company_id,review_kind,items,referral_source_id,requested_by,status,total,done,created,skipped,failed,error_code,results,heartbeat_at,started_at,finished_at,created_at,updated_at'
+const CREATE_BATCH_COLUMNS = 'id,company_id,review_kind,items,referral_source_id,use_record_defaults,requested_by,status,total,done,created,skipped,failed,error_code,results,heartbeat_at,started_at,finished_at,created_at,updated_at'
 function createBatchResults(results) {
   if (results === undefined) return {}
   if (!Array.isArray(results) || results.length > MAX_CREATE_BATCH_ITEMS || results.some(item => !item || typeof item !== 'object' ||
@@ -772,20 +772,23 @@ export function createH2ARepository(supabase) {
       const rows = checked(await supabase.from(OUTBOX_TABLE).select('company_id').eq('status', 'queued').lte('next_attempt_at', now).limit(500)) ?? []
       return [...new Set(rows.map(row => row.company_id))]
     },
-    async createReviewCreateBatch(companyId, { kind = 'sample', items, referralSourceId, actorId, now = new Date().toISOString(), staleBefore }) {
+    async createReviewCreateBatch(companyId, { kind = 'sample', items, referralSourceId, useRecordDefaults = false, actorId, now = new Date().toISOString(), staleBefore }) {
       requireReviewIdentity(companyId)
       requireReviewValue(kind, REVIEW_KINDS, 'kind')
       if (!Array.isArray(items) || items.length < 1 || items.length > MAX_CREATE_BATCH_ITEMS || items.some(item => !item || typeof item !== 'object' ||
         typeof item.reviewId !== 'string' || !UUID_SHAPE.test(item.reviewId) || typeof item.expectedUpdatedAt !== 'string' ||
         !TIMESTAMP_SHAPE.test(item.expectedUpdatedAt)) || new Set(items.map(item => item.reviewId)).size !== items.length) throw new TypeError('Invalid create batch items')
-      if (typeof referralSourceId !== 'string' || !/^[1-9]\d{0,99}$/.test(referralSourceId)) throw new TypeError('Invalid create batch referral source')
+      // With record defaults the batch's referral source is an optional fallback.
+      const noFallback = useRecordDefaults === true && (referralSourceId === null || referralSourceId === undefined)
+      if (!noFallback && (typeof referralSourceId !== 'string' || !/^[1-9]\d{0,99}$/.test(referralSourceId))) throw new TypeError('Invalid create batch referral source')
       requireReviewIdentity(actorId)
       requireReviewTimestamp(now)
       requireReviewTimestamp(staleBefore)
       checked(await supabase.from(CREATE_BATCH_TABLE).update({ status: 'failed', error_code: 'expired', finished_at: now, updated_at: now })
         .eq('company_id', companyId).in('status', ['queued', 'running']).lt('heartbeat_at', staleBefore).select('id'))
       const inserted = await supabase.from(CREATE_BATCH_TABLE).insert({ company_id: companyId, review_kind: kind,
-        items: items.map(item => ({ reviewId: item.reviewId, expectedUpdatedAt: item.expectedUpdatedAt })), referral_source_id: referralSourceId,
+        items: items.map(item => ({ reviewId: item.reviewId, expectedUpdatedAt: item.expectedUpdatedAt })), referral_source_id: noFallback ? null : referralSourceId,
+        ...(useRecordDefaults === true ? { use_record_defaults: true } : {}),
         requested_by: actorId, status: 'queued', total: items.length, heartbeat_at: now, created_at: now, updated_at: now })
         .select(CREATE_BATCH_COLUMNS).single()
       if (inserted?.error?.code === '23505') {

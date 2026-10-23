@@ -1,5 +1,5 @@
 -- "Create selected" batches for the review workspace. Each batch creates the selected reviewed records in
--- Albi with one referral source from a background function, reading Albi once; the browser polls this
+-- Albi with one referral source (or each record's default) from a background function, reading Albi once; the browser polls this
 -- progress row through an authorized endpoint. At most one queued/running batch exists per company.
 -- Apply after h2a-live-review-workspace.sql. Safe to re-run.
 begin;
@@ -31,6 +31,15 @@ create table if not exists public.h2a_review_create_batches (
 alter table public.h2a_review_create_batches
   add column if not exists results jsonb not null default '[]'::jsonb
   check (jsonb_typeof(results) = 'array' and jsonb_array_length(results) <= 50);
+
+-- Each record's own default referral source (its Albi organization's, else its salesperson's). The batch's
+-- referral_source_id is then only the fallback for records without a default; null skips them.
+alter table public.h2a_review_create_batches
+  add column if not exists use_record_defaults boolean not null default false;
+alter table public.h2a_review_create_batches alter column referral_source_id drop not null;
+alter table public.h2a_review_create_batches drop constraint if exists h2a_review_create_batches_referral_choice_check;
+alter table public.h2a_review_create_batches add constraint h2a_review_create_batches_referral_choice_check
+  check (use_record_defaults or referral_source_id is not null);
 
 create unique index if not exists h2a_review_create_batches_one_active_idx
   on public.h2a_review_create_batches (company_id)

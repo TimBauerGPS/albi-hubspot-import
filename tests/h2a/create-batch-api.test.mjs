@@ -57,3 +57,17 @@ test('progress shows the latest batch and the Albi referral sources to choose fr
   assert.deepEqual(body.batch, projectCreateBatch({ id: BATCH_ID, review_kind: 'sample', status: 'queued', total: 1, done: 0, created: 0, skipped: 0, failed: 0 }))
   assert.deepEqual(Object.keys(body.batch).sort(), ['created', 'createdAt', 'done', 'errorCode', 'failed', 'finishedAt', 'id', 'kind', 'results', 'skipped', 'startedAt', 'status', 'total'])
 })
+
+test('a create batch can use each record\u2019s default referral source, with or without a fallback', async () => {
+  const f = fixture()
+  assert.equal((await f.handler(post({ companyId: 'company-1', useRecordDefaults: true, items }))).statusCode, 202)
+  let input = f.calls.find(call => call[0] === 'create')[2]
+  assert.deepEqual([input.useRecordDefaults, input.referralSourceId], [true, null])
+  const g = fixture()
+  assert.equal((await g.handler(post({ companyId: 'company-1', useRecordDefaults: true, referralSourceId: '5', items }))).statusCode, 202)
+  input = g.calls.find(call => call[0] === 'create')[2]
+  assert.deepEqual([input.useRecordDefaults, input.referralSourceId], [true, '5'])
+  for (const body of [{ companyId: 'company-1', useRecordDefaults: true, referralSourceId: '6', items }, { companyId: 'company-1', useRecordDefaults: 'yes', items }, { companyId: 'company-1', items }]) {
+    assert.equal((await fixture().handler(post(body))).statusCode, 400)
+  }
+})

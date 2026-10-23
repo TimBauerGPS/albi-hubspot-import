@@ -280,7 +280,8 @@ create table public.h2a_review_create_batches (
   company_id uuid not null references public.companies(id),
   review_kind text not null default 'sample' check (review_kind in ('sample', 'live')),
   items jsonb not null check (jsonb_typeof(items) = 'array' and jsonb_array_length(items) between 1 and 50),
-  referral_source_id text not null check (referral_source_id ~ '^[1-9][0-9]{0,99}$'),
+  referral_source_id text check (referral_source_id ~ '^[1-9][0-9]{0,99}$'),
+  use_record_defaults boolean not null default false,
   requested_by uuid not null references auth.users(id) on delete cascade,
   status text not null default 'queued' check (status in ('queued', 'running', 'completed', 'failed')),
   total integer not null default 0 check (total >= 0),
@@ -295,6 +296,7 @@ create table public.h2a_review_create_batches (
   finished_at timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
+  constraint h2a_review_create_batches_referral_choice_check check (use_record_defaults or referral_source_id is not null),
   unique (company_id, id)
 );
 

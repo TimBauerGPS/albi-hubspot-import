@@ -8,7 +8,8 @@ import { defaultDispatchResume } from './h2a-conflict-resolve.js'
 import { ApiError } from './_h2a/http.js'
 import { loadReviewResolutionOptions } from './_h2a/reviewResolutionOptions.js'
 
-// "Create selected": POST queues one batch (selected reviews + one referral source) and hands it to the
+// "Create selected": POST queues one batch (selected reviews + each record's default referral source, with an
+// optional fallback, or one referral source for all) and hands it to the
 // background function; GET returns the latest batch of a kind plus Albi's referral sources so the page can
 // show the choice and poll progress. The background variant (internal credentials only) runs the batch.
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -51,17 +52,20 @@ function request(event, background) {
   let body = {}
   if (event.httpMethod === 'POST') {
     try { body = typeof event.body === 'string' ? JSON.parse(event.body) : event.body ?? {} } catch { fail(400, 'Invalid request body.') }
-    const allowed = background ? ['companyId', 'batchId'] : ['companyId', 'kind', 'referralSourceId', 'items']
+    const allowed = background ? ['companyId', 'batchId'] : ['companyId', 'kind', 'referralSourceId', 'useRecordDefaults', 'items']
     if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !allowed.includes(key))) fail(400, 'Invalid create request.')
     if (background && !UUID.test(body.batchId ?? '')) fail(400, 'Invalid create batch.')
-    if (!background && (typeof body.referralSourceId !== 'string' || !PROVIDER_ID.test(body.referralSourceId))) fail(400, 'Invalid create request.')
+    if (!background && body.useRecordDefaults !== undefined && typeof body.useRecordDefaults !== 'boolean') fail(400, 'Invalid create request.')
+    // With record defaults the referral source is only an optional fallback; otherwise it is required.
+    const optionalSource = body.useRecordDefaults === true && (body.referralSourceId === undefined || body.referralSourceId === null)
+    if (!background && !optionalSource && (typeof body.referralSourceId !== 'string' || !PROVIDER_ID.test(body.referralSourceId))) fail(400, 'Invalid create request.')
     if (Object.keys(query).some(key => key !== 'companyId')) fail(400, 'Unsupported query parameters.')
   } else if (Object.keys(query).some(key => !['companyId', 'kind'].includes(key))) fail(400, 'Unsupported query parameters.')
   const kind = (event.httpMethod === 'POST' ? body.kind : query.kind) ?? 'sample'
   if (!KINDS.includes(kind)) fail(400, 'Invalid create request.')
   const selectors = [query.companyId, body.companyId].filter(value => value !== undefined)
   if (selectors.some(value => typeof value !== 'string' || !value.trim() || value.length > 200) || new Set(selectors).size > 1) fail(400, 'A single company selector is required.')
-  return { companyId: selectors[0], batchId: body.batchId, kind, referralSourceId: body.referralSourceId,
+  return { companyId: selectors[0], batchId: body.batchId, kind, referralSourceId: body.referralSourceId ?? null, useRecordDefaults: body.useRecordDefaults === true,
     items: event.httpMethod === 'POST' && !background ? items(body.items) : null }
 }
 
@@ -89,12 +93,13 @@ async function referralSources(options, repository, companyId) {
 }
 
 async function start({ repository, options, auth, companyId, input }) {
-  // The chosen source must exist in Albi now; each record re-checks it again before creating.
-  if (!(await referralSources(options, repository, companyId)).some(source => source.id === input.referralSourceId)) {
+  // A chosen source must exist in Albi now; each record re-checks it again before creating.
+  if (input.referralSourceId && !(await referralSources(options, repository, companyId)).some(source => source.id === input.referralSourceId)) {
     fail(400, 'The selected referral source is not available in Albi.')
   }
   const now = options.now?.() ?? new Date()
   const created = await repository.createReviewCreateBatch(companyId, { kind: input.kind, items: input.items, referralSourceId: input.referralSourceId,
+    useRecordDefaults: input.useRecordDefaults,
     actorId: auth.userId, now: now.toISOString(), staleBefore: new Date(now.getTime() - STALE_AFTER_MS).toISOString() })
   if (created?.error === 'active') return reply(200, { status: 'already_running', batch: projectCreateBatch(created.batch) })
   if (!created?.batch?.id) fail(502, 'Unable to start creating the selected records.')
