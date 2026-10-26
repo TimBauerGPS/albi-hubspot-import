@@ -1,6 +1,7 @@
 import { createH2AProviderClients } from './providerClients.js'
 import { H2AReviewError, resolveReviewSample } from './reviewService.js'
 import { safeReviewSnapshot } from './review.js'
+import { followOrganizationMerge } from './organizationMerges.js'
 import { ApiError } from './http.js'
 
 const providerId = value => typeof value === 'string' && /^[1-9]\d{0,99}$/.test(value)
@@ -33,6 +34,10 @@ export async function prepareOrganizationReview({ repository, options, companyId
   const companies = await hubspotRead.getCompanies([sourceId])
   if (!Array.isArray(companies) || companies.length !== 1 || companies[0]?.id !== sourceId || companies[0]?.archived === true ||
     !companies[0]?.properties || typeof companies[0].properties !== 'object') fail(409, 'The associated organization is no longer available in HubSpot.')
+  // A company HubSpot merged from a mapped record is already mapped through it; there is nothing to create.
+  if (followOrganizationMerge(mappings?.organizations ?? [], companies[0], row.portal_id).some(item => item?.hubspot_id === sourceId)) {
+    return { sourceId, reviewId: null, mapped: true }
+  }
   const created = await repository.recordDryRunReview(companyId, { run_id: sample.id, portal_id: row.portal_id, object_type: 'companies',
     source_id: sourceId, reason: 'no_match', conflict_type: 'organization_match',
     source_snapshot: safeReviewSnapshot(companies[0], 'companies'), candidate_snapshots: [], match_evidence: { evidence: [] }, proposed_changes: {} })

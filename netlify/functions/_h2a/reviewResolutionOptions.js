@@ -6,6 +6,7 @@ import { decideContactMatch, decideOrganizationMatch } from './match.js'
 import { safeReviewSnapshot } from './review.js'
 import { buildCreateReadiness, evidenceOf, loadCreateDefaults, safeReferralSources, stepped, suggestReferralSource } from './createDefaults.js'
 import { cachedRead } from './readCache.js'
+import { followOrganizationMerge, organizationMergeConflict } from './organizationMerges.js'
 
 const providerId = value => typeof value === 'string' && /^[1-9]\d{0,99}$/.test(value)
 const record = value => value && typeof value === 'object' && !Array.isArray(value)
@@ -60,7 +61,7 @@ export async function loadReviewResolutionOptions({ row, repository, reads, prog
   const step = (name, run) => stepped(name, run, progress)
   try {
     const hubspot = reads.hubspotRead
-    const [mappings, sourceRows, associationRows] = await Promise.all([
+    let [mappings, sourceRows, associationRows] = await Promise.all([
       step('mappings', () => repository.getMappings(row.company_id)),
       step('hubspot_record', () => row.object_type === 'contacts' ? hubspot.getContacts([row.source_id]) : hubspot.getCompanies([row.source_id])),
       row.object_type === 'contacts' ? step('hubspot_associations', () => hubspot.getAssociations({
@@ -82,14 +83,18 @@ export async function loadReviewResolutionOptions({ row, repository, reads, prog
       // evidence so the slow full Albi enumeration (which exceeds the detail deadline) is not needed to show it.
       if (allAssociated.length === 1 && !mappings.organizations.some(item => item?.portal_id === row.portal_id && mappedSource(item) === allAssociated[0])) {
         const companies = await hubspot.getCompanies([allAssociated[0]])
-        if (Array.isArray(companies) && companies.length === 1 && companies[0]?.id === allAssociated[0] &&
-          companies[0]?.archived !== true && record(companies[0]?.properties)) {
+        if (!Array.isArray(companies) || companies.length !== 1 || companies[0]?.id !== allAssociated[0] ||
+          companies[0]?.archived === true || !record(companies[0]?.properties)) return unavailable
+        // An organization HubSpot merged from a mapped record is mapped through it; otherwise it is synced first.
+        const followed = followOrganizationMerge(mappings.organizations, companies[0], row.portal_id)
+        if (followed !== mappings.organizations) mappings = { ...mappings, organizations: followed }
+        else {
           const found = typeof repository.findDryRunReviewBySource === 'function'
             ? await repository.findDryRunReviewBySource(row.company_id, row.run_id, 'companies', allAssociated[0]) : null
           return { ...unavailable, organizationOptions: [],
-            organizationGate: { sourceId: allAssociated[0], reviewId: typeof found?.id === 'string' ? found.id : null } }
+            organizationGate: { sourceId: allAssociated[0], reviewId: typeof found?.id === 'string' ? found.id : null,
+              ...(organizationMergeConflict(mappings.organizations, companies[0], row.portal_id) ? { mergeConflict: true } : {}) } }
         }
-        return unavailable
       }
       const contacts = await step('albi_contacts', () => all(args => reads.albiRead.listContacts(args)))
       const organizations = await step('albi_organizations', () => all(args => reads.albiRead.listOrganizations(args)))
@@ -113,10 +118,11 @@ export async function loadReviewResolutionOptions({ row, repository, reads, prog
         const companies = await hubspot.getCompanies([sourceId])
         if (!Array.isArray(companies) || companies.length !== 1 || companies[0]?.id !== sourceId ||
           companies[0]?.archived === true || !record(companies[0]?.properties)) continue
-        const organizationMappings = mappings.organizations.filter(item => item?.portal_id === row.portal_id && mappedSource(item) === sourceId)
+        const rows = followOrganizationMerge(mappings.organizations, companies[0], row.portal_id)
+        const organizationMappings = rows.filter(item => item?.portal_id === row.portal_id && mappedSource(item) === sourceId)
         if (organizationMappings.length > 1) continue
         const match = decideOrganizationMatch({ source: companies[0], candidates: organizations,
-          mappings: mappings.organizations, portalId: row.portal_id,
+          mappings: rows, portalId: row.portal_id,
           existingMapping: organizationMappings[0] })
         const targetId = match.action === 'link' ? match.targetId : null
         if (!providerId(targetId) || !organizations.some(item => item.id === targetId)) {
@@ -124,7 +130,8 @@ export async function loadReviewResolutionOptions({ row, repository, reads, prog
           if (!gate && allAssociated.includes(sourceId) && organizationMappings.length === 0) {
             const found = typeof repository.findDryRunReviewBySource === 'function'
               ? await repository.findDryRunReviewBySource(row.company_id, row.run_id, 'companies', sourceId) : null
-            gate = { sourceId, reviewId: typeof found?.id === 'string' ? found.id : null }
+            gate = { sourceId, reviewId: typeof found?.id === 'string' ? found.id : null,
+              ...(organizationMergeConflict(rows, companies[0], row.portal_id) ? { mergeConflict: true } : {}) }
           }
           continue
         }
@@ -163,21 +170,25 @@ export async function loadReviewResolutionOptions({ row, repository, reads, prog
       let organizationTypeId = null, organizationReady = true, organizationBlock = null, organizationTargetId = null
       if (associated.length === 1) {
         const sourceId = associated[0]
-        const associationMappings = mappings.organizations.filter(item => item?.portal_id === row.portal_id && mappedSource(item) === sourceId)
-        if (associationMappings.length > 1) return blocked('organization_mapping_ambiguous')
-        const targetId = exactMapping(mappings.organizations, row.portal_id, sourceId, 'companies')
-        organizationTargetId = targetId
         const companies = await step('hubspot_organization', () => hubspot.getCompanies([sourceId]))
         const companyReady = Array.isArray(companies) && companies.length === 1 && companies[0]?.id === sourceId &&
           companies[0]?.archived !== true && record(companies[0]?.properties)
+        // A mapping that is ambiguous is named before the HubSpot read can be.
+        const own = mappings.organizations.filter(item => item?.portal_id === row.portal_id && mappedSource(item) === sourceId)
+        if (own.length > 1) return blocked('organization_mapping_ambiguous')
         if (!companyReady) return blocked('organization_missing_in_hubspot')
+        const rows = followOrganizationMerge(mappings.organizations, companies[0], row.portal_id)
+        const associationMappings = rows.filter(item => item?.portal_id === row.portal_id && mappedSource(item) === sourceId)
+        const targetId = exactMapping(rows, row.portal_id, sourceId, 'companies')
+        organizationTargetId = targetId
         // The reviewed mapping is the organization's identity; the create re-reads it live.
         organizationReady = Boolean(targetId)
         if (companyReady && associationMappings.length === 0) {
           // The organization must be synced first; point at its own audited review when one exists.
           const found = typeof repository.findDryRunReviewBySource === 'function'
             ? await step('organization_review', () => repository.findDryRunReviewBySource(row.company_id, row.run_id, 'companies', sourceId)) : null
-          organizationBlock = { sourceId, reviewId: typeof found?.id === 'string' ? found.id : null }
+          organizationBlock = { sourceId, reviewId: typeof found?.id === 'string' ? found.id : null,
+            ...(organizationMergeConflict(rows, companies[0], row.portal_id) ? { mergeConflict: true } : {}) }
         }
       }
       const options = row.object_type === 'contacts' ? mappings.options : mappings.options.filter(item =>

@@ -424,6 +424,17 @@ test('an already mapped organization needs no preparation', async () => {
   assert.equal(f.recorded.length, 0)
 })
 
+test('an organization HubSpot merged from a mapped record needs no preparation', async () => {
+  const f = prepareFixture()
+  f.repository.getMappings = async () => ({ contacts: [], options: [], organizations: [{ portal_id: '123', hubspot_id: '29', albi_organization_id: '40' }] })
+  f.options.makeClients = async () => ({ hubspot: {
+    getContacts: async () => [], getAssociations: async () => [{ fromId: '10', toObjectType: 'companies', toIds: ['30'] }],
+    getCompanies: async ids => [{ id: ids[0], properties: { name: 'Acme', hs_merged_object_ids: '29' } }] }, albi: {} })
+  f.handler = createDryRunReviewHandler(f.options)
+  assert.deepEqual(JSON.parse((await prepare(f)).body).organization, { sourceId: '30', reviewId: null, mapped: true })
+  assert.equal(f.recorded.length, 0)
+})
+
 test('preparing refuses stale reviews, non-contacts and a contact with no associated organization', async () => {
   for (const [f, extra, status] of [[prepareFixture({ companies: [] }), {}, 409],
     [prepareFixture(), { expectedUpdatedAt: '2026-10-12T10:00:01.000000Z' }, 409], [prepareFixture(), { reviewId: '00000000-0000-4000-8000-0000000000ee' }, 404],

@@ -12,6 +12,7 @@ import { LIVE_CLOSE_FOR_ACTION, closeLiveReview } from './liveReview.js'
 import { decideContactMatch, decideOrganizationMatch, selectAllReviewCandidates } from './match.js'
 import { normalizePhone } from './normalize.js'
 import { loadReviewResolutionOptions } from './reviewResolutionOptions.js'
+import { followOrganizationMerge } from './organizationMerges.js'
 import { H2A_REVIEW_ERROR_CATEGORIES, H2A_REVIEW_ERROR_CODES } from '../../../shared/h2aReviewReasons.js'
 
 const fail = (status, message) => { throw new H2AReviewError(status, message) }
@@ -132,8 +133,11 @@ const UNKNOWN_CREATE_SETTLE_MS = 5 * 60000
 async function evidence(deps, clients, row, decision, deadline, { live = false } = {}) {
   const source = await sourceRead(deps, clients, row.object_type, row.source_id, deadline)
   if (!source) fail(409, 'The HubSpot source is no longer available. Recheck this review.')
-  const mappings = await deps.repository.getMappings(row.company_id)
-  if (!mappings || !['contacts', 'organizations', 'options'].every(key => Array.isArray(mappings[key]))) malformed('resolution')
+  const loaded = await deps.repository.getMappings(row.company_id)
+  if (!loaded || !['contacts', 'organizations', 'options'].every(key => Array.isArray(loaded[key]))) malformed('resolution')
+  // A company HubSpot merged from a mapped record is read under that record's mapping.
+  const mappings = row.object_type === 'companies'
+    ? { ...loaded, organizations: followOrganizationMerge(loaded.organizations, source, row.portal_id) } : loaded
   if (decision.referralSourceId !== undefined) {
     const sources = await bounded(deps, () => clients.albiRead.listReferralSources(), deadline)
     if (!Array.isArray(sources) || !sources.some(option => option?.id === decision.referralSourceId)) {
@@ -185,7 +189,7 @@ async function evidence(deps, clients, row, decision, deadline, { live = false }
   for (const id of organizationSources) {
     const company = await sourceRead(deps, clients, 'companies', id, deadline)
     if (!company) continue
-    const rows = mappings.organizations
+    const rows = followOrganizationMerge(mappings.organizations, company, row.portal_id)
     if (mappedOrganizationsOnly) {
       const mapped = rows.filter(mapping => mapping.hubspot_id === id && mapping.portal_id === row.portal_id)
       if (mapped.length > 1) stale('mapping')

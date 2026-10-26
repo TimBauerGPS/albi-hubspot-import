@@ -3,6 +3,7 @@ import { assertReviewClassification, evaluateContactReview, evaluateOrganization
   selectReviewedOrganizationContext, safeReviewSnapshot, safeReviewCandidates, safeReviewEvidence, safeReviewChanges } from './review.js'
 import { resolveContactType } from './options.js'
 import { refreshReviewTriage } from './triage.js'
+import { followOrganizationMerge } from './organizationMerges.js'
 import { H2A_IGNORABLE_CONTACT_FIELDS, sameH2AEmail } from '../../../shared/h2aReviewReasons.js'
 
 export class H2AReviewError extends Error {
@@ -220,9 +221,11 @@ async function evaluateReviewRow(deps, { companyId, reviewId, actorId, row, conf
       const mappings = await bounded(deps, () => repository.getMappings(companyId), deadline)
       if (!mappings || !['contacts', 'organizations', 'options'].every(key => Array.isArray(mappings[key]))) malformed('review')
       if (row.object_type === 'companies') {
+        // A company HubSpot merged from a mapped record is read under that record's mapping.
+        const organizationRows = followOrganizationMerge(mappings.organizations, source, row.portal_id)
         evaluation = evaluateOrganizationReview({ source, candidates, portalId: row.portal_id,
-          mappings: mappings.organizations, optionMappings: mappings.options })
-        evaluation = await acceptedLinkDifferences(deps, companyId, row, evaluation, source, candidates, mappings.organizations, deadline)
+          mappings: organizationRows, optionMappings: mappings.options })
+        evaluation = await acceptedLinkDifferences(deps, companyId, row, evaluation, source, candidates, organizationRows, deadline)
       }
       else {
         let organization = null
@@ -240,15 +243,16 @@ async function evaluateReviewRow(deps, { companyId, reviewId, actorId, row, conf
             const organizations = await albiRecords(deps, albi, 'organizations', deadline)
             // An organization already linked to Albi is settled for its contacts: its own field differences belong to
             // the organization's review (and may have been accepted there), not to every contact behind it.
-            const linked = mappings.organizations.filter(item => item?.portal_id === row.portal_id && item?.hubspot_id === id)
+            const organizationRows = followOrganizationMerge(mappings.organizations, company, row.portal_id)
+            const linked = organizationRows.filter(item => item?.portal_id === row.portal_id && item?.hubspot_id === id)
             const linkedTarget = linked.length === 1 ? organizations.find(item => item?.id === linked[0].albi_organization_id) : null
             if (linkedTarget) {
               const types = Array.isArray(linkedTarget.organizationTypeIds) ? linkedTarget.organizationTypeIds : []
               organization = { outcome: 'safe_to_link', targetId: linkedTarget.id, organizationTypeId: types.length === 1 ? types[0] : null }
             } else {
               const result = evaluateOrganizationReview({ source: company, candidates: organizations, portalId: row.portal_id,
-                mappings: mappings.organizations, optionMappings: mappings.options })
-              organization = organizationContext(result, organizations, mappings.organizations, id, row.portal_id, mappings.options)
+                mappings: organizationRows, optionMappings: mappings.options })
+              organization = organizationContext(result, organizations, organizationRows, id, row.portal_id, mappings.options)
             }
           }
         }

@@ -108,9 +108,13 @@ export default function ReviewRecord({
   const referralSourceId = chosenReferralSourceId || defaultReferralId
   const referralHint = !chosenReferralSourceId && defaultReferralId
     ? defaultSource.defaultReferralFrom === 'organization' ? 'Default from the organization in Albi' : 'Default for the salesperson' : ''
-  const blockedCopy = withEvidence(blockedReasonCopy(readiness?.blockedReason), readiness?.evidence)
+  // A HubSpot merge of records linked to different Albi organizations is not "missing from Albi"; it needs a choice.
+  const mergeConflict = readiness?.blockedReason === 'organization_not_synced' && readiness?.organization?.mergeConflict === true
+  const blockedCopy = withEvidence(mergeConflict ? 'HubSpot merged this contact’s organization from records linked to different Albi organizations.'
+    : blockedReasonCopy(readiness?.blockedReason), readiness?.evidence)
   const unsyncedOrganization = readiness?.blockedReason === 'organization_not_synced' && idPattern.test(readiness?.organization?.sourceId)
-    ? { sourceId: readiness.organization.sourceId, reviewId: typeof readiness.organization.reviewId === 'string' && readiness.organization.reviewId ? readiness.organization.reviewId : null } : null
+    ? { sourceId: readiness.organization.sourceId, reviewId: typeof readiness.organization.reviewId === 'string' && readiness.organization.reviewId ? readiness.organization.reviewId : null,
+      mergeConflict } : null
 
   const fillable = Array.isArray(review.fillableFields) ? review.fillableFields : []
   const fieldMode = canAct && !merged && review.actions.includes('resolve_fields') && (review.resolutionFields.length > 0 || fillable.length > 0) && candidates.length === 1
@@ -133,7 +137,8 @@ export default function ReviewRecord({
     idPattern.test(option?.contactTargetId) && idPattern.test(option?.currentOrganizationTargetId ?? option.targetId)) : []
   const showOrganizationChoice = canAct && !merged && review.objectType === 'contacts' && review.actions.includes('choose_organization')
   const organizationGate = organizationOptions.length === 0 && idPattern.test(item?.organizationGate?.sourceId)
-    ? { sourceId: item.organizationGate.sourceId, reviewId: typeof item.organizationGate.reviewId === 'string' && item.organizationGate.reviewId ? item.organizationGate.reviewId : null } : null
+    ? { sourceId: item.organizationGate.sourceId, reviewId: typeof item.organizationGate.reviewId === 'string' && item.organizationGate.reviewId ? item.organizationGate.reviewId : null,
+      mergeConflict: item.organizationGate.mergeConflict === true } : null
   const chosenOrganization = organizationOptions.find(option => option.sourceId === organizationSourceId)
 
   // Diff rows. In field mode every field the resolution can write is choosable, even one the normalized diff hides.
@@ -174,7 +179,9 @@ export default function ReviewRecord({
 
   const organizationFirstCard = gate => <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
     <p className="text-sm font-semibold text-amber-950">Create the organization first</p>
-    <p className="mt-1 text-xs leading-5 text-amber-900">This contact’s HubSpot organization is not in Albi yet. Create it on its own review, then return here to create the contact linked to it.</p>
+    <p className="mt-1 text-xs leading-5 text-amber-900">{gate?.mergeConflict === true
+      ? 'HubSpot merged this contact’s organization from records that are linked to different Albi organizations. Choose which Albi organization it is on its own review, then return here.'
+      : 'This contact’s HubSpot organization is not in Albi yet. Create it on its own review, then return here to create the contact linked to it.'}</p>
     <button type="button" className={`${btn} mt-2`} disabled={disabled || !onOpenOrganization} onClick={() => onOpenOrganization?.(gate)}>
       {gate?.reviewId ? 'Open organization review' : 'Prepare organization review'}</button></div>
 

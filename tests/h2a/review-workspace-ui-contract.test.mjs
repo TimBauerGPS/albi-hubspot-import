@@ -208,6 +208,11 @@ test('org-first eligible record offers create organization and contact', async (
   assert.deepEqual(j(calls), [{ referralSourceId: '9' }])
   const notEligible = await html({ ...item, orgFirstCreate: { eligible: false } })
   assert.match(notEligible, /Create the organization first/); assert.doesNotMatch(notEligible, /Create organization and contact/)
+  assert.doesNotMatch(notEligible, /linked to different Albi organizations/)
+  // A HubSpot merge of records linked to different Albi organizations says so instead of "not in Albi yet".
+  const split = await html({ ...item, orgFirstCreate: { eligible: false },
+    createReadiness: { ...item.createReadiness, organization: { sourceId: '777', mergeConflict: true } } })
+  assert.match(split, /linked to different Albi organizations/); assert.doesNotMatch(split, /is not in Albi yet/)
 })
 
 test('linking a candidate with linkedElsewhere > 0 opens the many-to-one dialog with approval pre-checked and sends approveManyToOne true', async () => {

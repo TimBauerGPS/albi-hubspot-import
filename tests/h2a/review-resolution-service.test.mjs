@@ -569,6 +569,19 @@ test('a contact behind an organization already linked to Albi is not held up by 
   assert.equal(f.row.status, 'cleared')
 })
 
+test('a recheck clears a contact whose company HubSpot merged from a record already linked to Albi', async () => {
+  const f = fixture()
+  f.contacts = []; f.row.reason = 'organization_unresolved'; f.row.conflict_type = 'association'; f.row.candidate_snapshots = []
+  f.mappings.options = [{ mapping_kind: 'default_contact_type', source_key: 'default', albi_id: '12', confirmed: true }]
+  f.associations = ['900']
+  f.mappings.organizations = [{ portal_id: '123', hubspot_id: '99', albi_organization_id: '50' }]
+  f.deps.hubspotRead.getCompanies = async ids => [{ id: ids[0], properties: { name: 'Acme', hs_merged_object_ids: '99' } }]
+  f.deps.hubspotRead.getCompany = async id => ({ id, properties: { name: 'Acme', hs_merged_object_ids: '99' } })
+  f.organizations = [{ id: '50', name: 'Acme Holdings LLC', organizationTypeIds: ['12'] }]
+  await recheckDryRunReview(f.deps, input)
+  assert.equal(f.row.status, 'cleared')
+})
+
 test('a contact with several HubSpot organizations uses the first (primary) one', async () => {
   const f = fixture()
   f.contacts = []; f.row.reason = 'multiple_associated_organizations'; f.row.conflict_type = 'association'; f.row.candidate_snapshots = []
@@ -1249,6 +1262,19 @@ test('creating a contact uses the organization mapping instead of scanning Albi 
   const result = await executeReviewResolution(f.deps, createInput)
   assert.equal(result.resolution.status, 'ready_to_recheck')
   assert.equal(mutations(f)[0][1].organizationId, '88')
+})
+
+test('creating a contact behind a company HubSpot merged from a mapped record uses that record’s Albi organization', async () => {
+  const f = fixture(), createInput = asCreate(f)
+  f.associations = ['900']
+  f.mappings.organizations.push({ portal_id: '123', hubspot_id: '77', albi_organization_id: '88' })
+  f.deps.hubspotRead.getCompanies = async ids => [{ id: ids[0], properties: { name: 'Acme', hs_merged_object_ids: '77' } }]
+  f.createdTarget = { ...f.createdTarget, organizationId: '88' }
+  f.deps.albiRead.listOrganizations = async () => { throw Error('must not scan Albi organizations') }
+  const result = await executeReviewResolution(f.deps, createInput)
+  assert.equal(result.resolution.status, 'ready_to_recheck')
+  assert.equal(mutations(f)[0][1].organizationId, '88')
+  assert.deepEqual(f.mappings.organizations.map(row => row.hubspot_id), ['77'], 'no mapping is written for the merged company')
 })
 
 test('a create given a shared Albi read uses it, verifies against the receipt, and adds the new record to that read', async () => {

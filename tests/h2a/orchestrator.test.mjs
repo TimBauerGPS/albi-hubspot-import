@@ -783,6 +783,18 @@ test('new contact behind an unmapped organization is captured blocked organizati
   assert.deepEqual([organization.triage_bucket, organization.triage_details], ['quick', { quickKind: 'create' }])
 })
 
+test('a new contact behind a company HubSpot merged from a mapped record is create-ready, with no organization review or new mapping', async () => {
+  // Company 20 absorbed company 19, which is mapped to Albi organization 100 (named differently, so only the mapping links them).
+  const deps = createReadyReads(exactAssociations(throwingCreates(liveFixture({
+    albiOrganizations: [{ id: '100', name: 'Older Name', organizationTypeIds: ['2'] }] }))))
+  deps.mappings.organizations.push({ portal_id: '123', hubspot_id: '19', albi_organization_id: '100', match_method: 'reviewed' })
+  deps.hubspot.getCompanies = async ids => ids.map(id => ({ id, properties: { name: `Company${id}`, hs_merged_object_ids: '19' } }))
+  await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
+  assert.deepEqual(deps.liveReviews.map(review => [review.object_type, review.triage_bucket, review.triage_details]),
+    [['contacts', 'quick', { quickKind: 'create' }]])
+  assert.equal(deps.events.includes('mapping:organization'), false, 'no mapping is saved for the merged company')
+})
+
 test('owner without matching salesperson captures blocked salesperson_not_found', async () => {
   const deps = createReadyReads(exactAssociations(throwingCreates(liveFixture({ companyIds: [] })), ['10'], []), { salespeople: [] })
   await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })

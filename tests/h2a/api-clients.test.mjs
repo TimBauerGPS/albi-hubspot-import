@@ -179,6 +179,8 @@ test('associations traverse all pages and normalize IDs; contacts/companies use 
   assert.equal((await c.getCompanies(['301']))[0].id, '301')
   assert.equal(f.calls[2].url.pathname, '/crm/objects/2026-09/contacts/batch/read')
   assert.deepEqual(f.calls[2].body.inputs, [{ id: '201' }])
+  // Companies also read the IDs HubSpot merged into them, so a merged-away record's mapping can be followed.
+  assert.equal(f.calls[3].body.properties.includes('hs_merged_object_ids'), true)
 })
 
 test('targeted contact and company reads use the direct record endpoint', async () => {
@@ -191,6 +193,7 @@ test('targeted contact and company reads use the direct record endpoint', async 
   assert.equal(f.calls[0].url.searchParams.get('archived'), 'false')
   assert.equal(f.calls[0].url.searchParams.get('properties').includes('email'), true)
   assert.equal(f.calls[1].url.pathname, '/crm/objects/2026-09/companies/301')
+  assert.equal(f.calls[1].url.searchParams.get('properties').split(',').includes('hs_merged_object_ids'), true)
 })
 
 test('targeted activity read requests exactly the conflict activity identity', async () => {

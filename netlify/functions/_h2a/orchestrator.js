@@ -11,6 +11,7 @@ import { captureLiveReview } from './liveReview.js'
 import { computeCaptureReadiness } from './createDefaults.js'
 import { computeTriage } from './triage.js'
 import { rankReviewCandidates } from './ranking.js'
+import { followOrganizationMerge } from './organizationMerges.js'
 
 const text = value => value == null ? '' : String(value).trim()
 const sourceFields = record => record?.properties ?? record ?? {}
@@ -166,6 +167,8 @@ function captureCreateReadiness(deps, ctx, { objectType, sourceId, organization 
 async function resolveOrganization(deps, ctx, source) {
   const sourceId = idOf(source)
   const { companyId, portalId, mappings, indexes, runId } = ctx
+  // A company HubSpot merged from a mapped record is read under that record's mapping for the rest of this run.
+  mappings.organizations = followOrganizationMerge(mappings.organizations, source, portalId)
   const evaluation = evaluateOrganizationReview({ source, candidates: indexes.organizations, portalId,
     mappings: mappings.organizations, optionMappings: mappings.options })
   if (evaluation.outcome === 'needs_review') {

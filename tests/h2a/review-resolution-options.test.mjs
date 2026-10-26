@@ -273,6 +273,47 @@ test('an unmapped associated organization is gated from cheap evidence without e
   assert.equal(mapped.organizationOptions.length, 1)
 })
 
+test('a contact whose organization HubSpot merged from a mapped record uses that mapping instead of the create-first gate', async () => {
+  // HubSpot merged company 777 (mapped to Albi 888) into 900; the contact is now associated with 900.
+  const merged = { ...reads, hubspotRead: { ...reads.hubspotRead,
+    // Reading a merged-away ID returns the surviving company.
+    getCompanies: async ([id]) => [{ id: id === '777' ? '900' : id, properties: { name: 'PURE', hs_merged_object_ids: '777' } }],
+    getAssociations: async () => [{ fromId: '123', toObjectType: 'companies', toIds: ['900'] }] } }
+  const chosen = await loadReviewResolutionOptions({ row: { ...row, company_id: 'c', run_id: 'r' },
+    repository: { getMappings: async () => mappings, findDryRunReviewBySource: async () => null }, reads: merged })
+  assert.equal(chosen.organizationGate, undefined)
+  assert.deepEqual(chosen.organizationOptions.map(option => [option.sourceId, option.targetId, option.associated]), [['900', '888', true]])
+
+  const createRow = { ...row, reason: 'no_match', recheck_outcome: null, candidate_snapshots: [],
+    source_snapshot: { id: '123', firstName: 'Alex', lastName: 'Stone' } }
+  const create = await loadReviewResolutionOptions({ row: createRow,
+    repository: { getMappings: async () => ({ ...mappings, contacts: [], options: [{ mapping_kind: 'default_contact_type', albi_id: '12', confirmed: true }] }),
+      findDryRunReviewBySource: async () => null },
+    reads: { ...merged, hubspotRead: { ...merged.hubspotRead, getContacts: async () => [{ id: '123', properties: { firstname: 'Alex', lastname: 'Stone' } }] },
+      albiRead: { ...reads.albiRead, listContacts: async () => { throw Error('no scan') }, listOrganizations: async () => { throw Error('no scan') } } } })
+  assert.equal(create.createReadiness.ready, true)
+})
+
+test('a merged organization whose merged records are on different Albi organizations stays gated and says why', async () => {
+  const split = { ...mappings, organizations: [{ portal_id: '321', hubspot_id: '777', albi_organization_id: '888' },
+    { portal_id: '321', hubspot_id: '778', albi_organization_id: '889' }] }
+  const merged = { ...reads, hubspotRead: { ...reads.hubspotRead,
+    getCompanies: async ([id]) => [{ id, properties: { name: 'PURE', hs_merged_object_ids: '777;778' } }],
+    getAssociations: async () => [{ fromId: '123', toObjectType: 'companies', toIds: ['900'] }] } }
+  const chosen = await loadReviewResolutionOptions({ row: { ...row, company_id: 'c', run_id: 'r' },
+    repository: { getMappings: async () => split, findDryRunReviewBySource: async () => null }, reads: merged })
+  assert.deepEqual(chosen.organizationGate, { sourceId: '900', reviewId: null, mergeConflict: true })
+
+  const createRow = { ...row, reason: 'no_match', recheck_outcome: null, candidate_snapshots: [],
+    source_snapshot: { id: '123', firstName: 'Alex', lastName: 'Stone' } }
+  const create = await loadReviewResolutionOptions({ row: createRow,
+    repository: { getMappings: async () => ({ ...split, contacts: [], options: [{ mapping_kind: 'default_contact_type', albi_id: '12', confirmed: true }] }),
+      findDryRunReviewBySource: async () => null },
+    reads: { ...merged, hubspotRead: { ...merged.hubspotRead, getContacts: async () => [{ id: '123', properties: { firstname: 'Alex', lastname: 'Stone' } }] } } })
+  assert.deepEqual(create.createReadiness, { ready: false, blockedReason: 'organization_not_synced',
+    organization: { sourceId: '900', reviewId: null, mergeConflict: true } })
+})
+
 test('separate-record creation names why it is unavailable for a mapped source, and uses the first of several organizations', async () => {
   const forceRow = { ...row, reason: 'name_only_candidate', candidate_snapshots: [{ id: '456', firstName: 'Alex', lastName: 'Stone' }],
     source_snapshot: { id: '123', firstName: 'Alex', lastName: 'Stone' } }
