@@ -700,7 +700,18 @@ export function createH2ARepository(supabase) {
       const existing = new Map((await open(items.map(item => item.reviewId))).map(row => [row.review_id, row]))
       const rows = []
       for (const item of items) {
-        if (existing.has(item.reviewId)) { rows.push({ row: existing.get(item.reviewId), queued: false }); continue }
+        const held = existing.get(item.reviewId)
+        // A failed action is replaced by the reviewer's new decision; it was made against the record as it is now.
+        if (held?.status === 'failed') {
+          const replaced = await supabase.from(OUTBOX_TABLE).update({ expected_updated_at: item.expectedUpdatedAt,
+            client_request_id: item.clientRequestId, action: item.action, requested_by: actorId, status: 'queued', attempts: 0,
+            next_attempt_at: now, lease_expires_at: null, error_code: null, error_detail: {}, updated_at: now })
+            .eq('company_id', companyId).eq('id', held.id).eq('status', 'failed').select(OUTBOX_COLUMNS).maybeSingle()
+          const row = checked(replaced)
+          rows.push(row ? { row, queued: true } : { row: (await open([item.reviewId]))[0] ?? null, queued: false })
+          continue
+        }
+        if (held) { rows.push({ row: held, queued: false }); continue }
         const inserted = await supabase.from(OUTBOX_TABLE).insert({ company_id: companyId, review_id: item.reviewId, review_kind: item.reviewKind,
           expected_updated_at: item.expectedUpdatedAt, client_request_id: item.clientRequestId, action: item.action, requested_by: actorId,
           status: 'queued', next_attempt_at: now, created_at: now, updated_at: now }).select(OUTBOX_COLUMNS).single()

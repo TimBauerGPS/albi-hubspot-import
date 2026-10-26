@@ -1207,9 +1207,24 @@ test('sales-team default referral sources are read by HubSpot email; conflicting
   assert.deepEqual(equalityFilters(calls[0]), [['company_id', 'company-1']])
 })
 
+test('a new action replaces a record’s failed outbox action instead of being dropped', async () => {
+  const id = n => `00000000-0000-4000-8000-0000000000${String(n).padStart(2, '0')}`
+  const failed = { id: id(10), company_id: 'company-1', review_id: id(1), status: 'failed', error_code: 'changed', attempts: 1 }
+  const replaced = { ...failed, status: 'queued', error_code: null, attempts: 0 }
+  const { repository, calls } = reviewRepositoryFixture([data([failed]), data(replaced)])
+  const action = { kind: 'resolution', decision: { action: 'link_existing', candidateId: '522353', approveManyToOne: false } }
+  const rows = await repository.enqueueOutboxItems('company-1', [
+    { reviewId: id(1), reviewKind: 'live', expectedUpdatedAt: REVIEW_TIME, clientRequestId: id(21), action }], { actorId: ACTOR_ID, now: REVIEW_TIME })
+  assert.deepEqual(rows.map(row => [row.row.id, row.row.status, row.queued]), [[id(10), 'queued', true]])
+  const update = calls[1].steps.find(step => step[0] === 'update')[1]
+  assert.deepEqual(update, { expected_updated_at: REVIEW_TIME, client_request_id: id(21), action, requested_by: ACTOR_ID,
+    status: 'queued', attempts: 0, next_attempt_at: REVIEW_TIME, lease_expires_at: null, error_code: null, error_detail: {}, updated_at: REVIEW_TIME })
+  assert.deepEqual(equalityFilters(calls[1]), [['company_id', 'company-1'], ['id', id(10)], ['status', 'failed']])
+})
+
 test('the outbox queues new actions, keeps a record’s open action, and fences claims and finishes', async () => {
   const id = n => `00000000-0000-4000-8000-0000000000${String(n).padStart(2, '0')}`
-  const open = { id: id(10), company_id: 'company-1', review_id: id(1), status: 'failed' }
+  const open = { id: id(10), company_id: 'company-1', review_id: id(1), status: 'queued' }
   const inserted = { id: id(11), company_id: 'company-1', review_id: id(2), status: 'queued' }
   const { repository, calls, rpcCalls } = reviewRepositoryFixture([data([open]), data(inserted), data(true), data([{ ...inserted, status: 'sending' }]), data([{ id: id(11) }])])
   const action = { kind: 'resolution', decision: { action: 'create_albi', referralSourceId: '5' } }
