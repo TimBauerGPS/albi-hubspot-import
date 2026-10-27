@@ -23,8 +23,8 @@ function rowReason(item, review, { pending, sending, error }) {
   return { line: review.reasonLabel, tone: 'text-gray-500' }
 }
 
-// Presentational queue for one bucket. Bulk controls (tick boxes, select all, bulk link, recheck selected)
-// exist only on the Quick wins bucket, and there is deliberately no bulk create.
+// Presentational queue for one bucket. Tick boxes, select all and recheck selected are on every open bucket;
+// bulk link and create selected only on Quick wins.
 export default function ReviewQueue({
   items = [], bucket = 'quick', selectedId = null, pendingIds = new Set(), sendingIds = new Set(), errors = {}, checked = new Set(),
   bulkEnabled = true, onSelect, onToggle, onSelectAll, bulkLinkCount = 0, onBulkLink, onRecheckSelected, createSelectedCount = 0, onCreateSelected, busy = false,
@@ -41,17 +41,19 @@ export default function ReviewQueue({
     return () => observer.disconnect()
   }, [nextCursor])
 
-  const bulk = bucket === 'quick' && bulkEnabled
+  const quick = bucket === 'quick'
+  const bulk = ['quick', 'decision', 'blocked'].includes(bucket) && bulkEnabled
   const selectable = items.filter(item => !pendingIds.has(item.id))
   const allChecked = selectable.length > 0 && selectable.every(item => checked.has(item.id))
   return <aside className="min-w-0 overflow-hidden rounded-xl border border-gray-200 bg-white lg:sticky lg:top-4" aria-label="Review queue">
     {bulk && <div className="space-y-2 border-b border-gray-200 p-3">
-      <p className="text-xs text-gray-600">{checked.size ? `${checked.size} selected` : 'Bulk link applies to every exact match, or to the rows you tick (x). Tick no-match rows to create them together.'}</p>
+      <p className="text-xs text-gray-600">{checked.size ? `${checked.size} selected` : quick ? 'Bulk link applies to every exact match, or to the rows you tick (x). Tick no-match rows to create them together.'
+        : 'Tick rows (x), or select all, to recheck them together. Albi is read once for the batch.'}</p>
       <div className="flex flex-wrap gap-2">
         <button type="button" className={btn} disabled={busy || !selectable.length} onClick={onSelectAll}>{allChecked ? 'Clear selection' : 'Select all in bucket'}</button>
-        <button type="button" className={btn} disabled={busy || !bulkLinkCount} onClick={onBulkLink}>Link all exact matches ({bulkLinkCount})</button>
+        {quick && <button type="button" className={btn} disabled={busy || !bulkLinkCount} onClick={onBulkLink}>Link all exact matches ({bulkLinkCount})</button>}
         <button type="button" className={btn} disabled={busy || !checked.size} onClick={onRecheckSelected}>Recheck selected ({checked.size})</button>
-        {onCreateSelected && <button type="button" className={btn} disabled={busy || !createSelectedCount} onClick={onCreateSelected}
+        {quick && onCreateSelected && <button type="button" className={btn} disabled={busy || !createSelectedCount} onClick={onCreateSelected}
           title="Create the ticked no-match records in Albi with their default referral sources">Create selected ({createSelectedCount})</button>}
       </div>
     </div>}

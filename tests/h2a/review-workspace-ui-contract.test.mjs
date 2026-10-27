@@ -407,8 +407,15 @@ test('quick wins tab shows bulk link and no bulk create', async () => {
   assert.equal((out.match(/type="checkbox"/g) ?? []).length, 3)
   assert.match(out, /Jane Doe/); assert.match(out, /Lakeside/)
   assert.doesNotMatch(out, /Create all|Bulk create|Create \d|Create selected/i)
-  const decision = await rendered('ReviewQueue.jsx', { ...props, bucket: 'decision' })
-  assert.doesNotMatch(decision, /Link all exact matches|Select all in bucket|type="checkbox"/)
+  // Decision and Blocked can be ticked and rechecked together, but never bulk linked or created.
+  for (const bucket of ['decision', 'blocked']) {
+    const other = await rendered('ReviewQueue.jsx', { ...props, bucket, onCreateSelected() {}, createSelectedCount: 1 })
+    assert.match(other, /Select all in bucket/); assert.match(other, /Recheck selected \(1\)/)
+    assert.equal((other.match(/type="checkbox"/g) ?? []).length, 3)
+    assert.doesNotMatch(other, /Link all exact matches|Create selected/)
+  }
+  const done = await rendered('ReviewQueue.jsx', { ...props, bucket: 'done' })
+  assert.doesNotMatch(done, /Select all in bucket|type="checkbox"/)
   // The workspace counts only quick link rows that are not pending, and never offers a bulk create.
   const ui = await mountWorkspace({ rows: items })
   assert.equal(ui.queue().props.bulkLinkCount, 2)

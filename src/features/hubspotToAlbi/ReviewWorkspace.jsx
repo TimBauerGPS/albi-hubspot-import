@@ -838,7 +838,7 @@ export default function ReviewWorkspace({
       return
     }
     if (action === 'recheck') { handleRecheck(); return }
-    if (action === 'toggle') { if (view === 'quick') toggle(selectedId); return }
+    if (action === 'toggle') { if (OPEN_BUCKETS.includes(view)) toggle(selectedId); return }
     if (action === 'create' && referralRef.current && !referralRef.current.value) { event.preventDefault(); referralRef.current.focus(); return }
     const button = rootRef.current?.querySelector?.(`[data-shortcut="${action}"]`)
     if (button && !button.disabled) { event.preventDefault(); button.click() }
