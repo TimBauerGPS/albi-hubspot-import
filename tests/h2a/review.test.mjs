@@ -132,7 +132,7 @@ test('production evaluation recognizes same-numbered foreign-portal target owner
 })
 
 const cases = [
-  ['ambiguous email and phone', evaluateContactReview, { source: { ...contact, properties: { ...contact.properties, phone: '5551112222' } }, candidates: [cleanContact, { id: 'albi-phone', phoneNumber: '5551112222' }] }, 'email_phone_disagree', 'contact_match'],
+  ['email match beside another record phone', evaluateContactReview, { source: { ...contact, properties: { ...contact.properties, phone: '5551112222' } }, candidates: [cleanContact, { id: 'albi-phone', phoneNumber: '5551112222' }] }, 'albi_contact_update_contract_unverified', 'contact_fields'],
   ['contact name only', evaluateContactReview, { source: contact, candidates: [{ id: 'name', firstName: 'A', lastName: 'Person' }] }, 'name_only_candidate', 'contact_match'],
   ['duplicate contacts', evaluateContactReview, { source: contact, candidates: [cleanContact, { ...cleanContact, id: 'duplicate' }] }, 'duplicate_candidates', 'contact_match'],
   ['unsupported contact phone evidence', evaluateContactReview, { source: { id: 'hs', firstname: 'A', lastname: 'Person', phone: '5551112222 ext 9' }, candidates: [{ id: 'phone', phoneNumber: '5551112222' }] }, 'unsupported_phone_evidence', 'contact_match'],

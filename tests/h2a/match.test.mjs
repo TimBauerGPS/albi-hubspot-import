@@ -121,16 +121,39 @@ test('links one exact normalized contact phone', () => {
   assert.deepEqual(result.evidence, ['phone'])
 })
 
-test('conflicts when email and phone point to different contact records', () => {
+test('a unique email match wins over phone matches on other contact records', () => {
   const result = decideContactMatch({
-    source: { email: 'jane@example.com', phone: '4155550123' },
+    source: { firstName: 'Dean', lastName: 'Driscoll', email: 'dean@example.com', phone: '4155550123' },
     candidates: [
-      contact('by-email', { email: 'jane@example.com' }),
-      contact('by-phone', { phone: '4155550123' }),
+      contact('by-email', { firstName: 'Dean', lastName: 'Driscoll', email: 'dean@example.com' }),
+      contact('by-phone-1', { firstName: 'Pat', lastName: 'Driscoll', phone: '4155550123' }),
+      contact('by-phone-2', { phone: '(415) 555-0123' }),
     ],
   })
-  assert.equal(result.action, 'conflict')
-  assert.equal(result.reason, 'email_phone_disagree')
+  assert.equal(result.action, 'link')
+  assert.equal(result.targetId, 'by-email')
+  assert.deepEqual(result.evidence, ['email'])
+})
+
+test('a phone match with the same name wins over phone-only matches', () => {
+  const result = decideContactMatch({
+    source: { firstName: 'Dean', lastName: 'Driscoll', phone: '4155550123' },
+    candidates: [
+      contact('named', { firstName: 'Dean', lastName: 'Driscoll', phone: '4155550123' }),
+      contact('other', { firstName: 'Pat', lastName: 'Driscoll', phone: '4155550123' }),
+    ],
+  })
+  assert.equal(result.action, 'link')
+  assert.equal(result.targetId, 'named')
+})
+
+test('same email and same name links even when the phone changed', () => {
+  const result = decideContactMatch({
+    source: { firstName: 'Dean', lastName: 'Driscoll', email: 'dean@example.com', phone: '4155550123' },
+    candidates: [contact('albi-1', { firstName: 'Dean', lastName: 'Driscoll', email: 'dean@example.com', phoneNumber: '5105550199' })],
+  })
+  assert.equal(result.action, 'link')
+  assert.equal(result.targetId, 'albi-1')
 })
 
 test('conflicts on duplicate exact contact email or phone candidates', () => {

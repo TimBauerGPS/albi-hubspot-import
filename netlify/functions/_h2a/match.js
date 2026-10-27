@@ -331,14 +331,21 @@ export function decideContactMatch(input = {}) {
   const mapped = resolveMapping(input, 'contact', source, candidates)
   if (mapped) return mapped
 
+  // Evidence tiers: a unique email match wins outright, then a phone match on a
+  // record with the same name, then a lone phone match. Phone matches on other
+  // records never override a stronger tier.
   const { byEmail, byPhone, unsupportedPhone, phoneResults } = contactMatches(source, candidates)
-  if (byEmail.length > 1 || byPhone.length > 1) return result('conflict', 'duplicate_candidates')
-  const emailTarget = byEmail[0] ? idOf(byEmail[0]) : null
-  const phoneTarget = byPhone[0] ? idOf(byPhone[0]) : null
-  if (emailTarget && phoneTarget && emailTarget !== phoneTarget) return result('conflict', 'email_phone_disagree')
-  if (unsupportedPhone.length && !byPhone.length) return result('conflict', 'unsupported_phone_evidence')
-
-  const candidate = byEmail[0] ?? byPhone[0]
+  if (byEmail.length > 1) return result('conflict', 'duplicate_candidates')
+  let candidate = byEmail[0]
+  if (candidate && unsupportedPhone.includes(candidate) && !byPhone.includes(candidate)) {
+    return result('conflict', 'unsupported_phone_evidence')
+  }
+  if (!candidate) {
+    if (unsupportedPhone.length && !byPhone.length) return result('conflict', 'unsupported_phone_evidence')
+    const namedPhone = nameMatches(source, byPhone)
+    if (namedPhone.length > 1 || !namedPhone.length && byPhone.length > 1) return result('conflict', 'duplicate_candidates')
+    candidate = namedPhone[0] ?? byPhone[0]
+  }
   if (candidate) {
     const targetId = idOf(candidate)
     if (matchDecisionConflict(sourceId, targetId, input)) return result('conflict', 'target_already_mapped', targetId)
@@ -347,8 +354,10 @@ export function decideContactMatch(input = {}) {
     if (sourceEmail && candidateEmail && sourceEmail !== candidateEmail) {
       return result('conflict', 'email_phone_disagree', targetId)
     }
+    // Same email and same name is the same person even after a phone change.
+    const emailAndName = byEmail.includes(candidate) && nameMatches(source, [candidate]).length > 0
     const phoneEntry = phoneResults.find((entry) => entry.candidate === candidate)
-    if (phoneEntry && phoneSetsContradict(phoneEntry.sourcePhones.map((item) => item.value), phoneEntry.candidatePhones.map((item) => item.value))) {
+    if (phoneEntry && !emailAndName && phoneSetsContradict(phoneEntry.sourcePhones.map((item) => item.value), phoneEntry.candidatePhones.map((item) => item.value))) {
       return result('conflict', 'email_phone_disagree', targetId)
     }
     const evidence = []
