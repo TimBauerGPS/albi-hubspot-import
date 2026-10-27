@@ -1178,6 +1178,20 @@ export function createH2ARepository(supabase) {
       if (existing) return { ...existing, inserted: false }
       return { ...checked(await supabase.from('h2a_conflicts').insert({ ...conflict, company_id: companyId }).select('*').single()), inserted: true }
     },
+    // Closes an activity's open activity_target conflicts once the activity is delivered to Albi.
+    async resolveActivityConflicts(companyId, { portalId, objectType, activityId, runId = null } = {}) {
+      if (typeof companyId !== 'string' || !companyId.trim()) throw new TypeError('Company ID is required')
+      const now = new Date().toISOString()
+      const closed = checked(await supabase.from('h2a_conflicts')
+        .update({ status: 'resolved', resolved_at: now, updated_at: now })
+        .eq('company_id', companyId).eq('portal_id', portalId).eq('object_type', objectType).eq('source_id', activityId)
+        .eq('conflict_type', 'activity_target').eq('status', 'open').select('id')) ?? []
+      if (closed.length) {
+        checked(await supabase.from('h2a_conflict_events').insert(closed.map(row => ({ company_id: companyId, conflict_id: row.id,
+          event_type: 'resolved', sanitized_details: { resolvedBy: 'activity_delivered', runId }, created_at: now }))))
+      }
+      return closed.length
+    },
     deliveryStore(companyId) {
       if (typeof companyId !== 'string' || !companyId.trim()) throw new TypeError('Company ID is required')
       return {

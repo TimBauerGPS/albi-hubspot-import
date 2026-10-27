@@ -470,8 +470,8 @@ test('backfill computes create readiness for a new record with the shared captur
   const bySource = Object.fromEntries(f.db.tables.h2a_dry_run_reviews.map(row => [row.source_id, row]))
   assert.deepEqual([bySource['10'].triage_bucket, bySource['10'].triage_details], ['quick', { quickKind: 'create' }])
   assert.deepEqual([bySource['11'].triage_bucket, bySource['11'].triage_details], ['decision', {}])
-  // An associated HubSpot organization that is not synced yet blocks the contact behind it.
-  assert.deepEqual([bySource['12'].triage_bucket, bySource['12'].triage_details], ['blocked', { blockedReason: 'organization_not_synced' }])
+  // A contact behind an organization not in Albi yet is a decision: the record offers create organization and contact.
+  assert.deepEqual([bySource['12'].triage_bucket, bySource['12'].triage_details], ['decision', { blockedReason: 'organization_not_synced' }])
   assert.deepEqual([reads.albiOptions, reads.referral], [1, 1])
 })
 

@@ -36,6 +36,10 @@ test('blocked with copy-backed reason and no candidates', () => {
   const result = computeTriage({ row: row(), ranking: none, createReadiness: { ready: false, blockedReason: 'referrer_type_missing' } })
   assert.deepEqual(result, { bucket: 'blocked', details: { blockedReason: 'referrer_type_missing' } })
 })
+test('an organization not in Albi yet is a decision, since the record can create the organization', () => {
+  const result = computeTriage({ row: row(), ranking: none, createReadiness: { ready: false, blockedReason: 'organization_not_synced' } })
+  assert.deepEqual(result, { bucket: 'decision', details: { blockedReason: 'organization_not_synced' } })
+})
 test('blocked reason with candidates is a decision', () => {
   assert.equal(computeTriage({ row: row(), ranking: many, createReadiness: { ready: false, blockedReason: 'referrer_type_missing' } }).bucket, 'decision')
 })

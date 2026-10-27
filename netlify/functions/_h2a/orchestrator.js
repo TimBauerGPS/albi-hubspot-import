@@ -396,7 +396,13 @@ async function processActivity(deps, ctx, activity, deadline) {
         outcome: 'failed', sanitized_details: safeFailure(error) })
     }
   }
-  return allResolved && resolved.targets.length > 0
+  const delivered = allResolved && resolved.targets.length > 0
+  // Delivered: the activity's own held rows are settled. Best effort, so it never fails the delivery.
+  if (delivered && typeof deps.repository.resolveActivityConflicts === 'function') {
+    await deps.repository.resolveActivityConflicts(companyId, { portalId, objectType: activity.objectType, activityId: sourceId, runId })
+      .catch(() => {})
+  }
+  return delivered
 }
 
 export async function runCompanySync(deps, input = {}) {

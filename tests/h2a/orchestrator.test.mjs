@@ -338,6 +338,20 @@ test('live sync links existing records and persists delivery before cursor', asy
   assert.deepEqual(deps.cursors.find(row => row.type === 'calls')?.cursor, { timestamp: '2026-10-02T12:00:00.000Z', objectId: '50' })
 })
 
+test('a delivered activity closes its held activity conflicts; an undelivered one does not', async () => {
+  const delivered = exactAssociations(throwingCreates(liveFixture(existingAlbi())))
+  const closes = []
+  delivered.repository.resolveActivityConflicts = async (companyId, input) => { closes.push([companyId, input.objectType, input.activityId]); return 1 }
+  await runCompanySync(delivered, { companyId: 'c1', mode: 'live', trigger: 'manual' })
+  assert.deepEqual(closes, [['c1', 'calls', '50']])
+
+  const held = exactAssociations(throwingCreates(liveFixture()))
+  const heldCloses = []
+  held.repository.resolveActivityConflicts = async (...args) => { heldCloses.push(args); return 0 }
+  await runCompanySync(held, { companyId: 'c1', mode: 'live', trigger: 'manual' })
+  assert.deepEqual(heldCloses, [])
+})
+
 test('live sync never calls albi.createContact or albi.createOrganization', async () => {
   const deps = exactAssociations(throwingCreates(liveFixture()))
   const result = await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
@@ -773,11 +787,11 @@ test('create-ready new contact with mapped organization is captured as quick cre
   assert.equal(deps.createOptionCalls, 1, 'create options are read once per run')
 })
 
-test('new contact behind an unmapped organization is captured blocked organization_not_synced', async () => {
+test('new contact behind an unmapped organization is captured as a decision with organization_not_synced', async () => {
   const deps = createReadyReads(exactAssociations(throwingCreates(liveFixture())))
   await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
   const contact = deps.liveReviews.find(review => review.object_type === 'contacts')
-  assert.equal(contact.triage_bucket, 'blocked')
+  assert.equal(contact.triage_bucket, 'decision')
   assert.deepEqual(contact.triage_details, { blockedReason: 'organization_not_synced' })
   const organization = deps.liveReviews.find(review => review.object_type === 'companies')
   assert.deepEqual([organization.triage_bucket, organization.triage_details], ['quick', { quickKind: 'create' }])

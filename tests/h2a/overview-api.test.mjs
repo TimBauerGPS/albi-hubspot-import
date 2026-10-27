@@ -51,6 +51,10 @@ function repository(overrides = {}) {
       calls.push(['countOpenConflicts', companyId])
       return 4
     },
+    async countWaitingActivities(companyId) {
+      calls.push(['countWaitingActivities', companyId])
+      return 9
+    },
     async getSampleReviewRuns(companyId) {
       calls.push(['getSampleReviewRuns', companyId])
       return { latest: null, completed: null }
@@ -102,11 +106,12 @@ test('overview is tenant scoped and returns active, recent, last-success, and op
   const repo = repository()
   const result = await getOverview({ repository: repo, companyId: 'company-1', limit: 25 })
 
-  assert.deepEqual(repo.calls.map(call => call[1]), Array(6).fill('company-1'))
+  assert.deepEqual(repo.calls.map(call => call[1]), Array(7).fill('company-1'))
   assert.equal(result.summary.activeRun.status, 'running')
   assert.equal(result.summary.recentRun.status, 'completed')
   assert.equal(result.summary.lastSuccessfulRun.status, 'completed')
   assert.equal(result.summary.unresolvedConflictCount, 4)
+  assert.equal(result.summary.waitingActivityCount, 9)
   assert.equal(result.runs.length, 1)
   assert.equal(result.nextCursor, null)
 })
@@ -369,9 +374,14 @@ test('overview summary repository queries retain the authorized company predicat
     repo.getRecentRun('company-1'),
     repo.getLastCompletedRun('company-1'),
     repo.countOpenConflicts('company-1'),
+    repo.countWaitingActivities('company-1'),
   ])
 
-  assert.equal(supabase.queries.length, 5)
+  assert.equal(supabase.queries.length, 6)
+  assert.ok(supabase.queries.some(query => query.table === 'h2a_dry_run_reviews' &&
+    query.operations.some(item => item.method === 'eq' && item.args[0] === 'status' && item.args[1] === 'needs_review')))
+  assert.ok(supabase.queries.some(query => query.table === 'h2a_conflicts' &&
+    query.operations.some(item => item.method === 'eq' && item.args[0] === 'conflict_type' && item.args[1] === 'activity_target')))
   for (const query of supabase.queries) {
     assert.ok(query.operations.some(item => item.method === 'eq' &&
       item.args[0] === 'company_id' && item.args[1] === 'company-1'))

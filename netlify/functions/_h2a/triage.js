@@ -35,6 +35,8 @@ export function computeTriage({ row, ranking, createReadiness, resolutionStatus,
   if (mergedInto?.sourceId) return { bucket: 'blocked', details: { merged: true,
     ...(SURVIVOR_ID.test(String(mergedInto.sourceId)) ? { mergedIntoSourceId: String(mergedInto.sourceId) } : {}) } }
   const blockedReason = createReadiness?.blockedReason
+  // A missing organization is fixed from the record itself (create organization and contact), so it is a decision.
+  if (candidates.length === 0 && blockedReason === 'organization_not_synced') return { bucket: 'decision', details: { blockedReason } }
   if (candidates.length === 0 && blockedReasonCopy(blockedReason)) return { bucket: 'blocked', details: { blockedReason } }
   const category = H2A_REVIEW_REASON_CATALOG[row?.reason]?.category
   if (ranking?.suggestedCandidateId && candidates.length === 1 && category !== 'field' && category !== 'association') {

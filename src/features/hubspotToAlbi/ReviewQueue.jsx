@@ -18,7 +18,7 @@ function rowReason(item, review, { pending, sending, error }) {
   const details = item?.triageDetails ?? {}
   if (details.merged) return { line: 'Merged in HubSpot. Review the surviving record.', tone: 'text-red-700' }
   const blocked = blockedReasonCopy(details.blockedReason)
-  if (blocked) return { line: blocked, tone: 'text-red-700' }
+  if (blocked) return { line: blocked, tone: item?.triageBucket === 'blocked' ? 'text-red-700' : 'text-amber-700' }
   if (item?.triageBucket === 'quick') return { line: details.quickKind === 'create' ? 'Ready to create in Albi' : 'One exact match in Albi', tone: 'text-green-700' }
   return { line: review.reasonLabel, tone: 'text-gray-500' }
 }

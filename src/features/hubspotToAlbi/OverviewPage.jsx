@@ -348,12 +348,14 @@ export default function OverviewPage() {
           {[
             ['Recent status', recentRun ? words(recentRun.status) : 'No runs yet'],
             ['Last successful sync', lastSuccess ? dateTime(lastSuccess.finished_at) : 'Not yet'],
-            ['Open conflicts', summary.unresolvedConflictCount ?? 0],
+            ['Open conflicts', summary.unresolvedConflictCount ?? 0,
+              summary.waitingActivityCount > 0 ? `${summary.waitingActivityCount} activities waiting on these` : null],
             ['Recent processed / proposed', recentRun ? recentTotal : 0],
-          ].map(([label, value]) => (
+          ].map(([label, value, note]) => (
             <div key={label} className="bg-white px-4 py-4">
               <dt className="text-xs font-medium text-gray-500">{label}</dt>
               <dd className="mt-1 text-lg font-semibold text-gray-900">{value}</dd>
+              {note && <dd className="mt-0.5 text-xs text-gray-500">{note}</dd>}
             </div>
           ))}
         </dl>

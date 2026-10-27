@@ -168,13 +168,14 @@ export async function getOverview({ repository, companyId, cursor = null, limit 
   if (typeof companyId !== 'string' || !companyId.trim()) fail(400, 'A valid company is required.')
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) fail(400, 'Overview page size must be between 1 and 100.')
   const before = validateCursor(cursor)
-  const [page, activeRun, recentRun, lastSuccessfulRun, unresolvedConflictCount, sampleRuns] = await Promise.all([
+  const [page, activeRun, recentRun, lastSuccessfulRun, unresolvedConflictCount, sampleRuns, waitingActivityCount] = await Promise.all([
     repository.listRuns(companyId, { limit, before }),
     repository.getActiveRun(companyId),
     repository.getRecentRun(companyId),
     repository.getLastCompletedRun(companyId),
     repository.countOpenConflicts(companyId),
     repository.getSampleReviewRuns(companyId),
+    typeof repository.countWaitingActivities === 'function' ? repository.countWaitingActivities(companyId) : 0,
   ])
   const rows = Array.isArray(page?.items) ? page.items : []
   const selected = rows.slice(0, limit)
@@ -194,6 +195,7 @@ export async function getOverview({ repository, companyId, cursor = null, limit 
       completedSampleRun: sanitizeOverviewRun(sampleRuns.completed),
       unresolvedConflictCount: Number.isSafeInteger(unresolvedConflictCount) && unresolvedConflictCount >= 0
         ? unresolvedConflictCount : 0,
+      waitingActivityCount: Number.isSafeInteger(waitingActivityCount) && waitingActivityCount >= 0 ? waitingActivityCount : 0,
     },
     runs: selected.map(run => {
       const sanitized = sanitizeOverviewRun(run)
@@ -250,9 +252,18 @@ export function createOverviewRepository(supabase) {
       return maybeOne(scoped(supabase, companyId).eq('status', 'completed')
         .order('finished_at', { ascending: false }).order('id', { ascending: false }))
     },
+    // Open conflicts are the open live review records (one per contact or organization), as the review tabs count them.
     async countOpenConflicts(companyId) {
+      const result = await supabase.from('h2a_dry_run_reviews').select('id', { count: 'exact', head: true })
+        .eq('company_id', companyId).eq('review_kind', 'live').eq('status', 'needs_review')
+        .in('triage_bucket', ['quick', 'todo', 'decision', 'blocked'])
+      if (result?.error) throw result.error
+      return Number.isSafeInteger(result?.count) ? result.count : 0
+    },
+    // HubSpot activities held until the contact or organization they belong to is resolved.
+    async countWaitingActivities(companyId) {
       const result = await supabase.from('h2a_conflicts').select('id', { count: 'exact', head: true })
-        .eq('company_id', companyId).eq('status', 'open')
+        .eq('company_id', companyId).eq('status', 'open').eq('conflict_type', 'activity_target')
       if (result?.error) throw result.error
       return Number.isSafeInteger(result?.count) ? result.count : 0
     },
