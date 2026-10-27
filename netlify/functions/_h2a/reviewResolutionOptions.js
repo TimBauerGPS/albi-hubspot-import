@@ -96,6 +96,13 @@ export async function loadReviewResolutionOptions({ row, repository, reads, prog
               ...(organizationMergeConflict(mappings.organizations, companies[0], row.portal_id) ? { mergeConflict: true } : {}) } }
         }
       }
+      // Held only because its organization was unresolved, and that organization is now in Albi: a recheck decides
+      // the contact (create or link). Walking every Albi contact on each open to offer a choice trips Albi's rate limit.
+      const resolvedTarget = allAssociated.length === 1 ? exactMapping(mappings.organizations, row.portal_id, allAssociated[0], 'companies') : null
+      if (row.reason === 'organization_unresolved' && resolvedTarget &&
+        !mappings.contacts.some(item => item?.portal_id === row.portal_id && mappedSource(item) === row.source_id)) {
+        return { ...unavailable, organizationResolved: { sourceId: allAssociated[0], targetId: resolvedTarget } }
+      }
       const contacts = await step('albi_contacts', () => all(args => reads.albiRead.listContacts(args)))
       const organizations = await step('albi_organizations', () => all(args => reads.albiRead.listOrganizations(args)))
       if (!contacts || !organizations) return unavailable

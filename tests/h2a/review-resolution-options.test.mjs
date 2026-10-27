@@ -25,6 +25,16 @@ test('organization options come from fresh association and verified tenant mappi
     organizationUrl: 'https://app.albiware.com/Relationships/Organization/888' }])
 })
 
+test('an unlinked contact held for its organization, now mapped, says to recheck without walking Albi', async () => {
+  const noWalk = { ...reads, albiRead: { ...reads.albiRead, listContacts: async () => { throw Error('must not scan Albi contacts') },
+    listOrganizations: async () => { throw Error('must not scan Albi organizations') } } }
+  const result = await loadReviewResolutionOptions({ row: { ...row, candidate_snapshots: [] },
+    repository: { getMappings: async () => ({ ...mappings, contacts: [] }) }, reads: noWalk })
+  assert.deepEqual(result.organizationResolved, { sourceId: '777', targetId: '888' })
+  assert.deepEqual(result.organizationOptions, [])
+  assert.equal(result.createReadiness.blockedReason, undefined)
+})
+
 test('missing or contradictory live association evidence leaves organization actions unavailable', async () => {
   for (const current of [[], [{ fromId: '123', toObjectType: 'companies', toIds: ['bad'] }],
     [{ fromId: '123', toObjectType: 'companies', toIds: ['777', '777'] }]]) {

@@ -139,6 +139,8 @@ export default function ReviewRecord({
   const organizationGate = organizationOptions.length === 0 && idPattern.test(item?.organizationGate?.sourceId)
     ? { sourceId: item.organizationGate.sourceId, reviewId: typeof item.organizationGate.reviewId === 'string' && item.organizationGate.reviewId ? item.organizationGate.reviewId : null,
       mergeConflict: item.organizationGate.mergeConflict === true } : null
+  // Its organization is in Albi now: a recheck decides the contact, so there is nothing to choose here.
+  const organizationResolved = organizationOptions.length === 0 && !organizationGate && idPattern.test(item?.organizationResolved?.targetId)
   const chosenOrganization = organizationOptions.find(option => option.sourceId === organizationSourceId)
 
   // Diff rows. In field mode every field the resolution can write is choosable, even one the normalized diff hides.
@@ -272,6 +274,7 @@ export default function ReviewRecord({
           <button type="button" className={`${btn} mt-3`} disabled={disabled || !chosenOrganization || !chosenOrganization.associated && !approveAssociation}
             onClick={() => onChooseOrganization?.({ organizationSourceId, addHubSpotAssociation: !chosenOrganization.associated })}>Choose organization</button></>
           : organizationGate ? <div className="mt-3">{organizationFirstCard(organizationGate)}</div>
+            : organizationResolved ? <p className="mt-2 text-xs text-gray-700">This contact’s organization is in Albi now. Recheck this record: it is then offered as a create, or as a link if Albi already has the contact.</p>
             : <p className="mt-2 text-xs text-amber-800">Fresh server association evidence is unavailable. Recheck or reload this record before choosing an organization.</p>}
       </section>}
 
