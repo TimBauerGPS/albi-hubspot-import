@@ -256,9 +256,13 @@ function assertComparison(row, current, plan, replay, verifiedCreateTargetId = n
   if (!isDeepStrictEqual(liveSource, row.source_snapshot)) stale('source', differingFields(liveSource, row.source_snapshot))
   if (current.albi && ['resolve_fields', 'link_existing'].includes(plan.action)) {
     const before = row.candidate_snapshots?.find(item => item.id === current.albi.id)
-    const liveTarget = safeReviewSnapshot(current.albi, row.object_type)
     if (!before) stale('target')
-    if (!isDeepStrictEqual(liveTarget, safeReviewSnapshot(before, row.object_type))) stale('target', differingFields(liveTarget, safeReviewSnapshot(before, row.object_type)))
+    // A link writes no fields (only the mapping), so Albi edits since review never make it stale.
+    // A field resolution writes from the reviewed values, so any target change does.
+    const liveTarget = safeReviewSnapshot(current.albi, row.object_type)
+    if (plan.action === 'resolve_fields' && !isDeepStrictEqual(liveTarget, safeReviewSnapshot(before, row.object_type))) {
+      stale('target', differingFields(liveTarget, safeReviewSnapshot(before, row.object_type)))
+    }
   }
   if (['resolve_fields', 'link_existing'].includes(plan.action) && !current.albi) stale('target_missing')
   if (plan.action === 'force_create_albi') {

@@ -1288,3 +1288,28 @@ test('a create given a shared Albi read uses it, verifies against the receipt, a
   assert.deepEqual(snapshot.contacts.map(record => record.id), ['30'])
   assert.equal(snapshot.contacts[0].email, 'hs@example.com')
 })
+
+test('a link still saves when the Albi record was edited after review, since a link writes no fields', async () => {
+  const f = fixture(); f.row.reason = 'multiple_candidates'; f.row.conflict_type = 'contact_match'
+  Object.assign(f.contacts[0], { phoneNumber: '5559990000', address1: '9 New Street' })
+  const result = await executeReviewResolution(f.deps, { ...input, decision: { action: 'link_existing', candidateId: '20' } })
+  assert.notEqual(result.resolution.status, 'failed')
+  assert.ok(f.calls.includes('mapping'))
+})
+
+test('an email-matched link that ignored differences fails if the Albi email no longer matches', async () => {
+  const f = fixture(); f.row.reason = 'multiple_candidates'; f.row.conflict_type = 'contact_match'
+  f.target.email = 'hs@example.com'; f.row.candidate_snapshots[0].email = 'hs@example.com'; f.contacts[0].email = 'other@example.com'
+  const result = await executeReviewResolution(f.deps, { ...input,
+    decision: { action: 'link_existing', candidateId: '20', ignoreContactDifferences: true } })
+  assert.equal(result.resolution.status, 'failed')
+  assert.equal(f.calls.includes('mapping'), false)
+})
+
+test('a field resolution is still stale when any reviewed Albi field changed after review', async () => {
+  const f = fixture()
+  f.contacts[0].phoneNumber = '5559990000'
+  await assert.rejects(executeReviewResolution(f.deps, input), error => error.statusCode === 409)
+  assert.equal(f.events.at(-1).details.staleCheck, 'target')
+  assert.deepEqual(mutations(f), [])
+})
