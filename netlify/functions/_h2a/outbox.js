@@ -75,7 +75,9 @@ function classify(details = {}) {
 
 function classifyError(error) {
   if (error instanceof H2AReviewError) {
-    if (error.statusCode === 409) return { outcome: 'failed', errorCode: 'changed', detail: {} }
+    // A freshness refusal names its check: a new Albi candidate is a possible match, not a changed record.
+    if (error.statusCode === 409) return { outcome: 'failed', errorCode: error.staleCheck === 'candidates' ? 'possible_match' : 'changed',
+      detail: typeof error.staleCheck === 'string' ? { staleCheck: error.staleCheck.slice(0, 40) } : {} }
     if ([400, 403, 404].includes(error.statusCode)) return { outcome: 'failed', errorCode: error.statusCode === 404 ? 'not_found' : 'not_allowed', detail: {} }
   }
   if (error?.category === 'rate_limit') return { outcome: 'busy', errorCode: 'albi_busy', detail: { category: 'rate_limit' } }

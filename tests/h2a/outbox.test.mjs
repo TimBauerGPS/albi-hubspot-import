@@ -100,6 +100,14 @@ test('other failures stay in the Outbox with a named reason', async () => {
   assert.deepEqual(f.rows.map(row => [row.status, row.error_code]), [['failed', 'changed'], ['failed', 'possible_match'], ['failed', 'error']])
 })
 
+test('a send refused because Albi has a new candidate is a possible match, not a changed record', async () => {
+  const refusal = staleCheck => Object.assign(new H2AReviewError(409, 'This record changed. Refresh and confirm the resolution again.'), { staleCheck })
+  const f = fixture([item(1), item(2)], { [UUID(101)]: [refusal('candidates')], [UUID(102)]: [refusal('target')] })
+  await runReviewOutbox(f.deps, { companyId: 'c1' })
+  assert.deepEqual(f.rows.map(row => [row.error_code, row.error_detail]),
+    [['possible_match', { staleCheck: 'candidates' }], ['changed', { staleCheck: 'target' }]])
+})
+
 test('only one worker sends for a company at a time', async () => {
   const f = fixture([item(1)])
   f.setWorker('someone-else')
