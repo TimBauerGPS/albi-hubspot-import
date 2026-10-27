@@ -257,6 +257,27 @@ test('a live batch runs without a sample run and only over live rows', async () 
   assert.deepEqual(result.counts, { total: 2, done: 2, cleared: 0, stillNeedsReview: 1, noLongerInScope: 1, stale: 0, failed: 0 })
 })
 
+test('a live row a recheck clears as safe to create stays open under a reason that offers the create', async () => {
+  const f = fixture({ rows: [{ kind: 'live' }, { kind: 'live', email: 'a@example.com' }],
+    contacts: [{ id: '20', firstName: 'A', lastName: 'Person1', email: 'a@example.com' }], organizations: [{ id: '700', name: 'Insurer' }] })
+  // Its organization was not in Albi when captured; it has been linked since.
+  f.reviews[0].reason = 'organization_unresolved'
+  f.reviews[0].conflict_type = 'association'
+  f.hubspotRead.getAssociations = async args => [{ fromId: args.objectIds[0], toObjectType: 'companies', toIds: args.objectIds[0] === '10' ? ['900'] : [] }]
+  f.hubspotRead.getCompanies = async ids => ids[0] === '900' ? [{ id: '900', properties: { name: 'Insurer' } }] : []
+  f.deps.repository.getMappings = async () => ({ contacts: [],
+    organizations: [{ portal_id: '123', hubspot_id: '900', albi_organization_id: '700' }],
+    options: [{ mapping_kind: 'default_contact_type', source_key: 'default', albi_id: 'ct-1', confirmed_at: '2026-10-12T00:00:00Z' }] })
+  f.deps.batchRepository.claimReviewRecheckBatch = async () => ({ id: batchId, run_id: null, review_kind: 'live', review_ids: null,
+    requested_by: actorId, status: 'running' })
+  await runReviewRecheckBatch(f.deps, input)
+  const [created, linked] = f.applied.map(([, payload]) => payload)
+  assert.deepEqual([created.outcome, created.status, created.reason, created.conflictType], ['safe_to_create', 'needs_review', 'no_match', 'contact_match'])
+  // Any other outcome keeps the reason the recheck reported.
+  assert.deepEqual([linked.outcome, linked.reason], ['safe_to_link', 'name_only_candidate'])
+  assert.deepEqual(f.closes.map(([, args]) => args.reviewId), [f.reviews[1].id])
+})
+
 test('live and sample batches can run at the same time', async () => {
   const f = fixture({ rows: [{}, {}, { kind: 'live' }, { kind: 'live' }] })
   const batches = {

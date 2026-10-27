@@ -357,9 +357,13 @@ async function recheckLiveReview(deps, { companyId, reviewId, actorId, expectedU
     runId: row.run_id, failureMessage: LIVE_MESSAGES.failed, live: true })
   const terminal = RECHECK_TERMINALS[evaluation.outcome]
   if (!terminal) fail(502, LIVE_MESSAGES.failed)
+  // A live row stays open, so its reason decides what it offers. A recheck that cleared it as safe to create
+  // replaces the captured reason (e.g. an organization not in Albi yet) with "no match", which offers the create.
+  const cleared = evaluation.outcome === 'safe_to_create'
+    ? { reason: 'no_match', conflictType: row.object_type === 'contacts' ? 'contact_match' : 'organization_match' } : {}
   const result = await repository.applyDryRunRecheck(companyId, { runId: row.run_id, reviewId, expectedUpdatedAt, actorId,
     kind: 'live', status: 'needs_review', outcome: terminal.outcome, eventType: 'still_needs_review',
-    ...recheckPayload(row, source, evaluation), eventDetails: { outcome: terminal.outcome }, now: iso(deps) })
+    ...recheckPayload(row, source, evaluation), ...cleared, eventDetails: { outcome: terminal.outcome }, now: iso(deps) })
   if (result?.error) fail(result.error === 'not_found' ? 404 : ['stale', 'superseded'].includes(result.error) ? 409 : 502,
     result.error === 'not_found' ? LIVE_MESSAGES.not_found : result.error === 'invalid_recheck' ? LIVE_MESSAGES.failed : LIVE_MESSAGES.stale)
   if (!isRecord(result?.review)) fail(502, LIVE_MESSAGES.failed)
