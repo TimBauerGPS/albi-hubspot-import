@@ -7,6 +7,7 @@ export const H2A_BLOCKED_REASONS = Object.freeze({
   salesperson_not_found: 'The HubSpot owner’s name does not exactly match one Albi salesperson. Correct the name in Albi or HubSpot, then recheck.',
   organization_not_synced: 'This contact’s HubSpot organization is not in Albi yet. Create or link the organization first.',
   source_changed: 'This HubSpot record changed since it was last checked. Recheck this record, then create it.',
+  phone_unusable: 'The HubSpot phone isn’t a US number Albi accepts (it’s international or the wrong length). Fix or clear it in HubSpot, then recheck.',
   missing_name: 'The HubSpot record has no name (a contact needs a first or last name, an organization a company name). Add it in HubSpot, then recheck.',
   default_type_unconfirmed: 'The default Albi type isn’t confirmed. Confirm the default contact and organization types in Settings, then recheck.',
   referral_sources_unavailable: 'Albi’s referral sources could not be loaded. Reload this record to try again.',

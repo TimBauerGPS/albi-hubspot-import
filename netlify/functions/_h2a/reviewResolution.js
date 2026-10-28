@@ -219,8 +219,11 @@ function createPayload(input, hubspot, type, associations) {
     if (value === null || value === '') continue
     if (field === 'phoneNumber') {
       const normalized = normalizePhone(value)
-      if (normalized.conflictReason || !normalized.writable) invalidPlan()
-      value = normalized.writable
+      // Albi has no phone extension: a number with one is created with the main number (the extension stays in HubSpot).
+      const main = normalized.conflictReason === 'extension_not_supported' && /^\d{10}$/.test(normalized.comparable ?? '')
+        ? `${normalized.comparable.slice(0, 3)}-${normalized.comparable.slice(3, 6)}-${normalized.comparable.slice(6)}` : null
+      if (!main && (normalized.conflictReason || !normalized.writable)) invalidPlan()
+      value = main ?? normalized.writable
     }
     payload[field === 'zipcode' ? 'zipCode' : field] = value
   }

@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from 'node:util'
+import { normalizePhone } from './normalize.js'
 import { getH2AReviewActions, getH2AReviewRowActions } from '../../../shared/h2aReviewReasons.js'
 import { buildAlbiRecordUrl } from '../../../shared/h2aProviderLinks.js'
 import { resolveContactType } from './options.js'
@@ -205,8 +206,13 @@ export async function loadReviewResolutionOptions({ row, repository, reads, prog
         organizationTypeId })
       const typeReady = type.action === 'resolved' && providerId(type.contactTypeId) &&
         Number.isSafeInteger(Number(type.contactTypeId))
-      const baseReady = nameReady && organizationReady && typeReady && !organizationBlock
-      const notReadyReason = organizationBlock ? null : !nameReady ? 'missing_name' : !typeReady ? 'default_type_unconfirmed' : null
+      // The create sends a usable phone or none (an extension is dropped); any other phone would be refused at send.
+      const phone = normalizePhone(String(props.phone ?? ''))
+      const phoneReady = !String(props.phone ?? '').trim() || Boolean(phone.writable) ||
+        phone.conflictReason === 'extension_not_supported' && /^\d{10}$/.test(phone.comparable ?? '')
+      const baseReady = nameReady && phoneReady && organizationReady && typeReady && !organizationBlock
+      const notReadyReason = organizationBlock ? null : !nameReady ? 'missing_name' : !phoneReady ? 'phone_unusable'
+        : !typeReady ? 'default_type_unconfirmed' : null
       // Referral sources and the create defaults load in parallel; Albi's lists are cached per company while warm.
       const cacheKey = typeof row.company_id === 'string' && row.company_id ? row.company_id : null
       const [sources, defaults] = baseReady ? await Promise.all([

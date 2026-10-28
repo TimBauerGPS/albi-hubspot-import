@@ -1325,3 +1325,13 @@ test('an unexpected failure records what was thrown and where, so it can be diag
   assert.match(failed.details.exception.message, /reading 'albi_contact_id'/)
   assert.match(failed.details.exception.at, /beforeMapping/)
 })
+
+test('a HubSpot phone with an extension is created in Albi with the main number', async () => {
+  const f = fixture(), createInput = asCreate(f)
+  f.source.properties.phone = '818-710-3852 ext 5117'
+  f.row.source_snapshot.phoneNumber = '818-710-3852 ext 5117'
+  f.createdTarget = { ...f.createdTarget, phoneNumber: '818-710-3852' }
+  const result = await executeReviewResolution(f.deps, createInput)
+  assert.equal(result.resolution.status, 'ready_to_recheck', JSON.stringify(f.events.filter(e => e.eventType === 'failed').map(e => e.details)))
+  assert.equal(mutations(f)[0][1].phoneNumber, '818-710-3852')
+})

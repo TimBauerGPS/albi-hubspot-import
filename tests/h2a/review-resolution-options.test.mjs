@@ -405,3 +405,17 @@ test('the create referral source is prefilled from the contact’s Albi organiza
   assert.equal((await load({ organization: { referralSourceID: '99' }, team: {} })).createReadiness.defaultReferralSourceId, undefined)
   assert.equal((await load({ organization: {}, team: { 'someone@else.test': '6' } })).createReadiness.defaultReferralSourceId, undefined)
 })
+
+test('a phone with an extension can be created; a phone Albi would refuse is named before the record is queued', async () => {
+  const { safeReviewSnapshot } = await import('../../netlify/functions/_h2a/review.js')
+  const withPhone = phone => {
+    const source = { id: '123', properties: { firstname: 'Alex', lastname: 'Stone', phone } }
+    return loadReviewResolutionOptions({ row: { ...row, reason: 'no_match', recheck_outcome: null, candidate_snapshots: [],
+      source_snapshot: safeReviewSnapshot(source, 'contacts') },
+    repository: { getMappings: async () => ({ ...mappings, contacts: [], options: [{ mapping_kind: 'default_contact_type', albi_id: '12', confirmed: true }] }) },
+    reads: { ...reads, hubspotRead: { ...reads.hubspotRead, getContacts: async () => [source] } } })
+  }
+  assert.equal((await withPhone('818-710-3852 ext 5117')).createReadiness.ready, true)
+  assert.deepEqual((await withPhone('+44 20 7946 0958')).createReadiness, { ready: false, blockedReason: 'phone_unusable' })
+  assert.deepEqual((await withPhone('710-3852')).createReadiness, { ready: false, blockedReason: 'phone_unusable' })
+})

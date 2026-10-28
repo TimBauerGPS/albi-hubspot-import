@@ -244,12 +244,15 @@ test('create prerequisites reject missing names, options, unresolved context and
   for (const change of [
     input => { input.hubspot.properties.lastname = ''; input.hubspot.properties.firstname = '' }, input => { input.optionMappings[0].confirmed = false },
     input => { input.optionMappings.push({ ...input.optionMappings[0] }) }, input => { input.optionMappings[0].albi_id = '0' },
-    input => { input.hubspot.properties.phone = '5551112222 x123' },
+    input => { input.hubspot.properties.phone = '+44 20 7946 0958' },
     input => { input.associatedCompanyIds = ['99'] },
     input => { input.mappings = [{ hubspot_id: '42', albi_contact_id: '7' }] },
   ]) { const input = createInput('contacts'); change(input); assert.throws(() => plan(input), TypeError) }
   const company = createInput('companies'); company.hubspot.properties.name = null
   assert.throws(() => plan(company), TypeError)
+  // Albi has no extension: the main number is sent.
+  const extension = createInput('contacts'); extension.hubspot.properties.phone = '5551112222 x123'
+  assert.equal(plan(extension).providerOperation.payload.phoneNumber, '555-111-2222')
 })
 
 const organizationInput = () => ({ ...fieldsInput(), review: { ...structuredClone(contactReview), reason: 'multiple_associated_organizations' },
