@@ -72,6 +72,8 @@ async function failureOf(deps, companyId, resolution) {
 function classify(details = {}) {
   const detail = Object.fromEntries(['category', 'code', 'staleCheck', 'providerStatus'].filter(key => details[key] !== undefined && details[key] !== null)
     .map(key => [key, key === 'providerStatus' ? Number(details[key]) : String(details[key]).slice(0, 40)]))
+  if (typeof details.providerReason === 'string') detail.providerReason = details.providerReason.slice(0, 200)
+  if (object(details.exception)) detail.exception = details.exception
   if (details.category === 'rate_limit') return { outcome: 'busy', errorCode: 'albi_busy', detail }
   if (details.category === 'transient') return { outcome: 'retry', errorCode: 'provider_unavailable', retryMs: OUTBOX_SEND_RETRY_MS, detail }
   const errorCode = details.staleCheck === 'candidates' ? 'possible_match' : details.code === 'malformed_response' ? 'reply_unreadable'

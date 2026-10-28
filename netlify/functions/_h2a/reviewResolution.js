@@ -380,7 +380,34 @@ export function safeResolutionEventDetails(value) {
   }
   if (RESOLUTION_OUTCOME_CODES.includes(input.outcome)) details.outcome = input.outcome
   if (Array.isArray(input.manualTasks)) details.manualTasks = safeManualTasks(input.manualTasks)
+  const exception = safeResolutionException(input.exception)
+  if (exception) details.exception = exception
   return details
+}
+
+// An unexpected failure (not a provider error) described for diagnosis: its kind, Postgres code and where in our
+// code it was thrown. A message is kept only where it describes code, not record values: our own refusals, raised
+// database exceptions and JavaScript type errors.
+const MESSAGE_KINDS = ['H2AReviewError', 'TypeError', 'ReferenceError', 'RangeError', 'SyntaxError']
+export function describeResolutionException(error) {
+  if (error === null || error === undefined) return null
+  const kind = typeof error?.name === 'string' && /^\w{1,40}$/.test(error.name) ? error.name : typeof error === 'object' ? 'object' : typeof error
+  const pgCode = typeof error?.code === 'string' && /^[0-9A-Z]{5}$/.test(error.code) ? error.code : null
+  // The innermost named functions (names survive bundling; file positions do not).
+  const frames = typeof error?.stack === 'string' ? error.stack.split('\n').map(line => line.match(/^\s*at (?:async )?([\w$.]{1,40}) \(/)?.[1])
+    .filter(name => name && !name.startsWith('Promise') && !name.startsWith('process.')).slice(0, 4) : []
+  const keepMessage = MESSAGE_KINDS.includes(kind) || pgCode === 'P0001'
+  return safeResolutionException({ kind, ...(pgCode ? { pgCode } : {}), ...(Number.isInteger(error?.statusCode) ? { status: error.statusCode } : {}),
+    ...(frames.length ? { at: frames.join('<') } : {}),
+    ...(keepMessage && typeof error?.message === 'string' ? { message: error.message.replace(/\s+/g, ' ').slice(0, 160) } : {}) })
+}
+function safeResolutionException(value) {
+  if (!object(value) || typeof value.kind !== 'string' || !/^\w{1,40}$/.test(value.kind)) return null
+  return { kind: value.kind,
+    ...(typeof value.pgCode === 'string' && /^[0-9A-Z]{5}$/.test(value.pgCode) ? { pgCode: value.pgCode } : {}),
+    ...(Number.isInteger(value.status) && value.status >= 100 && value.status <= 599 ? { status: value.status } : {}),
+    ...(typeof value.at === 'string' && /^[\w$.<]{1,170}$/.test(value.at) ? { at: value.at } : {}),
+    ...(typeof value.message === 'string' && value.message.length <= 160 ? { message: value.message } : {}) }
 }
 
 // Executor-only proof. Reject rather than truncate: every stored value must be

@@ -1313,3 +1313,15 @@ test('a field resolution is still stale when any reviewed Albi field changed aft
   assert.equal(f.events.at(-1).details.staleCheck, 'target')
   assert.deepEqual(mutations(f), [])
 })
+
+test('an unexpected failure records what was thrown and where, so it can be diagnosed', async () => {
+  const f = fixture(), createInput = asCreate(f)
+  f.beforeMapping = () => { null.albi_contact_id }
+  const result = await executeReviewResolution(f.deps, createInput)
+  assert.equal(result.resolution.status, 'failed')
+  const failed = f.events.filter(event => event.eventType === 'failed').at(-1)
+  assert.equal(failed.details.category, 'error')
+  assert.equal(failed.details.exception.kind, 'TypeError')
+  assert.match(failed.details.exception.message, /reading 'albi_contact_id'/)
+  assert.match(failed.details.exception.at, /beforeMapping/)
+})

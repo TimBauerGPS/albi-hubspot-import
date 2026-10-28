@@ -5,7 +5,7 @@ import { ApiError, isRecord, malformed } from './http.js'
 import { H2AReviewError, resolveReviewSample } from './reviewService.js'
 import { buildReviewResolutionPlan, hashResolutionDecision, normalizeResolutionDecision, safeResolutionEventDetails,
   safeResolutionExecutionContext, resolutionCanonicalField, RESOLUTION_EVENT_LIMIT } from './reviewResolution.js'
-import { isResolutionProviderId } from './reviewResolution.js'
+import { describeResolutionException, isResolutionProviderId } from './reviewResolution.js'
 import { safeReviewSnapshot } from './review.js'
 import { refreshReviewTriage } from './triage.js'
 import { LIVE_CLOSE_FOR_ACTION, closeLiveReview } from './liveReview.js'
@@ -78,7 +78,9 @@ function fixedFailure(error) {
     ? error.providerShape : undefined
   return { category, code, ...(providerStatus ? { providerStatus } : {}), ...(providerReason ? { providerReason } : {}),
     ...(providerShape ? { providerShape } : {}),
-    ...(typeof error?.staleCheck === 'string' ? { staleCheck: error.staleCheck, staleFields: error.staleFields ?? [] } : {}) }
+    ...(typeof error?.staleCheck === 'string' ? { staleCheck: error.staleCheck, staleFields: error.staleFields ?? [] } : {}),
+    // Not a provider error: keep what was thrown so the failure can be diagnosed.
+    ...(category === 'error' ? { exception: describeResolutionException(error) } : {}) }
 }
 
 async function bounded(deps, call, deadline) {
