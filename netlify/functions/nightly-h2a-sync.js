@@ -100,6 +100,9 @@ export function createNightlyScheduler(options = {}) {
           const finished = await (options.finishResume ?? ((id, resumeId, owner, ok, code) => repository.finishConflictResume(id, resumeId, owner, ok, code)))
             (companyId, intent.id, ownerToken, accepted === true, accepted === true ? null : 'dispatch_not_accepted')
           results.push({ companyId, kind: 'resume', resumeId: intent.id, status: accepted && finished ? 'accepted' : 'pending' })
+          // One run holds the company at a time and drains the rest of the queue; more dispatches would only be
+          // refused as already running.
+          if (accepted === true) break
         } catch {
           try { await (options.finishResume ?? ((id, resumeId, owner, ok, code) => repository.finishConflictResume(id, resumeId, owner, ok, code)))
             (companyId, intent.id, ownerToken, false, 'dispatch_failed') } catch { /* The owner lease will expire for a retry. */ }

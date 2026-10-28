@@ -405,6 +405,38 @@ async function processActivity(deps, ctx, activity, deadline) {
   return delivered
 }
 
+// Delivers the activities of pending conflict releases one after another under the caller's lease. A release whose
+// activity is delivered (or no longer exists in HubSpot) is done; one still held goes to the back of the line, so it
+// never blocks the rest. Each release is settled on its own; a failure never stops the drain.
+export const RESUME_DRAIN_MARGIN_MS = 60000
+async function drainConflictResumes(deps, ctx, { exclude = null, deadline }) {
+  const repo = deps.repository
+  if (!['listPendingConflictResumes', 'claimConflictResume', 'finishConflictResume'].every(name => typeof repo[name] === 'function')) return
+  const seen = new Set(exclude ? [exclude] : [])
+  while (clockMs(deps) < deadline - RESUME_DRAIN_MARGIN_MS) {
+    let page
+    try { page = await repo.listPendingConflictResumes(ctx.companyId, 50) } catch { return }
+    const next = (Array.isArray(page) ? page : []).find(row => row?.id && !seen.has(row.id))
+    if (!next) return
+    seen.add(next.id)
+    const owner = randomUUID()
+    let claimed = null
+    try { claimed = await repo.claimConflictResume(ctx.companyId, next.id, owner, 600) } catch { continue }
+    if (!claimed) continue
+    let done = false
+    try {
+      if (!['link_existing', 'create_new'].includes(claimed.resolution_action)) done = false
+      else if (!claimed.activity_object_type || !claimed.activity_id) done = true
+      else {
+        const activity = await deps.hubspot.getActivity(claimed.activity_object_type, claimed.activity_id)
+        if (!activity || String(activity.id) !== claimed.activity_id) done = true
+        else { ctx.activity = activity; done = await processActivity(deps, ctx, activity, deadline) }
+      }
+    } catch { done = false }
+    try { await repo.finishConflictResume(ctx.companyId, next.id, owner, done, done ? null : 'dispatch_not_accepted') } catch { /* The lease expires for a retry. */ }
+  }
+}
+
 export async function runCompanySync(deps, input = {}) {
   const { companyId, mode, trigger, runId = null } = input
   if (typeof companyId !== 'string' || !companyId.trim() || !['dry_run', 'live', 'backfill'].includes(mode) ||
@@ -459,10 +491,14 @@ export async function runCompanySync(deps, input = {}) {
         ctx.activity = activity
         await processActivity(deps, ctx, activity, deadline)
       }
+      const targeted = await repo.totals(companyId, run.id, mode)
+      if (targeted.failed || targeted.conflict) await repo.requeueConflictResume?.(companyId, input.resumeId)
+      // Only one run holds the company, so other releases dispatched alongside this one were refused as already
+      // running. Deliver them here, with the Albi read already made, rather than one per hourly attempt.
+      await drainConflictResumes(deps, ctx, { exclude: input.resumeId, deadline })
       totals = await repo.totals(companyId, run.id, mode)
       status = totals.failed || totals.conflict ? 'partially_failed' : 'completed'
       await repo.finishRun(companyId, run.id, status, totals)
-      if (status === 'partially_failed') await repo.requeueConflictResume?.(companyId, input.resumeId)
       return { status, companyId, runId: run.id, resumeId: input.resumeId, totals, newConflictCount: ctx.newConflictCount, continuation: false }
     }
     for (const objectType of HUBSPOT_ACTIVITY_TYPES) {

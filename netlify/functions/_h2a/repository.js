@@ -929,8 +929,9 @@ export function createH2ARepository(supabase) {
       }))
     },
     async listPendingConflictResumes(companyId, limit = 25) {
+      // Least recently tried first: a release put back after a failed attempt goes to the back of the line.
       return checked(await scoped(supabase, 'h2a_conflict_resumes', companyId).eq('status', 'pending')
-        .order('created_at', { ascending: true }).order('id', { ascending: true }).limit(limit))
+        .order('updated_at', { ascending: true }).order('id', { ascending: true }).limit(limit))
     },
     async claimConflictResume(companyId, resumeId, ownerToken, ttlSeconds = 120) {
       return checked(await supabase.rpc('h2a_claim_conflict_resume', {

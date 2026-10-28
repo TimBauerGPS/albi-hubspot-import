@@ -1616,3 +1616,29 @@ test('sample capture triage ranks with the run mappings: a candidate linked else
   assert.equal(deps.captures[0].row.triage_bucket, 'decision')
   assert.deepEqual(deps.captures[0].row.triage_details, {})
 })
+
+test('a targeted release drains the other pending releases under its lease, putting a still-held one back', async () => {
+  const deps = exactAssociations(liveFixture(existingAlbi()))
+  const intent = id => ({ id, company_id: 'c1', status: 'pending', resolution_action: 'link_existing',
+    source_object_type: 'contacts', source_id: '10', activity_object_type: 'calls',
+    activity_id: { 'resume-1': '50', 'resume-2': '50', 'resume-3': '60', 'resume-4': '70' }[id] })
+  const pending = ['resume-2', 'resume-3', 'resume-4'], finished = []
+  deps.repository.getConflictResume = async (_company, id) => intent(id)
+  deps.repository.getResumeRun = async () => null
+  deps.repository.startRun = async () => ({ id: 'run-resume', status: 'running' })
+  deps.repository.totals = async () => ({ delivered: 1 })
+  deps.repository.isSkippedItem = async () => false
+  deps.repository.listPendingConflictResumes = async () => pending.map(intent)
+  deps.repository.claimConflictResume = async (_company, id) => intent(id)
+  deps.repository.finishConflictResume = async (_company, id, _owner, accepted) => {
+    finished.push([id, accepted]); if (accepted) pending.splice(pending.indexOf(id), 1); return true }
+  deps.hubspot.getActivity = async (type, id) => {
+    if (id === '60') return null // deleted in HubSpot: nothing left to deliver
+    if (id === '70') throw Error('HubSpot unavailable')
+    return { id, objectType: type, occurredAt: '2026-10-02T12:00:00Z', properties: { hs_timestamp: '2026-10-02T12:00:00Z' } }
+  }
+  const result = await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'conflict_resolution', resumeId: 'resume-1' })
+  assert.equal(result.status, 'completed')
+  assert.deepEqual(finished, [['resume-2', true], ['resume-3', true], ['resume-4', false]])
+  assert.deepEqual(pending, ['resume-4'])
+})

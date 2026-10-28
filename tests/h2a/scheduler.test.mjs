@@ -114,3 +114,12 @@ test('each hour, a company with outbox actions left waiting gets an outbox worke
   assert.deepEqual(dispatched, [{ companyId: 'c1' }])
   assert.deepEqual(body.results.filter(row => row.kind === 'outbox'), [{ companyId: 'c1', kind: 'outbox', status: 'dispatched' }, { companyId: 'c2', kind: 'outbox', status: 'retryable' }])
 })
+
+test('scheduler sends one conflict release per company per tick, since that run drains the rest', async () => {
+  const resume = id => ({ id, company_id: 'c1', status: 'pending', resolution_action: 'link_existing', source_object_type: 'contacts', source_id: '10' })
+  const sent = []
+  const { handler } = fixture({ now: '2026-10-05T08:00:00.000Z', resumes: [resume('r1'), resume('r2'), resume('r3')],
+    dispatch: async payload => { sent.push(payload); return true } })
+  await handler({})
+  assert.deepEqual(sent.filter(payload => payload.trigger === 'conflict_resolution').map(payload => payload.resumeId), ['r1'])
+})
