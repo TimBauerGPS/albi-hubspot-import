@@ -367,7 +367,15 @@ async function recheckLiveReview(deps, { companyId, reviewId, actorId, expectedU
   if (result?.error) fail(result.error === 'not_found' ? 404 : ['stale', 'superseded'].includes(result.error) ? 409 : 502,
     result.error === 'not_found' ? LIVE_MESSAGES.not_found : result.error === 'invalid_recheck' ? LIVE_MESSAGES.failed : LIVE_MESSAGES.stale)
   if (!isRecord(result?.review)) fail(502, LIVE_MESSAGES.failed)
-  const closeOutcome = evaluation.outcome === 'safe_to_link' ? 'resolved_by_sync'
+  // Merged into a survivor already linked in Albi: nothing is left to resolve on the survivor's side (it has no open
+  // row to close this one with), so this row closes with it as resolved by sync.
+  let survivorLinked = false
+  if (evaluation.outcome === 'source_missing' && mergedInto) {
+    const mappings = await repository.getMappings(companyId).catch(() => null)
+    const rows = mappings?.[row.object_type === 'companies' ? 'organizations' : 'contacts']
+    survivorLinked = Array.isArray(rows) && rows.some(item => item?.portal_id === row.portal_id && item?.hubspot_id === mergedInto.sourceId)
+  }
+  const closeOutcome = evaluation.outcome === 'safe_to_link' || survivorLinked ? 'resolved_by_sync'
     : evaluation.outcome === 'source_missing' && !mergedInto ? 'source_missing' : null
   const finalized = await service.finalizeLiveRecheck(deps, { companyId, reviewId, actorId }, result.review, closeOutcome)
   const review = finalized.review ?? result.review

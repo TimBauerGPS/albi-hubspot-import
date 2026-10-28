@@ -583,3 +583,13 @@ test('a link that ignored chosen differences clears later rechecks of contacts a
   assert.equal(await organization({ action: 'link_existing', candidateId: '30', ignoredFields: ['phoneNumber'] }), 'safe_to_link')
   assert.equal(await organization(null), 'safe_to_link')
 })
+
+test('a source merged into a survivor already linked in Albi closes with it instead of staying blocked', async () => {
+  const f = liveFixture({ source: null })
+  f.deps.hubspotRead.getMergedInto = async (type, id) => type === 'contacts' && id === '10' ? '77' : null
+  f.deps.repository.getMappings = async () => ({ contacts: [{ portal_id: '123', hubspot_id: '77', albi_contact_id: '900' }], organizations: [], options: [] })
+  const result = await recheckDryRunReview(f.deps, input)
+  assert.deepEqual(f.store.state.closeCalls.map(call => [call.outcome, call.resolutionAction]), [['resolved_by_sync', null]])
+  assert.equal(result.review.status, 'no_longer_in_scope')
+  assert.notEqual(f.triage.at(-1)?.[1]?.bucket, 'blocked')
+})
