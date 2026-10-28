@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { normalizeOutboxAction, runReviewOutbox, OUTBOX_PACE_MS } from '../../netlify/functions/_h2a/outbox.js'
+import { normalizeOutboxAction, runReviewOutbox, OUTBOX_PACE_MS, OUTBOX_CHECKS_RETRY_MS, OUTBOX_SEND_RETRY_MS } from '../../netlify/functions/_h2a/outbox.js'
 import { H2AReviewError } from '../../netlify/functions/_h2a/reviewService.js'
 
 const UUID = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`
@@ -155,4 +155,34 @@ test('queued creates share one Albi read per run instead of each reading Albi', 
   assert.deepEqual(reads, ['contacts'])
   // The second create sees the first; the link reads Albi itself.
   assert.deepEqual(snapshots, [1, 2, null])
+})
+
+test('create checks that did not finish are tried again soon, keeping where they stopped; Albi refusing them as busy waits as busy', async () => {
+  const rows = [item(1, { kind: 'create_default_referral' }), item(2, { kind: 'create_default_referral' })]
+  const f = fixture(rows)
+  const timedOut = { ready: false, blockedReason: 'evidence_unavailable', evidence: { step: 'albi_referral_sources', code: 'timeout' } }
+  const busy = { ready: false, blockedReason: 'evidence_unavailable', evidence: { step: 'create_defaults', code: 'rate_limit', status: 429 } }
+  const readiness = { [UUID(101)]: [timedOut], [UUID(102)]: [busy] }
+  f.deps.loadCreateDefault = async row => readiness[row.review_id].shift() ?? { ready: true, defaultReferralSourceId: '7' }
+  await runReviewOutbox(f.deps, { companyId: 'c1' })
+  assert.deepEqual(f.finished.slice(0, 2).map(row => [row.id, row.status, row.errorCode, row.errorDetail]), [
+    [UUID(1), 'queued', 'evidence_unavailable', { step: 'albi_referral_sources', code: 'timeout' }],
+    [UUID(2), 'queued', 'albi_busy', { step: 'create_defaults', code: 'rate_limit', status: 429 }]])
+  assert.equal(Date.parse(f.finished[0].nextAttemptAt) - Date.parse('2026-10-23T12:00:00.000Z'), OUTBOX_CHECKS_RETRY_MS)
+  assert.deepEqual(f.rows.map(row => row.status), ['sent', 'sent'])
+})
+
+test('a send that timed out waits until Albi would show the create, then tries again; repeated timeouts fail with the reason', async () => {
+  const timeout = { resolution: { id: 'r-slow', status: 'failed' } }
+  const events = { 'r-slow': [{ event_type: 'failed', sanitized_details: { category: 'transient', code: 'timeout' } }] }
+  const once = fixture([item(1)], { [UUID(101)]: [timeout], events })
+  await runReviewOutbox(once.deps, { companyId: 'c1' })
+  assert.deepEqual(once.finished.map(row => [row.status, row.errorCode ?? null]), [['queued', 'provider_unavailable'], ['sent', null]])
+  assert.equal(Date.parse(once.finished[0].nextAttemptAt) - Date.parse('2026-10-23T12:00:00.000Z'), OUTBOX_SEND_RETRY_MS)
+
+  const always = fixture([item(1)], { [UUID(101)]: Array.from({ length: 6 }, () => timeout), events })
+  always.deps.maxRetryAttempts = 2
+  always.deps.budgetMs = 60 * 60000
+  await runReviewOutbox(always.deps, { companyId: 'c1' })
+  assert.deepEqual([always.rows[0].status, always.rows[0].error_code], ['failed', 'provider_unavailable'])
 })

@@ -11,6 +11,12 @@ export const OUTBOX_PACE_MS = 1500
 export const OUTBOX_BUSY_START_MS = 30000
 export const OUTBOX_BUSY_MAX_MS = 10 * 60000
 export const OUTBOX_MAX_BUSY_ATTEMPTS = 8
+// A read that timed out or an Albi/HubSpot outage is tried again a few times before the action fails. Create checks
+// that did not finish retry soon; a send that timed out waits until Albi's list would show a create it may have made
+// (the resolution looks for it before planning again).
+export const OUTBOX_MAX_RETRY_ATTEMPTS = 4
+export const OUTBOX_CHECKS_RETRY_MS = 30000
+export const OUTBOX_SEND_RETRY_MS = 5 * 60000 + 30000
 // Queued creates share one read of Albi's lists (grown with each record created) instead of each walking Albi;
 // it is read again once it is this old.
 export const OUTBOX_SNAPSHOT_MS = 5 * 60000
@@ -67,6 +73,7 @@ function classify(details = {}) {
   const detail = Object.fromEntries(['category', 'code', 'staleCheck', 'providerStatus'].filter(key => details[key] !== undefined && details[key] !== null)
     .map(key => [key, key === 'providerStatus' ? Number(details[key]) : String(details[key]).slice(0, 40)]))
   if (details.category === 'rate_limit') return { outcome: 'busy', errorCode: 'albi_busy', detail }
+  if (details.category === 'transient') return { outcome: 'retry', errorCode: 'provider_unavailable', retryMs: OUTBOX_SEND_RETRY_MS, detail }
   const errorCode = details.staleCheck === 'candidates' ? 'possible_match' : details.code === 'malformed_response' ? 'reply_unreadable'
     : details.staleCheck ? 'record_changed' : ['permission', 'auth'].includes(details.category) ? 'not_allowed'
       : details.category === 'validation' ? 'albi_rejected' : 'error'
@@ -81,7 +88,21 @@ function classifyError(error) {
     if ([400, 403, 404].includes(error.statusCode)) return { outcome: 'failed', errorCode: error.statusCode === 404 ? 'not_found' : 'not_allowed', detail: {} }
   }
   if (error?.category === 'rate_limit') return { outcome: 'busy', errorCode: 'albi_busy', detail: { category: 'rate_limit' } }
-  return { outcome: 'failed', errorCode: 'error', detail: {} }
+  if (error?.category === 'transient') return { outcome: 'retry', errorCode: 'provider_unavailable', retryMs: OUTBOX_SEND_RETRY_MS,
+    detail: { category: 'transient', ...(reasonCode(error.code) ? { code: error.code } : {}) } }
+  // Unexpected errors keep their kind so a failure can be diagnosed from the row.
+  return { outcome: 'failed', errorCode: 'error', detail: { category: reasonCode(error?.category) ?? 'unexpected',
+    ...(reasonCode(error?.code) ? { code: error.code } : {}), ...(typeof error?.name === 'string' ? { name: error.name.slice(0, 40) } : {}) } }
+}
+
+// Create checks that could not be read: Albi refusing as busy waits like a busy send; a timeout or outage retries soon.
+// The step and provider status they stopped at are kept on the row.
+function checksUnavailable(evidence) {
+  const detail = Object.fromEntries(['step', 'code', 'operation', 'status'].filter(key => object(evidence) &&
+    (key === 'status' ? Number.isInteger(evidence.status) : reasonCode(evidence[key])))
+    .map(key => [key, evidence[key]]))
+  if (detail.status === 429 || detail.code === 'rate_limit') return { outcome: 'busy', errorCode: 'albi_busy', detail }
+  return { outcome: 'retry', errorCode: 'evidence_unavailable', retryMs: OUTBOX_CHECKS_RETRY_MS, detail }
 }
 
 // Runs one queued action exactly as the workspace used to (same audited, idempotent resolution).
@@ -109,6 +130,7 @@ export async function runOutboxItem(deps, row) {
       // The same create checks and default the record shows; a record that is not ready fails with its reason.
       if (typeof deps.loadCreateDefault !== 'function') return { outcome: 'failed', errorCode: 'not_allowed', detail: {} }
       const readiness = await deps.loadCreateDefault(row)
+      if (readiness?.ready !== true && readiness?.blockedReason === 'evidence_unavailable') return checksUnavailable(readiness.evidence)
       if (readiness?.ready !== true) return { outcome: 'failed', errorCode: reasonCode(readiness?.blockedReason) ?? 'not_ready', detail: {} }
       const referralSourceId = providerId(readiness.defaultReferralSourceId) ? readiness.defaultReferralSourceId : action.fallbackReferralSourceId
       if (!providerId(referralSourceId)) return { outcome: 'failed', errorCode: 'no_default_referral', detail: {} }
@@ -146,6 +168,7 @@ export async function runReviewOutbox(deps, { companyId }) {
   const sleep = sleepFor(deps)
   const pace = Number.isFinite(deps.paceMs) ? Math.max(0, deps.paceMs) : OUTBOX_PACE_MS
   const maxBusy = Number.isInteger(deps.maxBusyAttempts) ? deps.maxBusyAttempts : OUTBOX_MAX_BUSY_ATTEMPTS
+  const maxRetry = Number.isInteger(deps.maxRetryAttempts) ? deps.maxRetryAttempts : OUTBOX_MAX_RETRY_ATTEMPTS
   const deadline = clock(deps) + Math.min(13 * 60000, Math.max(1000, deps.budgetMs ?? 13 * 60000))
   let busyMs = 0, sent = 0, failed = 0, status = 'idle'
   // One Albi read per list for this run's creates; any failed read just leaves that create to read Albi itself.
@@ -187,6 +210,11 @@ export async function runReviewOutbox(deps, { companyId }) {
         if (clock(deps) + busyMs >= deadline - 30000) { status = 'continued'; break }
         await sleep(busyMs)
         continue
+      } else if (result.outcome === 'retry' && row.attempts < maxRetry) {
+        // Back in line for later; the worker carries on with the rest meanwhile.
+        await repository.finishOutboxItem(companyId, row.id, { status: 'queued', nextAttemptAt: new Date(now + result.retryMs).toISOString(),
+          errorCode: result.errorCode, errorDetail: result.detail })
+        await moveTriage(deps, companyId, row.review_id, 'queued')
       } else {
         failed++
         await repository.finishOutboxItem(companyId, row.id, { status: 'failed', errorCode: result.errorCode, errorDetail: result.detail })

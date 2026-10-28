@@ -20,6 +20,7 @@ const REASONS = {
   not_found: 'The record no longer exists.',
   no_default_referral: 'It has no default referral source (none on its organization or salesperson). Back to review to choose one.',
   not_ready: 'Its create checks did not pass. Back to review to see why.',
+  provider_unavailable: 'Albi or HubSpot didn’t answer in time, several times. Retry checks Albi first, so nothing is duplicated.',
   error: 'Something went wrong sending it. Retry, or send it back to review.',
 }
 const time = value => { const parsed = Date.parse(value ?? ''); return Number.isFinite(parsed) ? new Date(parsed).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '' }
@@ -29,6 +30,7 @@ function statusText(item) {
   if (item.status === 'failed') return `Failed: ${REASONS[item.errorCode] ?? blockedReasonCopy(item.errorCode) ?? REASONS.error}`
   const at = Date.parse(item.nextAttemptAt ?? '')
   if (item.errorCode === 'albi_busy' && Number.isFinite(at) && at > Date.now()) return `Waiting: Albi was busy, trying again at ${time(item.nextAttemptAt)}`
+  if (item.errorCode && Number.isFinite(at) && at > Date.now()) return `Waiting: Albi didn’t answer in time, trying again at ${time(item.nextAttemptAt)}`
   return 'Waiting to send'
 }
 
