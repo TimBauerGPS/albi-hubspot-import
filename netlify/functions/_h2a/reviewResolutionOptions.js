@@ -172,6 +172,10 @@ export async function loadReviewResolutionOptions({ row, repository, reads, prog
           new Set(capturedIds).size !== capturedIds.length) return unavailable
       }
       const props = sourceRows[0].properties
+      // Albi refuses a second organization with the same name ("Organization already exists"): link it instead.
+      const sameName = value => String(value ?? '').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US')
+      if (forced && row.object_type === 'companies' && sameName(props.name) &&
+        row.candidate_snapshots.some(item => sameName(item?.name) === sameName(props.name))) return blocked('organization_name_taken')
       // One name is enough for a contact: the create fills Albi's other required name with a placeholder.
       const nameReady = row.object_type === 'contacts' ? Boolean(String(props.firstname ?? '').trim() || String(props.lastname ?? '').trim())
         : Boolean(String(props.name ?? '').trim())

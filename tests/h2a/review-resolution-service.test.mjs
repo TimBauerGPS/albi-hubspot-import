@@ -1335,3 +1335,12 @@ test('a HubSpot phone with an extension is created in Albi with the main number'
   assert.equal(result.resolution.status, 'ready_to_recheck', JSON.stringify(f.events.filter(e => e.eventType === 'failed').map(e => e.details)))
   assert.equal(mutations(f)[0][1].phoneNumber, '818-710-3852')
 })
+
+test('a contact with only a first name, matching nothing in Albi, is created (not refused as a possible match)', async () => {
+  const f = fixture(), createInput = asCreate(f)
+  delete f.source.properties.lastname; delete f.row.source_snapshot.lastName
+  f.createdTarget = { ...f.createdTarget, lastName: '.' }
+  const result = await executeReviewResolution(f.deps, createInput)
+  assert.equal(result.resolution.status, 'ready_to_recheck', JSON.stringify(f.events.filter(e => e.eventType === 'failed').map(e => e.details)))
+  assert.equal(mutations(f)[0][1].lastName, '.')
+})

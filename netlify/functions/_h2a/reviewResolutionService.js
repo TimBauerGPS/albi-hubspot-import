@@ -625,7 +625,9 @@ async function runClaim(deps, input, saved, context) {
         // A new create cannot override newly appeared or contradictory identity evidence.
         const matched = (row.object_type === 'contacts' ? decideContactMatch : decideOrganizationMatch)({ source: current.source,
           candidates: current.candidates, mappings: row.object_type === 'contacts' ? current.mappings.contacts : current.mappings.organizations, portalId: row.portal_id })
-        if (matched.action !== 'create') stale('candidates')
+        // A contact with one name matched nothing either: the create fills Albi's other name (the plan refuses no name).
+        const noMatch = matched.action === 'create' || row.object_type === 'contacts' && matched.reason === 'missing_required_name'
+        if (!noMatch) stale('candidates')
       }
     } else if (plan.verification.properties) reconciled = propertiesMatch(current.source, plan.verification.properties)
     else if (plan.verification.association) reconciled = current.associatedCompanyIds.includes(plan.verification.association.companyId)

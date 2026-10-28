@@ -419,3 +419,16 @@ test('a phone with an extension can be created; a phone Albi would refuse is nam
   assert.deepEqual((await withPhone('+44 20 7946 0958')).createReadiness, { ready: false, blockedReason: 'phone_unusable' })
   assert.deepEqual((await withPhone('710-3852')).createReadiness, { ready: false, blockedReason: 'phone_unusable' })
 })
+
+test('force-creating an organization whose possible match has the same name is blocked (Albi refuses duplicates by name)', async () => {
+  const { safeReviewSnapshot } = await import('../../netlify/functions/_h2a/review.js')
+  const load = (sourceName, candidateName) => {
+    const source = { id: '123', properties: { name: sourceName } }
+    return loadReviewResolutionOptions({ row: { ...row, object_type: 'companies', reason: 'name_only_candidate',
+      candidate_snapshots: [{ id: '456', name: candidateName }], source_snapshot: safeReviewSnapshot(source, 'companies') },
+    repository: { getMappings: async () => ({ contacts: [], organizations: [], options: [{ mapping_kind: 'default_organization_type', source_key: 'default', albi_id: '12', confirmed: true }] }) },
+    reads: { ...reads, hubspotRead: { ...reads.hubspotRead, getCompanies: async () => [source] } } })
+  }
+  assert.deepEqual((await load('Rooter Hero', ' rooter  hero ')).forceCreateReadiness, { eligible: true, ready: false, blockedReason: 'organization_name_taken' })
+  assert.equal((await load('Rooter Hero Plumbing', 'Rooter Hero')).forceCreateReadiness.ready, true)
+})
