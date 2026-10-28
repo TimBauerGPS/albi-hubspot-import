@@ -432,3 +432,16 @@ test('force-creating an organization whose possible match has the same name is b
   assert.deepEqual((await load('Rooter Hero', ' rooter  hero ')).forceCreateReadiness, { eligible: true, ready: false, blockedReason: 'organization_name_taken' })
   assert.equal((await load('Rooter Hero Plumbing', 'Rooter Hero')).forceCreateReadiness.ready, true)
 })
+
+test('the record page dry-runs the real create, so a record the send would refuse is named before it is queued', async () => {
+  const { safeReviewSnapshot } = await import('../../netlify/functions/_h2a/review.js')
+  const load = properties => {
+    const source = { id: '123', properties: { firstname: 'Alex', lastname: 'Stone', ...properties } }
+    return loadReviewResolutionOptions({ row: { ...row, reason: 'no_match', recheck_outcome: null, candidate_snapshots: [],
+      source_snapshot: safeReviewSnapshot(source, 'contacts') },
+    repository: { getMappings: async () => ({ ...mappings, contacts: [], options: [{ mapping_kind: 'default_contact_type', albi_id: '12', confirmed: true }] }) },
+    reads: { ...reads, hubspotRead: { ...reads.hubspotRead, getContacts: async () => [source] } } })
+  }
+  assert.equal((await load({ jobtitle: 'CEO' })).createReadiness.ready, true)
+  assert.deepEqual((await load({ jobtitle: 'x'.repeat(501) })).createReadiness, { ready: false, blockedReason: 'field_unusable' })
+})

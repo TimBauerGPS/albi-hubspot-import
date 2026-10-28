@@ -78,7 +78,7 @@ function classify(details = {}) {
   if (details.category === 'transient') return { outcome: 'retry', errorCode: 'provider_unavailable', retryMs: OUTBOX_SEND_RETRY_MS, detail }
   const errorCode = details.staleCheck === 'candidates' ? 'possible_match' : details.code === 'malformed_response' ? 'reply_unreadable'
     : details.staleCheck ? 'record_changed' : ['permission', 'auth'].includes(details.category) ? 'not_allowed'
-      : details.category === 'validation' ? 'albi_rejected' : 'error'
+      : details.category === 'validation' ? 'albi_rejected' : reasonCode(details.exception?.reason) ?? 'error'
   return { outcome: 'failed', errorCode, detail }
 }
 

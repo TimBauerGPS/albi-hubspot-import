@@ -186,3 +186,11 @@ test('a send that timed out waits until Albi would show the create, then tries a
   await runReviewOutbox(always.deps, { companyId: 'c1' })
   assert.deepEqual([always.rows[0].status, always.rows[0].error_code], ['failed', 'provider_unavailable'])
 })
+
+test('a send refused by the create builder fails with the named reason, not a generic error', async () => {
+  const f = fixture([item(1)], { [UUID(101)]: [{ resolution: { id: 'r-plan', status: 'failed' } }],
+    events: { 'r-plan': [{ event_type: 'failed', sanitized_details: { category: 'error', code: 'operation_failed',
+      exception: { kind: 'TypeError', reason: 'phone_unusable', message: 'Invalid resolution plan evidence' } } }] } })
+  await runReviewOutbox(f.deps, { companyId: 'c1' })
+  assert.deepEqual([f.rows[0].status, f.rows[0].error_code], ['failed', 'phone_unusable'])
+})

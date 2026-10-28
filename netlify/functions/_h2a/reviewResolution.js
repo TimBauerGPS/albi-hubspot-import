@@ -116,7 +116,8 @@ const FIELD_METADATA = {
 export function resolutionCanonicalField(objectType, providerProperty) {
   return Object.entries(FIELD_METADATA[objectType] ?? {}).find(([, metadata]) => metadata.hubspot === providerProperty)?.[0] ?? null
 }
-const invalidPlan = () => { throw new TypeError('Invalid resolution plan evidence') }
+// planReason (optional) names a refusal the record page can show before the record is queued.
+const invalidPlan = (planReason = null) => { throw Object.assign(new TypeError('Invalid resolution plan evidence'), planReason ? { planReason } : {}) }
 const positiveId = value => { if (!isResolutionProviderId(value)) invalidPlan(); return value }
 const list = value => value === undefined ? [] : Array.isArray(value) ? value : invalidPlan()
 
@@ -137,7 +138,7 @@ function fieldValue(value, aliases, required = true) {
       if (!Object.hasOwn(descriptor, 'value')) invalidPlan()
       const item = descriptor.value
       if (item === null) return ''
-      if (typeof item !== 'string' || item.length > 500) invalidPlan()
+      if (typeof item !== 'string' || item.length > 500) invalidPlan('field_unusable')
       return item
     }
   }
@@ -189,8 +190,8 @@ function createPayload(input, hubspot, type, associations) {
   let organization = null
   if (type === 'contacts' && associations.length) {
     // The first association (HubSpot's primary company) is the contact's organization.
-    organization = selectedOrganization(input, associations[0])
-    if (!Number.isSafeInteger(Number(organization.targetId))) invalidPlan()
+    try { organization = selectedOrganization(input, associations[0]) } catch (error) { invalidPlan(error.planReason ?? 'organization_not_synced') }
+    if (!Number.isSafeInteger(Number(organization.targetId))) invalidPlan('organization_not_synced')
   }
   const options = list(input.optionMappings)
   const selectedOptions = type === 'contacts' ? options : options.filter(row =>
@@ -198,8 +199,8 @@ function createPayload(input, hubspot, type, associations) {
     .map(row => ({ ...row, mapping_kind: 'default_contact_type' }))
   const resolved = resolveContactType({ mappings: selectedOptions, inheritFromOrganization: type === 'contacts',
     organizationTypeId: organization?.organizationTypeId })
-  if (resolved.action !== 'resolved') invalidPlan()
-  if (!Number.isSafeInteger(Number(positiveId(resolved.contactTypeId)))) invalidPlan()
+  if (resolved.action !== 'resolved' || !isResolutionProviderId(resolved.contactTypeId) ||
+    !Number.isSafeInteger(Number(resolved.contactTypeId))) invalidPlan('default_type_unconfirmed')
   // Created records are always typed Referrer and set Active; the salesperson follows the HubSpot owner.
   const defaults = object(input.createDefaults) ? input.createDefaults : invalidPlan()
   const typeId = positiveId(defaults.typeId)
@@ -215,14 +216,14 @@ function createPayload(input, hubspot, type, associations) {
     let value = fieldValue(hubspot, [meta.hubspot, field], false)
     if (value !== null) value = value.trim()
     if (['firstName', 'lastName'].includes(field) && !value && singleName) value = ALBI_NAME_PLACEHOLDER
-    if (['firstName', 'lastName', 'name'].includes(field) && !value) invalidPlan()
+    if (['firstName', 'lastName', 'name'].includes(field) && !value) invalidPlan('missing_name')
     if (value === null || value === '') continue
     if (field === 'phoneNumber') {
       const normalized = normalizePhone(value)
       // Albi has no phone extension: a number with one is created with the main number (the extension stays in HubSpot).
       const main = normalized.conflictReason === 'extension_not_supported' && /^\d{10}$/.test(normalized.comparable ?? '')
         ? `${normalized.comparable.slice(0, 3)}-${normalized.comparable.slice(3, 6)}-${normalized.comparable.slice(6)}` : null
-      if (!main && (normalized.conflictReason || !normalized.writable)) invalidPlan()
+      if (!main && (normalized.conflictReason || !normalized.writable)) invalidPlan('phone_unusable')
       value = main ?? normalized.writable
     }
     payload[field === 'zipcode' ? 'zipCode' : field] = value
@@ -295,7 +296,7 @@ export function buildReviewResolutionPlan(input) {
       list(input.mappings).some(row => !sameMappingSource(row, sourceId, portalId) && mappingTarget(row, type) === albi.id) && !decision.approveManyToOne) invalidPlan()
     result.mapping = { objectType: type, sourceId, targetId: albi.id, approveManyToOne: decision.approveManyToOne === true }
   } else if (['create_albi', 'force_create_albi'].includes(decision.action)) {
-    if (mappingRows(input, portalId).some(row => mappingSource(row) === sourceId)) invalidPlan()
+    if (mappingRows(input, portalId).some(row => mappingSource(row) === sourceId)) invalidPlan('source_already_mapped')
     if (decision.action === 'force_create_albi') {
       const captured = list(review.candidateSnapshots).map(item => positiveId(item?.id))
         .sort((a, b) => BigInt(a) < BigInt(b) ? -1 : BigInt(a) > BigInt(b) ? 1 : 0)
@@ -401,6 +402,7 @@ export function describeResolutionException(error) {
     .filter(name => name && !name.startsWith('Promise') && !name.startsWith('process.')).slice(0, 4) : []
   const keepMessage = MESSAGE_KINDS.includes(kind) || pgCode === 'P0001'
   return safeResolutionException({ kind, ...(pgCode ? { pgCode } : {}), ...(Number.isInteger(error?.statusCode) ? { status: error.statusCode } : {}),
+    ...(typeof error?.planReason === 'string' ? { reason: error.planReason } : {}),
     ...(frames.length ? { at: frames.join('<') } : {}),
     ...(keepMessage && typeof error?.message === 'string' ? { message: error.message.replace(/\s+/g, ' ').slice(0, 160) } : {}) })
 }
@@ -409,6 +411,7 @@ function safeResolutionException(value) {
   return { kind: value.kind,
     ...(typeof value.pgCode === 'string' && /^[0-9A-Z]{5}$/.test(value.pgCode) ? { pgCode: value.pgCode } : {}),
     ...(Number.isInteger(value.status) && value.status >= 100 && value.status <= 599 ? { status: value.status } : {}),
+    ...(typeof value.reason === 'string' && /^[a-z_]{1,40}$/.test(value.reason) ? { reason: value.reason } : {}),
     ...(typeof value.at === 'string' && /^[\w$.<]{1,170}$/.test(value.at) ? { at: value.at } : {}),
     ...(typeof value.message === 'string' && value.message.length <= 160 ? { message: value.message } : {}) }
 }

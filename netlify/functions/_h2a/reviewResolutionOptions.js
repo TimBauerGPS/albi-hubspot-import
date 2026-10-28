@@ -8,6 +8,7 @@ import { safeReviewSnapshot } from './review.js'
 import { buildCreateReadiness, evidenceOf, loadCreateDefaults, safeReferralSources, stepped, suggestReferralSource } from './createDefaults.js'
 import { cachedRead } from './readCache.js'
 import { followOrganizationMerge, organizationMergeConflict } from './organizationMerges.js'
+import { buildReviewResolutionPlan } from './reviewResolution.js'
 
 const providerId = value => typeof value === 'string' && /^[1-9]\d{0,99}$/.test(value)
 const record = value => value && typeof value === 'object' && !Array.isArray(value)
@@ -179,7 +180,7 @@ export async function loadReviewResolutionOptions({ row, repository, reads, prog
       // One name is enough for a contact: the create fills Albi's other required name with a placeholder.
       const nameReady = row.object_type === 'contacts' ? Boolean(String(props.firstname ?? '').trim() || String(props.lastname ?? '').trim())
         : Boolean(String(props.name ?? '').trim())
-      let organizationTypeId = null, organizationReady = true, organizationBlock = null, organizationTargetId = null
+      let organizationTypeId = null, organizationReady = true, organizationBlock = null, organizationTargetId = null, organizationSource = null
       if (associated.length === 1) {
         const sourceId = associated[0]
         const companies = await step('hubspot_organization', () => hubspot.getCompanies([sourceId]))
@@ -189,6 +190,7 @@ export async function loadReviewResolutionOptions({ row, repository, reads, prog
         const own = mappings.organizations.filter(item => item?.portal_id === row.portal_id && mappedSource(item) === sourceId)
         if (own.length > 1) return blocked('organization_mapping_ambiguous')
         if (!companyReady) return blocked('organization_missing_in_hubspot')
+        organizationSource = companies[0]
         const rows = followOrganizationMerge(mappings.organizations, companies[0], row.portal_id)
         const associationMappings = rows.filter(item => item?.portal_id === row.portal_id && mappedSource(item) === sourceId)
         const targetId = exactMapping(rows, row.portal_id, sourceId, 'companies')
@@ -228,6 +230,19 @@ export async function loadReviewResolutionOptions({ row, repository, reads, prog
       const suggestion = built.ready ? await suggestReferralSource({ organizationTargetId: row.object_type === 'contacts' ? organizationTargetId : null,
         ownerEmail: defaults?.ownerEmail ?? '', referralSources, albiRead: reads.albiRead, repository, companyId: row.company_id, cacheKey }) : null
       const details = suggestion ? { ...built, defaultReferralSourceId: suggestion.id, defaultReferralFrom: suggestion.from } : built
+      // Dry run of the create the send builds from the same evidence, so a record the send would refuse is named here
+      // instead of failing in the Outbox.
+      if (built.ready) {
+        try {
+          buildReviewResolutionPlan({ review: { objectType: row.object_type, sourceId: row.source_id, portalId: row.portal_id, reason: row.reason,
+            status: row.status, recheckOutcome: row.recheck_outcome ?? null, candidateSnapshots: row.candidate_snapshots, proposedChanges: row.proposed_changes },
+          hubspot: sourceRows[0], mappings: row.object_type === 'contacts' ? mappings.contacts : mappings.organizations, optionMappings: mappings.options,
+          associatedCompanyIds: row.object_type === 'contacts' ? allAssociated : [], portalId: row.portal_id, createDefaults: defaults,
+          organizations: organizationSource && organizationTargetId ? [{ source: organizationSource, targetId: organizationTargetId, organizationTypeId: null }] : [],
+          decision: { action: forced ? 'force_create_albi' : 'create_albi', referralSourceId: suggestion?.id ?? referralSources[0].id,
+            ...(forced ? { ignoredCandidateIds: row.candidate_snapshots.map(item => item.id) } : {}) } })
+        } catch (error) { return blocked(typeof error?.planReason === 'string' ? error.planReason : 'create_check_failed') }
+      }
       return { ...unavailable, ...(forced ? { forceCreateReadiness: { eligible: true, ...details } } : { createReadiness: details }) }
     }
     if (normal || forced) return named(sourceMapped ? 'source_already_mapped' : associated.length > 1 ? 'multiple_organizations' : 'evidence_unavailable')

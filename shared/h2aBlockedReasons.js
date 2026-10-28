@@ -9,6 +9,8 @@ export const H2A_BLOCKED_REASONS = Object.freeze({
   source_changed: 'This HubSpot record changed since it was last checked. Recheck this record, then create it.',
   phone_unusable: 'The HubSpot phone isn’t a US number Albi accepts (it’s international or the wrong length). Fix or clear it in HubSpot, then recheck.',
   organization_name_taken: 'Albi already has an organization with this exact name, and Albi doesn’t allow two. Link this record to it instead.',
+  field_unusable: 'A HubSpot value on this record is too long for Albi (over 500 characters). Shorten it in HubSpot, then recheck.',
+  create_check_failed: 'Albi would refuse this record as it is, so it can’t be created from here yet. Recheck it; if it stays blocked, report the record.',
   missing_name: 'The HubSpot record has no name (a contact needs a first or last name, an organization a company name). Add it in HubSpot, then recheck.',
   default_type_unconfirmed: 'The default Albi type isn’t confirmed. Confirm the default contact and organization types in Settings, then recheck.',
   referral_sources_unavailable: 'Albi’s referral sources could not be loaded. Reload this record to try again.',
