@@ -593,3 +593,29 @@ test('a source merged into a survivor already linked in Albi closes with it inst
   assert.equal(result.review.status, 'no_longer_in_scope')
   assert.notEqual(f.triage.at(-1)?.[1]?.bucket, 'blocked')
 })
+
+test('a merged-away company closes when its survivor is linked through one of the survivor’s own earlier merged IDs', async () => {
+  const f = liveFixture({ objectType: 'companies', source: null })
+  f.deps.hubspotRead.getMergedInto = async (type, id) => type === 'companies' && id === '10' ? '77' : null
+  f.deps.hubspotRead.getCompanies = async ids => ids[0] === '77' ? [{ id: '77', properties: { name: 'Survivor', hs_merged_object_ids: '55;10' } }] : []
+  f.deps.repository.getMappings = async () => ({ contacts: [], organizations: [{ portal_id: '123', hubspot_id: '55', albi_organization_id: '900' }], options: [] })
+  const result = await recheckDryRunReview(f.deps, input)
+  assert.deepEqual(f.store.state.closeCalls.map(call => [call.outcome, call.resolutionAction]), [['resolved_by_sync', null]])
+  assert.equal(result.review.status, 'no_longer_in_scope')
+})
+
+test('a merged-away row waits for a survivor with an open review, and closes as gone when the survivor has none', async () => {
+  const waiting = liveFixture({ source: null })
+  waiting.deps.hubspotRead.getMergedInto = async () => '77'
+  waiting.deps.repository.findOpenLiveReviewBySource = async () => ({ id: 'survivor-row' })
+  await recheckDryRunReview(waiting.deps, input)
+  assert.deepEqual(waiting.store.state.closeCalls, [])
+  assert.deepEqual(waiting.triage.at(-1), [reviewId, { bucket: 'blocked', details: { merged: true, mergedIntoSourceId: '77' } }])
+
+  const alone = liveFixture({ source: null })
+  alone.deps.hubspotRead.getMergedInto = async () => '77'
+  alone.deps.repository.findOpenLiveReviewBySource = async () => null
+  const result = await recheckDryRunReview(alone.deps, input)
+  assert.deepEqual(alone.store.state.closeCalls.map(call => [call.outcome, call.resolutionAction]), [['source_missing', 'skip']])
+  assert.equal(result.review.status, 'no_longer_in_scope')
+})

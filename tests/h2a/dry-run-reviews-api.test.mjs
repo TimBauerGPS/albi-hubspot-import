@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createDryRunReviewHandler } from '../../netlify/functions/h2a-dry-run-reviews.js'
+import { createDryRunReviewHandler, LIVE_SURVIVOR_PENDING } from '../../netlify/functions/h2a-dry-run-reviews.js'
 import { H2AAuthError } from '../../netlify/functions/_h2a/auth.js'
 import { presentSampleReviewItem } from '../../src/features/hubspotToAlbi/sampleReview.js'
 
@@ -626,10 +626,10 @@ test('a live survivor without an open row is a clear waiting state, not an error
   const response = await prepareSurvivor(f)
   assert.equal(response.statusCode, 200)
   assert.deepEqual(JSON.parse(response.body).survivor, { sourceId: '77', reviewId: null,
-    message: 'The surviving record will appear here when the next sync reaches it.' })
+    message: LIVE_SURVIVOR_PENDING })
   const detail = JSON.parse((await f.handler(get({ reviewId }))).body).item
   assert.deepEqual(detail.mergedInto, { sourceId: '77', reviewId: null,
-    message: 'The surviving record will appear here when the next sync reaches it.' })
+    message: LIVE_SURVIVOR_PENDING })
   const stale = liveMergedFixture()
   stale.repository.getReview = async () => liveRow({ updated_at: '2026-10-12T11:00:00.000Z' })
   assert.equal((await prepareSurvivor(stale)).statusCode, 409)

@@ -26,7 +26,7 @@ const reply = (statusCode, body) => ({ statusCode, headers: { 'Content-Type': 'a
   'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Content-Type, Authorization',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS' }, body: JSON.stringify(body) })
 // Live merge following never captures a row: the survivor's live row appears when a sync reaches it.
-export const LIVE_SURVIVOR_PENDING = 'The surviving record will appear here when the next sync reaches it.'
+export const LIVE_SURVIVOR_PENDING = 'The surviving record has no open review here (it is already linked in Albi, or the next sync will bring it in). Recheck this record to close it.'
 const emptyProgress = () => ({ total: 0, needsReview: 0, cleared: 0, noLongerInScope: 0, fullDryRunReady: false })
 const isAdminAuth = auth => auth?.isSuperAdmin === true || auth?.role === 'admin'
 const AUTH_MESSAGES = new Set(['Authentication required.', 'Invalid authentication token.', 'Administrator access is required.',

@@ -659,7 +659,9 @@ export default function ReviewWorkspace({
       try {
         const result = await prepare(session, companyId, { reviewId: contactId, expectedUpdatedAt: detail.updatedAt }, { signal: controller.signal })
         reviewId = pick(result) ?? null
-        if (!reviewId) setActionError('The related record could not be opened. Recheck this record and try again.')
+        // The server says why when there is no row to open (e.g. a merge survivor with no open review).
+        const reason = [result?.survivor?.message, result?.message].find(text => typeof text === 'string' && text)
+        if (!reviewId) setActionError(reason || 'The related record could not be opened. Recheck this record and try again.')
       } catch (cause) {
         if (cause?.name !== 'AbortError') setActionError(cause?.message || 'The related review could not be prepared.')
       } finally {

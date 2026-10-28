@@ -41,6 +41,9 @@ export function createReviewRepositoryCapabilities(repository) {
     // Kind-aware recheck reads the row by id first; absent on legacy sample-only adapters.
     ...(typeof repository.getReview === 'function' ? { getReview: repository.getReview.bind(repository) } : {}),
     getMappings: repository.getMappings.bind(repository),
+    // A merged-away live row's recheck looks for its survivor's open row.
+    ...(typeof repository.findOpenLiveReviewBySource === 'function'
+      ? { findOpenLiveReviewBySource: repository.findOpenLiveReviewBySource.bind(repository) } : {}),
     appendDryRunReviewEvent: repository.appendDryRunReviewEvent.bind(repository),
     applyDryRunRecheck: repository.applyDryRunRecheck.bind(repository),
   })
@@ -206,7 +209,11 @@ async function evaluateReviewRow(deps, { companyId, reviewId, actorId, row, conf
       // A live row closes as gone only when HubSpot does not list the source as merged into a survivor.
       if (live && typeof hubspot.getMergedInto === 'function') {
         const survivor = await read(deps, () => hubspot.getMergedInto(row.object_type, row.source_id), deadline)
-        if (typeof survivor === 'string' && /^[1-9]\d{0,99}$/.test(survivor)) mergedInto = { sourceId: survivor }
+        if (typeof survivor === 'string' && /^[1-9]\d{0,99}$/.test(survivor)) {
+          // The survivor's own record: a company's earlier merged IDs can carry its Albi link.
+          const record = await currentSource(deps, hubspot, row.object_type, survivor, deadline).catch(() => null)
+          mergedInto = { sourceId: survivor, ...(record ? { record } : {}) }
+        }
       }
     } else {
       const associatedCompanyIds = row.object_type === 'contacts' ? associations(await read(deps, () => hubspot.getAssociations({
@@ -367,20 +374,25 @@ async function recheckLiveReview(deps, { companyId, reviewId, actorId, expectedU
   if (result?.error) fail(result.error === 'not_found' ? 404 : ['stale', 'superseded'].includes(result.error) ? 409 : 502,
     result.error === 'not_found' ? LIVE_MESSAGES.not_found : result.error === 'invalid_recheck' ? LIVE_MESSAGES.failed : LIVE_MESSAGES.stale)
   if (!isRecord(result?.review)) fail(502, LIVE_MESSAGES.failed)
-  // Merged into a survivor already linked in Albi: nothing is left to resolve on the survivor's side (it has no open
-  // row to close this one with), so this row closes with it as resolved by sync.
-  let survivorLinked = false
+  // A merged-away row waits only while its survivor has an open live row to be resolved in (which then closes it).
+  // A survivor already linked in Albi (directly or through its own earlier merged IDs) closes it as resolved by sync;
+  // a survivor with neither is handled on its own by sync, so this deleted source closes as gone.
+  let mergedClose = null
   if (evaluation.outcome === 'source_missing' && mergedInto) {
     const mappings = await repository.getMappings(companyId).catch(() => null)
-    const rows = mappings?.[row.object_type === 'companies' ? 'organizations' : 'contacts']
-    survivorLinked = Array.isArray(rows) && rows.some(item => item?.portal_id === row.portal_id && item?.hubspot_id === mergedInto.sourceId)
+    let rows = mappings?.[row.object_type === 'companies' ? 'organizations' : 'contacts']
+    if (Array.isArray(rows) && row.object_type === 'companies' && mergedInto.record) rows = followOrganizationMerge(rows, mergedInto.record, row.portal_id)
+    const linked = Array.isArray(rows) && rows.some(item => item?.portal_id === row.portal_id && item?.hubspot_id === mergedInto.sourceId)
+    const open = !linked && typeof repository.findOpenLiveReviewBySource === 'function'
+      ? await repository.findOpenLiveReviewBySource(companyId, row.portal_id, row.object_type, mergedInto.sourceId).catch(() => undefined) : undefined
+    mergedClose = linked ? 'resolved_by_sync' : open === null ? 'source_missing' : null
   }
-  const closeOutcome = evaluation.outcome === 'safe_to_link' || survivorLinked ? 'resolved_by_sync'
-    : evaluation.outcome === 'source_missing' && !mergedInto ? 'source_missing' : null
+  const closeOutcome = evaluation.outcome === 'safe_to_link' ? 'resolved_by_sync' : mergedClose
+    ?? (evaluation.outcome === 'source_missing' && !mergedInto ? 'source_missing' : null)
   const finalized = await service.finalizeLiveRecheck(deps, { companyId, reviewId, actorId }, result.review, closeOutcome)
   const review = finalized.review ?? result.review
   await refreshReviewTriage(deps.triageRepository, { companyId, row: review, resolutionStatus: finalized.resolution?.status,
-    mergedInto: evaluation.outcome === 'source_missing' ? mergedInto : null })
+    mergedInto: evaluation.outcome === 'source_missing' && mergedInto ? { sourceId: mergedInto.sourceId } : null })
   return { review, config, ...(finalized.close ? { close: finalized.close } : {}) }
 }
 
