@@ -140,6 +140,12 @@ test('overview sanitizes run metadata, totals, and fixed error categories', () =
 
   const inheritedKey = sanitizeOverviewRun(run({ error_summary: 'constructor' }))
   assert.equal(inheritedKey.errorCategory, undefined)
+
+  const named = sanitizeOverviewRun(run({ error_summary: 'transient:operation_failed at listContacts (503)' }))
+  assert.equal(named.errorCategory, 'Temporary provider problem')
+  assert.equal(named.errorCall, 'listContacts (503)')
+  assert.equal(sanitizeOverviewRun(run({ error_summary: 'transient:timeout at listActivities' })).errorCall, 'listActivities')
+  assert.equal(sanitizeOverviewRun(run({ error_summary: 'constructor at listContacts' })).errorCategory, undefined)
 })
 
 test('overview exposes only validated sample metadata needed to label bounded dry runs', () => {

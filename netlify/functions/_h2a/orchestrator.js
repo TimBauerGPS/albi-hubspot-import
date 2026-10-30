@@ -36,6 +36,14 @@ function safeFailure(error) {
     ...safeScope(error) }
 }
 const safeError = error => safeFailure(error).reason
+// A failed run also names the provider call that stopped it (an operation name and HTTP status, never a value), so
+// an outage on one provider can be told from the other.
+function runFailureSummary(error) {
+  const operation = typeof error?.operation === 'string' && /^[A-Za-z]{1,40}$/.test(error.operation) && error.operation !== 'request'
+    ? error.operation : null
+  const status = Number.isInteger(error?.status) && error.status >= 100 && error.status <= 599 ? error.status : null
+  return operation ? `${safeError(error)} at ${operation}${status ? ` (${status})` : ''}` : safeError(error)
+}
 function logCleanupFailure(deps, phase, error) {
   const logger = deps.logger ?? console
   try { (logger.warn ?? logger.error)?.call(logger, 'H2A cleanup failed', { phase, reason: safeError(error) }) }
@@ -658,7 +666,7 @@ export async function runCompanySync(deps, input = {}) {
     if (run) {
       try {
         totals = await repo.totals(companyId, run.id, mode)
-        await repo.finishRun(companyId, run.id, 'failed', totals, safeError(primaryError))
+        await repo.finishRun(companyId, run.id, 'failed', totals, runFailureSummary(primaryError))
         primaryError.h2aPersistedFailure = { runId: run.id, totals, newConflictCount: ctx?.newConflictCount ?? 0 }
       } catch (persistError) { logCleanupFailure(deps, 'failure_persist', persistError) }
       if (input.resumeId) {

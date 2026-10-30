@@ -7,7 +7,6 @@ import { conflictResumePayload } from './_h2a/conflicts.js'
 
 export const config = { schedule: '17 * * * *' }
 const RESUME_BATCH_SIZE = 25
-const PREFLIGHT_MAX_AGE_MS = 24 * 60 * 60 * 1000
 
 async function dispatchBackground(payload, options) {
   if (options.dispatch) return (await options.dispatch(payload)) === true
@@ -40,14 +39,11 @@ async function loadCompanies(supabase) {
     .order('company_id', { ascending: true })) ?? []
 }
 
-function isFresh(config, now) {
-  const checkedAt = Date.parse(config.preflight_checked_at)
-  return Number.isFinite(checkedAt) && checkedAt <= now.getTime() && now.getTime() - checkedAt <= PREFLIGHT_MAX_AGE_MS
-}
-
-async function defaultActivationReady(repository, companyId, config, now) {
+// A live company keeps syncing on schedule without a recent manual connection check. The run itself reads both
+// providers, so a broken credential or provider outage shows as a failed run rather than a silent skip.
+export async function defaultActivationReady(repository, companyId, config) {
   if (config.state !== 'live' || config.preflight_status !== 'valid' || config.option_confirmation_status !== 'confirmed' ||
-    !config.portal_id || !config.selected_start_date || !isFresh(config, now)) return false
+    !config.portal_id || !config.selected_start_date) return false
   const [mappings, credentials] = await Promise.all([repository.getMappings(companyId), repository.getCredentials(companyId)])
   const required = ['meetings', 'calls', 'emails', 'communications', 'notes']
   return Boolean(credentials?.hubspot_envelope && credentials?.albi_envelope &&

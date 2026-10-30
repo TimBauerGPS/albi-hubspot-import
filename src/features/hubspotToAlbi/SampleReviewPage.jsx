@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Link, useLocation, useNavigate, useOutletContext } from 'react-router-dom'
+import { Link, Navigate, useLocation, useNavigate, useOutletContext } from 'react-router-dom'
 import { getH2ARecheckAll, startH2ARecheckAll } from '../../lib/hubspotToAlbi'
 import { presentRecheckAllBatch, presentSampleReviewProgress } from './sampleReview.js'
 import { presentSampleReviewQueryFilters } from './preflightPresentation.js'
@@ -11,8 +11,13 @@ const recheckAllTone = { info: 'border-brand-200 bg-brand-50 text-brand-800', su
   warning: 'border-amber-200 bg-amber-50 text-amber-800', error: 'border-red-200 bg-red-50 text-red-800' }
 
 // Sample review: the shared review workspace on dry-run sample rows, plus the sample header,
-// the fresh-sample gate messaging and the "Recheck all" batch.
+// the fresh-sample gate messaging and the "Recheck all" batch. A live company has no samples to review.
 export default function SampleReviewPage() {
+  const { syncLive } = useOutletContext()
+  return syncLive ? <Navigate to="/hubspot-to-albi" replace /> : <SampleReview />
+}
+
+function SampleReview() {
   const { session, companyId, companyName, isAdmin, tenantRevision, completeTenantTransition } = useOutletContext()
   const location = useLocation()
   const navigate = useNavigate()

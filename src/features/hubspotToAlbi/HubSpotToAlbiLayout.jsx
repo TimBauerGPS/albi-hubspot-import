@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { NavLink, Outlet } from 'react-router-dom'
 import AppShell from '../../components/AppShell'
+import { getH2ASettings } from '../../lib/hubspotToAlbi'
 import CompanySelector from './CompanySelector'
 
 const TABS = [
   { to: '/hubspot-to-albi', label: 'Overview', end: true },
   { to: '/hubspot-to-albi/conflicts', label: 'Conflicts' },
-  { to: '/hubspot-to-albi/sample-review', label: 'Sample Review', adminOnly: true },
+  { to: '/hubspot-to-albi/sample-review', label: 'Sample Review', adminOnly: true, setupOnly: true },
   { to: '/hubspot-to-albi/settings', label: 'Settings' },
 ]
 
@@ -20,12 +21,30 @@ export default function HubSpotToAlbiLayout({
   const [selectedCompany, setSelectedCompany] = useState({ id: companyId, name: companyName })
   const [tenantRevision, setTenantRevision] = useState(0)
   const [tenantChanging, setTenantChanging] = useState(false)
+  // The selected company's sync state; once live, dry-run and sample review screens are hidden.
+  const [syncState, setSyncState] = useState({ companyId: null, state: null })
 
   useEffect(() => {
     if (!isSuperAdmin || !selectedCompany.id) {
       setSelectedCompany({ id: companyId, name: companyName })
     }
   }, [companyId, companyName, isSuperAdmin, selectedCompany.id])
+
+  useEffect(() => {
+    const id = selectedCompany.id
+    if (!id || !session) return undefined
+    const controller = new AbortController()
+    getH2ASettings(session, id, { signal: controller.signal })
+      .then(settings => { if (!controller.signal.aborted) setSyncState({ companyId: id, state: settings?.config?.state ?? null }) })
+      .catch(() => { /* Unknown state keeps every tab visible. */ })
+    return () => controller.abort()
+  }, [selectedCompany.id, session])
+
+  const reportSyncState = useCallback((id, state) => {
+    if (id) setSyncState({ companyId: id, state: state ?? null })
+  }, [])
+
+  const syncLive = syncState.companyId === selectedCompany.id && syncState.state === 'live'
 
   const handleCompanyChange = useCallback(company => {
     setTenantChanging(true)
@@ -46,8 +65,12 @@ export default function HubSpotToAlbiLayout({
     tenantRevision,
     tenantChanging,
     completeTenantTransition,
+    syncLive,
+    reportSyncState,
   }), [
     completeTenantTransition,
+    reportSyncState,
+    syncLive,
     isAdmin,
     isSuperAdmin,
     selectedCompany.id,
@@ -89,7 +112,7 @@ export default function HubSpotToAlbiLayout({
 
           <nav aria-label="HubSpot to Albi" className="mt-6 -mb-px overflow-x-auto">
             <div className="flex min-w-max gap-6">
-              {TABS.filter(tab => !tab.adminOnly || isAdmin).map(tab => (
+              {TABS.filter(tab => (!tab.adminOnly || isAdmin) && !(tab.setupOnly && syncLive)).map(tab => (
                 <NavLink
                   key={tab.to}
                   to={tab.to}

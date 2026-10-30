@@ -90,7 +90,7 @@ function ReviewBreakdown({ run, canReview }) {
 }
 
 export default function OverviewPage() {
-  const { session, companyId, companyName, isAdmin, tenantRevision, completeTenantTransition } = useOutletContext()
+  const { session, companyId, companyName, isAdmin, tenantRevision, completeTenantTransition, syncLive } = useOutletContext()
   const [overview, setOverview] = useState(null)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
@@ -276,8 +276,10 @@ export default function OverviewPage() {
   const recentRun = summary.recentRun
   const lastSuccess = summary.lastSuccessfulRun
   const completedSample = summary.completedSampleRun
-  const newerSampleFailed = ['failed', 'partially_failed'].includes(summary.latestSampleRun?.status) &&
+  const newerSampleFailed = !syncLive && ['failed', 'partially_failed'].includes(summary.latestSampleRun?.status) &&
     summary.latestSampleRun.id !== completedSample?.id
+  // A live company's history shows live runs only; its dry runs and samples belonged to setup.
+  const runs = syncLive ? overview.runs.filter(run => run.mode !== 'dry_run') : overview.runs
   const runDisabled = runningNow || ACTIVE_STATUSES.has(activeRun?.status)
   const pollingPauseNotice = overviewPollingPauseNotice(pollingPauseReason)
 
@@ -364,9 +366,9 @@ export default function OverviewPage() {
       <section className="overflow-hidden rounded-xl border border-gray-200 bg-white" aria-labelledby="h2a-runs-title">
         <div className="border-b border-gray-200 px-5 py-4 sm:px-6">
           <h3 id="h2a-runs-title" className="font-semibold text-gray-900">Recent runs</h3>
-          <p className="mt-1 text-xs text-gray-500">Newest first. Dry runs describe what would happen; live runs show recorded outcomes.</p>
+          <p className="mt-1 text-xs text-gray-500">{syncLive ? 'Newest first. A sync runs every night after 2 AM Pacific.' : 'Newest first. Dry runs describe what would happen; live runs show recorded outcomes.'}</p>
         </div>
-        {overview.runs.length === 0 ? (
+        {runs.length === 0 ? (
           <div className="px-5 py-8 sm:px-6">
             <p className="text-sm font-medium text-gray-900">No sync runs yet</p>
             <p className="mt-1 text-sm text-gray-500">Finish activation in Settings, then queue a dry or live run.</p>
@@ -374,7 +376,7 @@ export default function OverviewPage() {
           </div>
         ) : (
           <ol className="divide-y divide-gray-100">
-            {overview.runs.map(item => (
+            {runs.map(item => (
               <li key={item.id} className="px-5 py-4 sm:px-6">
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                   <div>
@@ -392,7 +394,7 @@ export default function OverviewPage() {
                         )
                         : <p className="mt-2 text-xs leading-5 text-gray-500">Run a new sample to create detailed review data. This historical sample has aggregate totals only.</p>
                     )}
-                    {item.errorCategory && <p className="mt-2 text-xs font-medium text-red-700">{item.errorCategory}</p>}
+                    {item.errorCategory && <p className="mt-2 text-xs font-medium text-red-700">{item.errorCategory}{item.errorCall && <span className="font-normal text-red-600"> · {item.errorCall}</span>}</p>}
                   </div>
                   <p className="text-xs text-gray-500">{item.finished_at ? `Finished ${dateTime(item.finished_at)}` : 'Not finished'}</p>
                 </div>

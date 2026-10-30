@@ -66,7 +66,8 @@ function readinessItems({ credentialsReady, connectionReady, dateReady, mappings
     { label: 'Connection', ready: connectionReady, status: connectionReady ? 'Verified' : 'Pending', verified: connectionReady },
     { label: 'Start date', ready: dateReady, status: dateReady ? 'Saved' : 'Pending', verified: false },
     { label: 'Mappings', ready: mappingsReady, status: mappingsReady ? 'Confirmed' : 'Pending', verified: mappingsReady },
-    { label: 'Dry run', ready: dryRunReady, status: dryRunReady ? 'Completed' : 'Pending', verified: dryRunReady },
+    // Once live, the dry run is history rather than a step.
+    ...(live ? [] : [{ label: 'Dry run', ready: dryRunReady, status: dryRunReady ? 'Completed' : 'Pending', verified: dryRunReady }]),
     { label: 'Live', ready: live, status: live ? 'Active' : 'Pending', verified: live },
   ]
 }
@@ -79,6 +80,7 @@ export default function SettingsPage() {
     isAdmin,
     tenantRevision,
     completeTenantTransition,
+    reportSyncState,
   } = useOutletContext()
   const [settings, setSettings] = useState(null)
   const [startDate, setStartDate] = useState('')
@@ -100,9 +102,10 @@ export default function SettingsPage() {
 
   const applySettings = useCallback(value => {
     setSettings(value)
+    if (value?.config) reportSyncState?.(companyId, value.config.state)
     setStartDate(value?.config?.selected_start_date ?? '')
     setNotificationRecipients((value?.config?.notification_recipients ?? []).join('\n'))
-  }, [])
+  }, [companyId, reportSyncState])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -193,6 +196,7 @@ export default function SettingsPage() {
   const items = readinessItems({ credentialsReady, connectionReady, dateReady, mappingsReady, dryRunReady, live })
   const nextAction = !isAdmin
     ? 'Ask a company admin to continue setup.'
+    : live && connectionReady && mappingsReady ? 'Monitor sync operations on Overview.'
     : !credentialsReady ? 'Save both credentials.'
       : !connectionReady ? 'Run the connection check.'
         : !dateReady ? 'Save the Pacific start date.'
@@ -320,9 +324,9 @@ export default function SettingsPage() {
             <p className="text-xs font-bold uppercase tracking-[0.14em] text-blue-200">Readiness checklist</p>
             <p className="mt-1 text-sm text-slate-200"><span className="font-semibold text-white">Next safe action:</span> {nextAction}</p>
           </div>
-          <span className="text-xs font-semibold text-slate-300">{items.filter(item => item.ready).length} of 6 ready</span>
+          <span className="text-xs font-semibold text-slate-300">{items.filter(item => item.ready).length} of {items.length} ready</span>
         </div>
-        <ol className="mt-4 grid grid-cols-2 gap-px overflow-hidden rounded-lg bg-slate-700 sm:grid-cols-3 lg:grid-cols-6">
+        <ol className="mt-4 grid grid-cols-2 gap-px overflow-hidden rounded-lg bg-slate-700 sm:grid-cols-3 ${items.length === 5 ? 'lg:grid-cols-5' : 'lg:grid-cols-6'}">
           {items.map((item, index) => (
             <li key={item.label} className="bg-slate-800 px-3 py-2.5">
               <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">0{index + 1}</p>
@@ -470,132 +474,144 @@ export default function SettingsPage() {
           </details>
         </SetupCard>
 
-        <SetupCard number="05" title="Dry run, review, then activate" complete={live} description="Run a sample, correct and recheck underlying records, verify with a fresh sample, then review a full dry run before enabling live writes.">
-          <div className="mt-5 grid gap-5 lg:grid-cols-2">
-            <div>
-              <p className="text-sm font-semibold text-gray-900">Dry run</p>
-              <p className="mt-1 text-sm leading-6 text-gray-500">Start with a quick sample of up to 10 from each activity type. Dry runs never create Albi records, consume delivery keys, or move live cursors.</p>
-              <div className="mt-3 flex flex-wrap gap-2">
-                {dryRunControls.showStartSample && (
-                  <button type="button" onClick={() => queueDryRun({ enter: true, dryRunScope: 'sample' })} disabled={!canEnterDryRun} className={buttonPrimary}>
-                    {busyAction === 'dry-run' ? 'Queueing…' : 'Run sample dry run'}
-                  </button>
-                )}
-                {(dryRunControls.showRetrySample || (newerSampleFailed && !dryRunReady && !live && settings.config.state === 'dry_run' && !dryRunControls.showVerifySample)) && (
-                  <button type="button" onClick={() => queueDryRun({ dryRunScope: 'sample' })} disabled={!isAdmin || busy} className={buttonPrimary}>
-                    {busyAction === 'dry-run' ? 'Queueing…' : 'Retry sample dry run'}
-                  </button>
-                )}
-                {dryRunControls.showReview && isAdmin && (
-                  <Link to="/hubspot-to-albi/sample-review" className={buttonPrimary}>Open Sample Review</Link>
-                )}
-                {dryRunControls.showVerifySample && (
-                  <button type="button" onClick={() => queueDryRun({ dryRunScope: 'sample' })} disabled={!isAdmin || busy} className={buttonSecondary}>
-                    {busyAction === 'dry-run' ? 'Queueing…' : 'Run fresh verification sample'}
-                  </button>
-                )}
-                {dryRunControls.showFull && (
-                  <button type="button" onClick={() => queueDryRun({ dryRunScope: 'full' })} disabled={!isAdmin || busy} className={buttonPrimary}>
-                    {busyAction === 'dry-run' ? 'Queueing…' : 'Run full dry run'}
-                  </button>
-                )}
-                {settings.config.state === 'dry_run' && (
-                  <button
-                    type="button"
-                    onClick={refreshReadiness}
-                    disabled={busy && busyAction !== 'readiness-refresh'}
-                    aria-disabled={busyAction === 'readiness-refresh'}
-                    aria-busy={busyAction === 'readiness-refresh'}
-                    className={`${buttonSecondary} ${busyAction === 'readiness-refresh' ? 'cursor-wait opacity-70' : ''}`}
-                  >{busyAction === 'readiness-refresh' ? 'Refreshing readiness…' : 'Refresh readiness'}</button>
-                )}
-              </div>
-              {newerSampleFailed && (
-                <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-3" role="status">
-                  <p className="text-sm font-semibold text-red-900">Newer sample failed</p>
-                  <p className="mt-1 text-xs text-red-800">{sampleDryRunReady
-                    ? 'The prior completed sample remains available for review. Retry the sample after checking the failed run on Overview.'
-                    : 'No sample has completed yet. Check the failed run on Overview, then retry the sample.'}</p>
-                  <Link to="/hubspot-to-albi" className="mt-2 inline-flex text-xs font-semibold text-red-900 underline focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500">Open Overview</Link>
-                  {isAdmin && sample?.reviewCapable === true && (
-                    <Link to="/hubspot-to-albi/sample-review" className="ml-3 mt-2 inline-flex text-xs font-semibold text-brand-700 underline focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500">Open prior Sample Review</Link>
-                  )}
-                </div>
-              )}
-              {sampleDryRunReady && !dryRunReady && (
-                <div className="mt-4 rounded-lg border border-brand-200 bg-brand-50 px-3 py-3">
-                  <p className="text-sm font-semibold text-brand-950">Sample completed successfully</p>
-                  <p className="mt-1 text-xs text-brand-800">Finished {settings.lastCompletedSampleDryRun?.finishedAt ? new Date(settings.lastCompletedSampleDryRun.finishedAt).toLocaleString() : 'recently'}. These are the original run totals; individual rechecks update review progress only.</p>
-                  {completedSampleDryRunTotals.length > 0 && (
-                    <dl className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
-                      {completedSampleDryRunTotals.map(total => (
-                        <div key={total.key} className="flex gap-1 text-xs">
-                          <dt className="text-brand-800">{total.label}</dt>
-                          <dd className="font-semibold tabular-nums text-brand-950">{total.value.toLocaleString()}</dd>
-                        </div>
-                      ))}
-                    </dl>
-                  )}
-                  <p className="mt-3 text-xs leading-5 text-brand-800">{sample?.reviewCapable !== true
-                    ? 'Run a new sample to create detailed review data.'
-                    : sample.total === 0 && sample.fullDryRunReady
-                      ? 'No underlying records need correction. This fresh sample captured zero review rows; the full dry run is available.'
-                      : sample.needsReview > 0
-                        ? 'Correct records directly in HubSpot or Albi, then individually recheck each record in Sample Review.'
-                        : 'Corrections are clear for this sample. Run a fresh sample to verify them; this sample does not unlock the full dry run.'}</p>
-                  {sample?.reviewCapable === true && sample.total > 0 && (
-                    <>
-                      <p className="mt-2 text-xs text-brand-900">{sample.needsReview} need review · {sample.cleared} cleared · {sample.noLongerInScope} no longer in scope</p>
-                      {isAdmin && !dryRunControls.showReview && <Link to="/hubspot-to-albi/sample-review" className="mt-2 inline-flex text-xs font-semibold text-brand-700 underline focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500">Open Sample Review</Link>}
-                    </>
-                  )}
-                </div>
-              )}
-              {!canEnterDryRun && !locked && <p className="mt-2 text-xs text-gray-500">Complete credentials, connection, saved start date, and seven confirmed mappings first.</p>}
+        {live ? (
+          <SetupCard number="05" title="Live sync" complete completeLabel="Active" description="Live writes to Albi are on. A sync runs every night after 2 AM Pacific; use Run now on Overview for an extra run.">
+            <div className="mt-5 flex flex-wrap items-center gap-3">
+              <Link to="/hubspot-to-albi" className={buttonPrimary}>Open Overview</Link>
+              <button type="button" onClick={disableLive} disabled={!isAdmin || busy} className={buttonSecondary}>
+                {busyAction === 'disable' ? 'Disabling…' : 'Disable live sync'}
+              </button>
             </div>
+            {!isAdmin && <p className="mt-2 text-xs text-gray-500">{disabledReason}</p>}
+          </SetupCard>
+        ) : (
+          <SetupCard number="05" title="Dry run, review, then activate" complete={live} description="Run a sample, correct and recheck underlying records, verify with a fresh sample, then review a full dry run before enabling live writes.">
+            <div className="mt-5 grid gap-5 lg:grid-cols-2">
+              <div>
+                <p className="text-sm font-semibold text-gray-900">Dry run</p>
+                <p className="mt-1 text-sm leading-6 text-gray-500">Start with a quick sample of up to 10 from each activity type. Dry runs never create Albi records, consume delivery keys, or move live cursors.</p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {dryRunControls.showStartSample && (
+                    <button type="button" onClick={() => queueDryRun({ enter: true, dryRunScope: 'sample' })} disabled={!canEnterDryRun} className={buttonPrimary}>
+                      {busyAction === 'dry-run' ? 'Queueing…' : 'Run sample dry run'}
+                    </button>
+                  )}
+                  {(dryRunControls.showRetrySample || (newerSampleFailed && !dryRunReady && !live && settings.config.state === 'dry_run' && !dryRunControls.showVerifySample)) && (
+                    <button type="button" onClick={() => queueDryRun({ dryRunScope: 'sample' })} disabled={!isAdmin || busy} className={buttonPrimary}>
+                      {busyAction === 'dry-run' ? 'Queueing…' : 'Retry sample dry run'}
+                    </button>
+                  )}
+                  {dryRunControls.showReview && isAdmin && (
+                    <Link to="/hubspot-to-albi/sample-review" className={buttonPrimary}>Open Sample Review</Link>
+                  )}
+                  {dryRunControls.showVerifySample && (
+                    <button type="button" onClick={() => queueDryRun({ dryRunScope: 'sample' })} disabled={!isAdmin || busy} className={buttonSecondary}>
+                      {busyAction === 'dry-run' ? 'Queueing…' : 'Run fresh verification sample'}
+                    </button>
+                  )}
+                  {dryRunControls.showFull && (
+                    <button type="button" onClick={() => queueDryRun({ dryRunScope: 'full' })} disabled={!isAdmin || busy} className={buttonPrimary}>
+                      {busyAction === 'dry-run' ? 'Queueing…' : 'Run full dry run'}
+                    </button>
+                  )}
+                  {settings.config.state === 'dry_run' && (
+                    <button
+                      type="button"
+                      onClick={refreshReadiness}
+                      disabled={busy && busyAction !== 'readiness-refresh'}
+                      aria-disabled={busyAction === 'readiness-refresh'}
+                      aria-busy={busyAction === 'readiness-refresh'}
+                      className={`${buttonSecondary} ${busyAction === 'readiness-refresh' ? 'cursor-wait opacity-70' : ''}`}
+                    >{busyAction === 'readiness-refresh' ? 'Refreshing readiness…' : 'Refresh readiness'}</button>
+                  )}
+                </div>
+                {newerSampleFailed && (
+                  <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-3" role="status">
+                    <p className="text-sm font-semibold text-red-900">Newer sample failed</p>
+                    <p className="mt-1 text-xs text-red-800">{sampleDryRunReady
+                      ? 'The prior completed sample remains available for review. Retry the sample after checking the failed run on Overview.'
+                      : 'No sample has completed yet. Check the failed run on Overview, then retry the sample.'}</p>
+                    <Link to="/hubspot-to-albi" className="mt-2 inline-flex text-xs font-semibold text-red-900 underline focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500">Open Overview</Link>
+                    {isAdmin && sample?.reviewCapable === true && (
+                      <Link to="/hubspot-to-albi/sample-review" className="ml-3 mt-2 inline-flex text-xs font-semibold text-brand-700 underline focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500">Open prior Sample Review</Link>
+                    )}
+                  </div>
+                )}
+                {sampleDryRunReady && !dryRunReady && (
+                  <div className="mt-4 rounded-lg border border-brand-200 bg-brand-50 px-3 py-3">
+                    <p className="text-sm font-semibold text-brand-950">Sample completed successfully</p>
+                    <p className="mt-1 text-xs text-brand-800">Finished {settings.lastCompletedSampleDryRun?.finishedAt ? new Date(settings.lastCompletedSampleDryRun.finishedAt).toLocaleString() : 'recently'}. These are the original run totals; individual rechecks update review progress only.</p>
+                    {completedSampleDryRunTotals.length > 0 && (
+                      <dl className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
+                        {completedSampleDryRunTotals.map(total => (
+                          <div key={total.key} className="flex gap-1 text-xs">
+                            <dt className="text-brand-800">{total.label}</dt>
+                            <dd className="font-semibold tabular-nums text-brand-950">{total.value.toLocaleString()}</dd>
+                          </div>
+                        ))}
+                      </dl>
+                    )}
+                    <p className="mt-3 text-xs leading-5 text-brand-800">{sample?.reviewCapable !== true
+                      ? 'Run a new sample to create detailed review data.'
+                      : sample.total === 0 && sample.fullDryRunReady
+                        ? 'No underlying records need correction. This fresh sample captured zero review rows; the full dry run is available.'
+                        : sample.needsReview > 0
+                          ? 'Correct records directly in HubSpot or Albi, then individually recheck each record in Sample Review.'
+                          : 'Corrections are clear for this sample. Run a fresh sample to verify them; this sample does not unlock the full dry run.'}</p>
+                    {sample?.reviewCapable === true && sample.total > 0 && (
+                      <>
+                        <p className="mt-2 text-xs text-brand-900">{sample.needsReview} need review · {sample.cleared} cleared · {sample.noLongerInScope} no longer in scope</p>
+                        {isAdmin && !dryRunControls.showReview && <Link to="/hubspot-to-albi/sample-review" className="mt-2 inline-flex text-xs font-semibold text-brand-700 underline focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500">Open Sample Review</Link>}
+                      </>
+                    )}
+                  </div>
+                )}
+                {!canEnterDryRun && !locked && <p className="mt-2 text-xs text-gray-500">Complete credentials, connection, saved start date, and seven confirmed mappings first.</p>}
+              </div>
 
-            <div className="border-l-2 border-gray-200 pl-4">
-              <p className="text-sm font-semibold text-gray-900">Review and live activation</p>
-              {dryRunReady ? (
-                <div className="mt-2">
-                  <p className="text-sm text-green-800">Completed dry run ready for review.</p>
-                  <p className="mt-1 text-xs text-gray-500">Finished {settings.lastCompletedDryRun?.finishedAt ? new Date(settings.lastCompletedDryRun.finishedAt).toLocaleString() : 'recently'}.</p>
-                  {completedDryRunTotals.length > 0 ? (
-                    <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 border-y border-gray-200 py-3 sm:grid-cols-3">
-                      {completedDryRunTotals.map(total => (
-                        <div key={total.key}>
-                          <dt className="text-xs text-gray-500">{total.label}</dt>
-                          <dd className="mt-0.5 text-sm font-semibold tabular-nums text-gray-900">{total.value.toLocaleString()}</dd>
-                        </div>
-                      ))}
-                    </dl>
+              <div className="border-l-2 border-gray-200 pl-4">
+                <p className="text-sm font-semibold text-gray-900">Review and live activation</p>
+                {dryRunReady ? (
+                  <div className="mt-2">
+                    <p className="text-sm text-green-800">Completed dry run ready for review.</p>
+                    <p className="mt-1 text-xs text-gray-500">Finished {settings.lastCompletedDryRun?.finishedAt ? new Date(settings.lastCompletedDryRun.finishedAt).toLocaleString() : 'recently'}.</p>
+                    {completedDryRunTotals.length > 0 ? (
+                      <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 border-y border-gray-200 py-3 sm:grid-cols-3">
+                        {completedDryRunTotals.map(total => (
+                          <div key={total.key}>
+                            <dt className="text-xs text-gray-500">{total.label}</dt>
+                            <dd className="mt-0.5 text-sm font-semibold tabular-nums text-gray-900">{total.value.toLocaleString()}</dd>
+                          </div>
+                        ))}
+                      </dl>
+                    ) : (
+                      <p className="mt-3 border-y border-gray-200 py-3 text-xs text-gray-600">No outcome totals were reported for this completed dry run.</p>
+                    )}
+                    <p className="mt-2 text-xs leading-5 text-gray-600">
+                      {completedDryRunTotals.length > 0
+                        ? 'Activating confirms the admin reviewed the completed dry-run totals shown above.'
+                        : 'Activating confirms the admin reviewed this completed dry run, which reported no outcome totals.'}
+                    </p>
+                    <Link to="/hubspot-to-albi" className="mt-3 inline-flex text-sm font-semibold text-brand-700 underline decoration-brand-200 underline-offset-4 hover:decoration-brand-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500">Open Overview</Link>
+                  </div>
+                ) : <p className="mt-2 text-sm leading-6 text-gray-500">Live activation remains blocked until a dry-run run created after the date lock finishes successfully.</p>}
+
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {!live ? (
+                    <button type="button" onClick={activateLive} disabled={!canActivate} title={!canActivate ? 'Complete and review a dry run before live activation.' : undefined} className={buttonPrimary}>
+                      {busyAction === 'activate' ? 'Activating…' : 'I reviewed this completed dry run — activate live'}
+                    </button>
                   ) : (
-                    <p className="mt-3 border-y border-gray-200 py-3 text-xs text-gray-600">No outcome totals were reported for this completed dry run.</p>
+                    <button type="button" onClick={disableLive} disabled={!isAdmin || busy} className={buttonSecondary}>
+                      {busyAction === 'disable' ? 'Disabling…' : 'Disable live sync'}
+                    </button>
                   )}
-                  <p className="mt-2 text-xs leading-5 text-gray-600">
-                    {completedDryRunTotals.length > 0
-                      ? 'Activating confirms the admin reviewed the completed dry-run totals shown above.'
-                      : 'Activating confirms the admin reviewed this completed dry run, which reported no outcome totals.'}
-                  </p>
-                  <Link to="/hubspot-to-albi" className="mt-3 inline-flex text-sm font-semibold text-brand-700 underline decoration-brand-200 underline-offset-4 hover:decoration-brand-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500">Open Overview</Link>
                 </div>
-              ) : <p className="mt-2 text-sm leading-6 text-gray-500">Live activation remains blocked until a dry-run run created after the date lock finishes successfully.</p>}
-
-              <div className="mt-4 flex flex-wrap gap-2">
-                {!live ? (
-                  <button type="button" onClick={activateLive} disabled={!canActivate} title={!canActivate ? 'Complete and review a dry run before live activation.' : undefined} className={buttonPrimary}>
-                    {busyAction === 'activate' ? 'Activating…' : 'I reviewed this completed dry run — activate live'}
-                  </button>
-                ) : (
-                  <button type="button" onClick={disableLive} disabled={!isAdmin || busy} className={buttonSecondary}>
-                    {busyAction === 'disable' ? 'Disabling…' : 'Disable live sync'}
-                  </button>
-                )}
+                {!isAdmin && <p className="mt-2 text-xs text-gray-500">{disabledReason}</p>}
               </div>
-              {!isAdmin && <p className="mt-2 text-xs text-gray-500">{disabledReason}</p>}
             </div>
-          </div>
-        </SetupCard>
+          </SetupCard>
+        )}
       </ol>
     </section>
   )

@@ -114,10 +114,12 @@ export function sanitizeOverviewRun(run) {
   if (run.mode === 'dry_run' && run.sample_limit_per_type === 10 && run.review_capture_version === 1) {
     result.reviewCaptureVersion = 1
   }
-  const errorCategory = typeof run.error_summary === 'string' && Object.hasOwn(ERROR_CATEGORIES, run.error_summary)
-    ? ERROR_CATEGORIES[run.error_summary]
-    : null
+  // A run failure may name the provider call that stopped it: "<reason> at <operation> (<status>)".
+  const [, code, operation, status] = typeof run.error_summary === 'string'
+    ? run.error_summary.match(/^([a-z_:]{1,60})(?: at ([A-Za-z]{1,40})(?: \((\d{3})\))?)?$/) ?? [] : []
+  const errorCategory = code && Object.hasOwn(ERROR_CATEGORIES, code) ? ERROR_CATEGORIES[code] : null
   if (errorCategory) result.errorCategory = errorCategory
+  if (errorCategory && operation) result.errorCall = status ? `${operation} (${status})` : operation
   return result
 }
 

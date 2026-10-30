@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createNightlyScheduler } from '../../netlify/functions/nightly-h2a-sync.js'
+import { createNightlyScheduler, defaultActivationReady } from '../../netlify/functions/nightly-h2a-sync.js'
 
 const ready = (id, extra = {}) => ({ company_id: id, state: 'live', preflight_status: 'valid', preflight_checked_at: '2026-10-05T09:00:00.000Z',
   option_confirmation_status: 'confirmed', selected_start_date: '2026-10-01', portal_id: '123', ...extra })
@@ -122,4 +122,18 @@ test('scheduler sends one conflict release per company per tick, since that run 
     dispatch: async payload => { sent.push(payload); return true } })
   await handler({})
   assert.deepEqual(sent.filter(payload => payload.trigger === 'conflict_resolution').map(payload => payload.resumeId), ['r1'])
+})
+
+test('a live company stays eligible for the nightly run when its last connection check is weeks old', async () => {
+  const options = ['meetings', 'calls', 'emails', 'communications', 'notes']
+    .map(type => ({ mapping_kind: 'activity_type', source_key: type, confirmed_at: '2026-10-15T00:00:00.000Z' }))
+    .concat(['default_contact_type', 'default_organization_type']
+      .map(kind => ({ mapping_kind: kind, source_key: 'default', confirmed_at: '2026-10-15T00:00:00.000Z' })))
+  const repository = { getMappings: async () => ({ options }),
+    getCredentials: async () => ({ hubspot_envelope: { ciphertext: 'x' }, albi_envelope: { ciphertext: 'y' } }) }
+  const stale = ready('c1', { preflight_checked_at: '2026-10-15T14:57:12.412Z' })
+  assert.equal(await defaultActivationReady(repository, 'c1', stale), true)
+  assert.equal(await defaultActivationReady(repository, 'c1', { ...stale, preflight_status: 'invalid' }), false)
+  assert.equal(await defaultActivationReady(repository, 'c1', { ...stale, option_confirmation_status: 'unconfirmed' }), false)
+  assert.equal(await defaultActivationReady({ ...repository, getCredentials: async () => null }, 'c1', stale), false)
 })

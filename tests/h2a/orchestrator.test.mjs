@@ -892,6 +892,19 @@ test('run error summary cannot persist an arbitrary provider code or secret', as
   assert.ok(!summary.includes('pat-private-token'))
 })
 
+test('a failed run names the provider call that stopped it, never a value', async () => {
+  const deps = liveFixture({ activities: [] })
+  let summary
+  deps.albi.listContacts = async () => { throw new ApiError('transient', { operation: 'listContacts', status: 503 }) }
+  deps.sleep = async () => {}
+  deps.repository.finishRun = async (_company, _run, _status, _totals, errorSummary) => { summary = errorSummary }
+  await assert.rejects(() => runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' }))
+  assert.equal(summary, 'transient:operation_failed at listContacts (503)')
+  deps.albi.listContacts = async () => { throw new ApiError('transient', { operation: 'pat-secret value', status: 503 }) }
+  await assert.rejects(() => runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' }))
+  assert.equal(summary, 'transient:operation_failed')
+})
+
 test('contact association chooses its own organization when activity has several companies', async () => {
   const deps = throwingCreates(liveFixture({ companyIds: ['20', '21'] }))
   deps.hubspot.getAssociations = async ({ objectType }) => objectType === 'contacts'
