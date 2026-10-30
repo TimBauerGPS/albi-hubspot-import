@@ -4,7 +4,7 @@ import test from 'node:test'
 import vm from 'node:vm'
 import { transformSync } from 'esbuild'
 import * as workspaceHelpers from '../../src/features/hubspotToAlbi/reviewWorkspace.js'
-import { buildResolutionConfirmation } from '../../src/features/hubspotToAlbi/sampleReviewResolution.js'
+import { buildResolutionConfirmation, staleRefusalToRecheck } from '../../src/features/hubspotToAlbi/sampleReviewResolution.js'
 import { blockedReasonCopy } from '../../shared/h2aBlockedReasons.js'
 import { loadComponent, mountComponent, nodesOf, stub, textOf } from './workspace-harness.mjs'
 import { createElement } from 'react'
@@ -41,7 +41,7 @@ async function mount(overrides = {}) {
   const props = { kind: 'sample', session: { access_token: 'token' }, companyId: 'company-1', tenantRevision: 0, isAdmin: true,
     completeTenantTransition: revision => completed.push(revision), initialFilters: overrides.initialFilters,
     renderHeader: render('header'), renderGate: overrides.renderGate ?? (() => null), ...overrides.props }
-  const ui = await mountComponent('ReviewWorkspace.jsx', { props, bindings: { ...bound, ...workspaceHelpers, ...presentation, buildResolutionConfirmation, blockedReasonCopy,
+  const ui = await mountComponent('ReviewWorkspace.jsx', { props, bindings: { ...bound, ...workspaceHelpers, ...presentation, buildResolutionConfirmation, staleRefusalToRecheck, blockedReasonCopy,
     ReviewRecord: stub('ReviewRecord'), ReviewQueue: stub('ReviewQueue'), AlbiTodo: stub('AlbiTodo'), ShortcutHelp: stub('ShortcutHelp') } })
   const context = { get companyId() { return props.companyId }, set companyId(value) { props.companyId = value },
     get tenantRevision() { return props.tenantRevision }, set tenantRevision(value) { props.tenantRevision = value } }

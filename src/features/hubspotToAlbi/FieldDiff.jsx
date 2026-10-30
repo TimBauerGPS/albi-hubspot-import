@@ -3,12 +3,14 @@ import { btn } from './ResolutionBar.jsx'
 const HIDDEN_KEYS = new Set(['id', 'organizationId'])
 
 // Trimmed, normalized comparison rows (from reviewWorkspace.fieldDiffRows). Rows blank on both sides are
-// already gone; matching rows are collapsed behind "Show N matching fields".
+// already gone; matching rows are collapsed behind "Show N matching fields". Fields in `changedKeys` (changed since the
+// record was reviewed) are marked and always shown.
 export default function FieldDiff({ rows = [], hasCandidate = false, candidateId = '', showMatching = false, onToggleMatching,
-  choices = null, onChoose, disabled = false }) {
+  choices = null, onChoose, disabled = false, changedKeys = null }) {
+  const isChanged = row => Boolean(changedKeys?.has(row.key))
   const shown = rows.filter(row => !HIDDEN_KEYS.has(row.key))
-  const visible = shown.filter(row => row.kind !== 'same')
-  const matching = shown.filter(row => row.kind === 'same')
+  const visible = shown.filter(row => row.kind !== 'same' || isChanged(row))
+  const matching = shown.filter(row => row.kind === 'same' && !isChanged(row))
   const choosing = choices !== null
   return <section aria-label="Field comparison">
     <h3 className="text-sm font-semibold text-gray-900">{hasCandidate ? `What differs from Albi ${candidateId}` : 'HubSpot values (no Albi match)'}</h3>
@@ -20,7 +22,8 @@ export default function FieldDiff({ rows = [], hasCandidate = false, candidateId
         {choosing && <th className="w-44 pb-1 font-medium">Keep</th>}
       </tr></thead>
       <tbody>{visible.map(row => <tr key={row.key} className={`border-t border-gray-100 ${row.kind === 'differs' ? 'bg-amber-50/60' : ''}`}>
-        <td className="py-1.5 pr-2 text-xs font-medium text-gray-600">{row.label}</td>
+        <td className="py-1.5 pr-2 text-xs font-medium text-gray-600">{row.label}{isChanged(row) &&
+          <span className="ml-1 rounded bg-brand-100 px-1 py-px text-[10px] font-semibold uppercase tracking-wide text-brand-800">Changed</span>}</td>
         <td className="break-words py-1.5 pr-2">{row.hubspot || <span className="text-gray-400">Blank</span>}</td>
         {hasCandidate && <td className="break-words py-1.5 pr-2">{row.albi || <span className="text-gray-400">Blank</span>}</td>}
         {choosing && <td className="py-1.5">{row.choosable && <span className="flex gap-1" role="group" aria-label={`Keep which ${row.label}`}>

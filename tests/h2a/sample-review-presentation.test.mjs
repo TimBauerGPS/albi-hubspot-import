@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { buildResolutionRequest, presentReviewResolution, buildResolutionConfirmation } from '../../src/features/hubspotToAlbi/sampleReviewResolution.js'
+import { buildResolutionRequest, presentReviewResolution, buildResolutionConfirmation, staleRefusalToRecheck } from '../../src/features/hubspotToAlbi/sampleReviewResolution.js'
 import { presentReviewBreakdown } from '../../src/features/hubspotToAlbi/reviewBreakdown.js'
 import { projectReviewRow } from '../../netlify/functions/_h2a/review.js'
 
@@ -279,4 +279,20 @@ test('a review rechecked as safe to create can be created whatever reason it was
   const review = presentSampleReviewItem({ reason: 'organization_unresolved', objectType: 'contacts', sourceId: '34', status: 'cleared', recheckOutcome: 'safe_to_create', candidateSnapshots: [] })
   assert.deepEqual(review.actions, ['create_albi'])
   assert.deepEqual(buildResolutionConfirmation({ review, decision: { action: 'create_albi', referralSourceId: '5' } }).mapping.createAlbi, true)
+})
+
+test('a send refused because the record changed is rechecked on opening, once, with the changed field names', () => {
+  const failedAt = '2026-10-30T18:00:00.000Z'
+  const item = (details, extra = {}) => ({ lastRecheckedAt: '2026-10-30T17:00:00.000Z', ...extra, resolution: {
+    id: '11111111-1111-4111-8111-111111111111', status: 'failed', action: 'link_existing', objectType: 'contacts',
+    events: [{ id: '22222222-2222-4222-8222-222222222222', eventType: 'failed', createdAt: failedAt, details }] } })
+  assert.deepEqual(staleRefusalToRecheck(item({ staleCheck: 'source', staleFields: ['phone', 'email', 'bad key!'] })),
+    { eventId: '22222222-2222-4222-8222-222222222222', check: 'source', fields: ['phone', 'email'] })
+  assert.equal(staleRefusalToRecheck(item({ staleCheck: 'target', staleFields: [] })).check, 'target')
+  // Already rechecked after the refusal, refused for another reason, or not failed: nothing to do.
+  assert.equal(staleRefusalToRecheck(item({ staleCheck: 'source' }, { lastRecheckedAt: '2026-10-30T18:05:00.000Z' })), null)
+  assert.equal(staleRefusalToRecheck(item({ staleCheck: 'candidates' })), null)
+  assert.equal(staleRefusalToRecheck(item({ category: 'validation' })), null)
+  assert.equal(staleRefusalToRecheck({ resolution: { status: 'completed', events: [] } }), null)
+  assert.equal(staleRefusalToRecheck(null), null)
 })

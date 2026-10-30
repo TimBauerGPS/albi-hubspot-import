@@ -63,7 +63,7 @@ export default function ReviewRecord({
   item, kind = 'sample', candidateIndex = 0, onPickCandidate, referralSourceId: chosenReferralSourceId = '', onReferral, referralRef,
   pending = false, busy = false, readOnly = false,
   onAccept, onLink, onCreate, onForceCreate, onCreateWithOrganization, onApplyFields, onIgnoreAndLink, onChooseOrganization,
-  onSkip, onRecheck, onOpenOrganization, onOpenMergedSurvivor,
+  onSkip, onRecheck, onOpenOrganization, onOpenMergedSurvivor, changed = null,
 }) {
   const review = presentSampleReviewItem(item)
   // Members see the evidence only: no mutation controls, whatever the server capability says.
@@ -189,7 +189,10 @@ export default function ReviewRecord({
 
   const events = resolution?.events ?? []
   // The last attempt failed: say so (and why) instead of the record just reappearing.
-  const failedNote = resolution?.status === 'failed' ? failureNote(resolution.action, [...events].reverse().find(event => event.eventType === 'failed')) : null
+  // A send refused because the record changed was rechecked with the new values: say what changed instead.
+  const failedNote = resolution?.status === 'failed' && !changed ? failureNote(resolution.action, [...events].reverse().find(event => event.eventType === 'failed')) : null
+  const changedSide = changed?.check === 'target' ? 'Albi' : 'HubSpot'
+  const changedKeys = new Set(Array.isArray(changed?.fields) ? changed.fields : [])
   const manualTasks = resolution?.status === 'waiting_on_albi' ? [...events].reverse().find(event => event.manualTasks?.length)?.manualTasks ?? [] : []
   const hubspotOrgs = review.objectType === 'contacts' && item?.hubspotOrganizations !== undefined
     ? Array.isArray(item.hubspotOrganizations)
@@ -238,6 +241,9 @@ export default function ReviewRecord({
       {orgFirst && canAct && <p className="rounded-lg border border-brand-200 bg-brand-50 px-3 py-2 text-sm text-gray-800">
         {item.orgFirstCreate.organizationName ? `${item.orgFirstCreate.organizationName} is not in Albi yet. ` : 'This contact’s HubSpot organization is not in Albi yet. '}
         Choose a referral source to create the organization and the contact together.</p>}
+      {changed && !finished && <div className="rounded-lg border border-brand-200 bg-brand-50 p-3 text-sm text-brand-950" role="status">
+        <p className="font-semibold">{changedSide} changed after you reviewed this {objectLabel}</p>
+        <p className="mt-1 text-xs">{changedKeys.size ? `Changed: ${[...changedKeys].map(fieldLabel).join(', ')}. ` : ''}The record was rechecked, so the values below are current{changedKeys.size ? ' and the changed fields are marked' : ''}. Review them, then link or create again. Nothing was sent to Albi.</p></div>}
       {failedNote && !finished && <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950" role="status">
         <p className="font-semibold">{failedNote.title}</p><p className="mt-1 text-xs">{failedNote.detail}</p></div>}
       {resolution?.status === 'waiting_on_albi' && <div className="rounded-lg border-2 border-amber-400 bg-amber-50 p-3 text-sm">
@@ -251,7 +257,7 @@ export default function ReviewRecord({
 
       <CandidateList candidates={candidates} selectedIndex={candidateIndex} suggestedId={suggested?.id ?? null} onPick={onPickCandidate} objectLabel={objectLabel} />
       <FieldDiff rows={rows} hasCandidate={Boolean(selected)} candidateId={selected?.id ?? ''} showMatching={showMatching}
-        onToggleMatching={() => setShowMatching(value => !value)} choices={fieldMode ? fieldChoices : null}
+        onToggleMatching={() => setShowMatching(value => !value)} choices={fieldMode ? fieldChoices : null} changedKeys={changedKeys}
         onChoose={(key, value) => setFieldChoices(current => {
           // A fill-from-Albi choice toggles off when chosen again; every other field keeps its choice.
           if (current[key] === value && fillable.some(field => field.key === key)) { const next = { ...current }; delete next[key]; return next }

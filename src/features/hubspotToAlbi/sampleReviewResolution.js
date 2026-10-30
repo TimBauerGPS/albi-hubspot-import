@@ -128,8 +128,23 @@ export function presentReviewResolution(item) {
         createdAt: time(event.createdAt), code: OUTCOMES.has(details.code) ? details.code : null,
         category: H2A_REVIEW_ERROR_CATEGORIES.includes(details.category) ? details.category : null,
         outcome: OUTCOMES.has(details.outcome) ? details.outcome : null, manualTasks: manualTasks(details.manualTasks),
-        staleCheck: typeof details.staleCheck === 'string' && /^[a-z_]{1,30}$/.test(details.staleCheck) ? details.staleCheck : null }
+        staleCheck: typeof details.staleCheck === 'string' && /^[a-z_]{1,30}$/.test(details.staleCheck) ? details.staleCheck : null,
+        staleFields: (Array.isArray(details.staleFields) ? details.staleFields : [])
+          .filter(field => typeof field === 'string' && /^\w{1,40}$/.test(field)).slice(0, 10) }
     }) }
+}
+
+// The last send was refused because the HubSpot record (or its Albi match) changed after review, and the record has
+// not been rechecked since. Such a record is rechecked on opening, so its new values are shown before deciding again.
+const DATA_CHANGE_CHECKS = new Set(['source', 'target'])
+export function staleRefusalToRecheck(item) {
+  const resolution = presentReviewResolution(item?.resolution)
+  if (resolution?.status !== 'failed') return null
+  const failed = [...resolution.events].reverse().find(event => event.eventType === 'failed')
+  if (!failed?.id || !DATA_CHANGE_CHECKS.has(failed.staleCheck)) return null
+  const refusedAt = Date.parse(failed.createdAt), recheckedAt = Date.parse(item?.lastRecheckedAt)
+  if (Number.isFinite(recheckedAt) && (!Number.isFinite(refusedAt) || recheckedAt >= refusedAt)) return null
+  return { eventId: failed.id, check: failed.staleCheck, fields: failed.staleFields }
 }
 
 // Confirmation is local display evidence only; it is never sent as a provider payload.

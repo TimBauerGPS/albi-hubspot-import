@@ -3,7 +3,7 @@ import { bulkLinkH2AReviews, getH2ACreateBatch, getH2ADryRunReview, getH2AReview
   prepareH2AOrganizationReview, recheckH2ADryRunReview, queueH2AOutbox, queueH2AOutboxCreates, startH2ARecheckAll } from '../../lib/hubspotToAlbi'
 import { BUCKETS, createDeferredQueue, fieldLabel, nextRecordId, shortcutFor } from './reviewWorkspace.js'
 import { presentSampleReviewItem, SAMPLE_REVIEW_REASON_OPTIONS } from './sampleReview.js'
-import { buildResolutionConfirmation } from './sampleReviewResolution.js'
+import { buildResolutionConfirmation, staleRefusalToRecheck } from './sampleReviewResolution.js'
 import { btn, Kbd, primary } from './ResolutionBar.jsx'
 import AlbiTodo from './AlbiTodo.jsx'
 import OutboxPanel from './OutboxPanel.jsx'
@@ -145,6 +145,9 @@ export default function ReviewWorkspace({
   const [referrals, setReferrals] = useState({})
   const [pending, setPending] = useState([])
   const [recordErrors, setRecordErrors] = useState({})
+  // Per record: the fields a refused send found changed, shown after the automatic recheck brings in the new values.
+  const [changedFields, setChangedFields] = useState({})
+  const autoRechecked = useRef(new Set())
   const [dialog, setDialog] = useState(null)
   const [checked, setChecked] = useState(() => new Set())
   const [bulk, setBulk] = useState(null)
@@ -313,6 +316,18 @@ export default function ReviewWorkspace({
 
   const visible = stateTenant === tenantKey
   const detail = selectedId && details[selectedId]?.id === selectedId ? details[selectedId] : null
+
+  // A record whose last send was refused because it changed is rechecked once on opening, so its new values (and what
+  // changed) are shown instead of an error asking for a recheck.
+  useEffect(() => {
+    if (readOnly || !detail || busyId || bulk || recheckLock.current) return
+    const refusal = staleRefusalToRecheck(detail)
+    if (!refusal) return
+    const key = `${tenantKey}:${detail.id}:${refusal.eventId}`
+    if (autoRechecked.current.has(key)) return
+    autoRechecked.current.add(key)
+    handleRecheck({ refusal })
+  }, [detail?.id, detail?.updatedAt, busyId, Boolean(bulk), readOnly, tenantKey]) // eslint-disable-line react-hooks/exhaustive-deps
   const pendingSet = new Set(pending.map(entry => entry.id))
   const sendingSet = new Set(pending.filter(entry => entry.sending).map(entry => entry.id))
 
@@ -560,7 +575,8 @@ export default function ReviewWorkspace({
     }
   }
 
-  async function handleRecheck() {
+  // `refusal` is set when this recheck follows a send refused because the record changed (see the effect below).
+  async function handleRecheck({ refusal = null } = {}) {
     if (readOnly) return
     if (!detail?.updatedAt || detail.id !== selectedId || recheckLock.current) return
     // Recheck owns a new generation so prior pages cannot restore stale progress. Keep the queue and cursor for a later pagination retry.
@@ -584,7 +600,10 @@ export default function ReviewWorkspace({
       replaceItem(result?.item); writeDetail(result?.item, true)
       progressFrom(result)
       setRecordErrors(errors => without(errors, reviewId))
-      setNotice('Recheck complete. The record and review progress are up to date.')
+      if (refusal) {
+        setChangedFields(all => ({ ...all, [reviewId]: refusal }))
+        setNotice(`${refusal.check === 'target' ? 'Albi' : 'HubSpot'} changed after you reviewed this record, so it was rechecked with the new values. Review them and confirm again.`)
+      } else setNotice('Recheck complete. The record and review progress are up to date.')
     } catch (cause) {
       if (!current() || cause?.name === 'AbortError') return
       if (cause?.status === 409) {
@@ -915,7 +934,7 @@ export default function ReviewWorkspace({
                 {detail ? <ReviewRecord item={detail} kind={kind} candidateIndex={candidateIndex} onPickCandidate={setCandidateIndex}
                   referralSourceId={referrals[detail.id] ?? ''} onReferral={value => setReferrals(current => ({ ...current, [detail.id]: value }))} referralRef={referralRef}
                   readOnly={readOnly} pending={pendingSet.has(detail.id)} busy={busyId === detail.id || Boolean(bulk)} {...handlers}
-                  onRecheck={handleRecheck}
+                  onRecheck={() => handleRecheck()} changed={changedFields[detail.id] ?? null}
                   onOpenOrganization={target => openRelatedReview(target, prepareH2AOrganizationReview, result => result?.organization?.reviewId)}
                   onOpenMergedSurvivor={target => openRelatedReview(target, prepareH2AMergedSurvivorReview, result => result?.survivor?.reviewId)} />
                   : detailLoading ? <section className="rounded-xl border border-gray-200 bg-white px-5 py-10 text-sm text-gray-600" role="status">Loading selected record…</section>

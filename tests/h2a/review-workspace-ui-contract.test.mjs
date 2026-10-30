@@ -8,7 +8,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import * as workspaceHelpers from '../../src/features/hubspotToAlbi/reviewWorkspace.js'
 import * as sampleReview from '../../src/features/hubspotToAlbi/sampleReview.js'
-import { buildResolutionConfirmation } from '../../src/features/hubspotToAlbi/sampleReviewResolution.js'
+import { buildResolutionConfirmation, staleRefusalToRecheck } from '../../src/features/hubspotToAlbi/sampleReviewResolution.js'
 import { blockedReasonCopy } from '../../shared/h2aBlockedReasons.js'
 import { mountComponent, stub, textOf } from './workspace-harness.mjs'
 
@@ -388,7 +388,7 @@ async function mountWorkspace({ rows, document, ...overrides } = {}, props = {})
       bucketCounts: { quick: 2, todo: 0, decision: 1, blocked: 0, done: 0 } }
     : name === 'getH2ADryRunReview' ? { item: detailOf(arg) } : name === 'getH2ARecheckAll' ? { batch: null } : {})
   const ui = await mountComponent('ReviewWorkspace.jsx', {
-    bindings: { ...bound, ...workspaceHelpers, ...sampleReview, buildResolutionConfirmation, blockedReasonCopy,
+    bindings: { ...bound, ...workspaceHelpers, ...sampleReview, buildResolutionConfirmation, staleRefusalToRecheck, blockedReasonCopy,
       ReviewRecord: stub('ReviewRecord'), ReviewQueue: stub('ReviewQueue'), AlbiTodo: stub('AlbiTodo'), ShortcutHelp: stub('ShortcutHelp'),
       ...(document ? { document } : {}) },
     props: { kind: 'sample', session: { access_token: 'token' }, companyId: 'company-1', tenantRevision: 0, completeTenantTransition() {}, isAdmin: true, ...props } })
@@ -497,6 +497,29 @@ test('409 on deferred send returns the record with the changed message', async (
   assert.equal(ui.queue().props.pendingIds.has('review-1'), false)
   ui.queue().props.onSelect('review-1'); await ui.flush()
   assert.match(ui.text(), /This record changed; review it again\./)
+  ui.unmount()
+})
+
+test('a record whose send was refused because HubSpot changed is rechecked once on opening and shows what changed', async () => {
+  const refused = { resolution: { id: '11111111-1111-4111-8111-111111111111', status: 'failed', action: 'link_existing', objectType: 'contacts',
+    events: [{ id: '22222222-2222-4222-8222-222222222222', eventType: 'failed', createdAt: '2026-10-30T18:00:00.000Z',
+      details: { staleCheck: 'source', staleFields: ['phone', 'email'] } }] }, lastRecheckedAt: '2026-10-30T17:00:00.000Z' }
+  const ui = await mountWorkspace({
+    getH2ADryRunReview: (_s, _c, id) => Promise.resolve({ item: detailOf(id, id === 'review-1' ? refused : {}) }),
+    recheckH2ADryRunReview: (_s, _c, { reviewId }) => Promise.resolve({ item: detailOf(reviewId, { ...refused,
+      lastRecheckedAt: '2026-10-30T18:10:00.000Z', updatedAt: '2026-10-30T18:10:00.000Z' }) }),
+  })
+  await ui.flush()
+  const rechecks = () => ui.calls.filter(call => call.name === 'recheckH2ADryRunReview')
+  assert.equal(rechecks().length, 1)
+  assert.equal(rechecks()[0].args[2].reviewId, 'review-1')
+  assert.deepEqual({ ...ui.record().props.changed }, { eventId: '22222222-2222-4222-8222-222222222222', check: 'source', fields: ['phone', 'email'] })
+  assert.match(ui.text(), /HubSpot changed after you reviewed this record, so it was rechecked with the new values/)
+  // Moving away and back does not recheck again.
+  ui.queue().props.onSelect('review-2'); await ui.flush()
+  ui.queue().props.onSelect('review-1'); await ui.flush()
+  assert.equal(rechecks().length, 1)
+  assert.equal(ui.record().props.changed.check, 'source')
   ui.unmount()
 })
 
@@ -927,4 +950,18 @@ test('an organization whose only differences are HubSpot blanks can fill from Al
   assert.ok(ui.find('button', 'Use Albi'))
   ui.find('button', 'Link and ignore differences').props.onClick()
   assert.deepEqual(j(calls), [['575110', ['city', 'country', 'zipcode']]])
+})
+
+test('a rechecked refused record names what changed in HubSpot and marks those fields, instead of asking for a recheck', async () => {
+  const failed = { ...base, resolution: { id: '11111111-1111-4111-8111-111111111111', status: 'failed', action: 'link_existing', objectType: 'contacts',
+    events: [{ id: '22222222-2222-4222-8222-222222222222', eventType: 'failed', createdAt: '2026-10-30T18:00:00.000Z', details: { staleCheck: 'source' } }] } }
+  const plain = await html(failed)
+  assert.match(plain, /This record changed since it was checked/)
+  const out = await html(failed, { changed: { eventId: '22222222-2222-4222-8222-222222222222', check: 'source', fields: ['email', 'phoneNumber'] } })
+  assert.match(out, /HubSpot changed after you reviewed this contact/)
+  assert.match(out, /Changed: Email, Phone/)
+  assert.match(out, /Nothing was sent to Albi\./)
+  assert.doesNotMatch(out, /This record changed since it was checked/)
+  // Email matches Albi apart from case, yet it is shown (not collapsed) because it changed; both rows carry the marker.
+  assert.equal((out.match(/>Changed</g) ?? []).length, 2)
 })
