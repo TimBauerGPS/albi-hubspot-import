@@ -176,6 +176,28 @@ test('does not treat unsupported phone extensions as exact identity evidence', (
   assert.equal(result.reason, 'unsupported_phone_evidence')
 })
 
+test('same email and name links even when coworkers share the company line with extensions', () => {
+  const coworkers = Array.from({ length: 12 }, (_, i) => contact(String(100 + i),
+    { firstName: `P${i}`, lastName: 'X', email: `p${i}@acme.com`, phoneNumber: `(555) 111-2222 x${10 + i}` }))
+  const input = { sourceId: 'hs-1', source: { firstname: 'Shaun', lastname: "O'Brien", email: 'shaun@acme.com', phone: '555-111-2222 ext 40' },
+    candidates: [...coworkers, contact('900', { firstName: 'Shaun', lastName: 'O’Brien', email: 'Shaun@acme.com', phoneNumber: '(555) 111-2222 x40' })] }
+  const result = decideContactMatch(input)
+  assert.equal(result.action, 'link')
+  assert.equal(result.targetId, '900')
+  assert.ok(selectReviewCandidates(input, result).some(item => item.id === '900'))
+  // Without the name, a phone extension still blocks the email match.
+  assert.equal(decideContactMatch({ ...input, source: { ...input.source, firstname: 'Other' } }).reason, 'unsupported_phone_evidence')
+})
+
+test('capped review candidates keep the email match over phone-only coworkers', () => {
+  const coworkers = Array.from({ length: 12 }, (_, i) => contact(String(100 + i), { firstName: `P${i}`, lastName: 'X', phoneNumber: '5551112222' }))
+  const input = { sourceId: 'hs-1', source: { firstname: 'Shaun', lastname: 'OBrien', email: 'shaun@acme.com', phone: '5559998888' },
+    candidates: [...coworkers, contact('900', { firstName: 'Shaun', lastName: 'OBrien', email: 'shaun@acme.com', phoneNumber: '5551112222' })] }
+  const selected = selectReviewCandidates({ ...input, source: { ...input.source, phone: '5551112222' } }, {})
+  assert.equal(selected.length, 10)
+  assert.ok(selected.some(item => item.id === '900'))
+})
+
 test('exact email match conflicts when both records have different phone identity evidence', () => {
   const result = decideContactMatch({
     sourceId: 'hs-1', source: { email: 'jane@example.com', phone: '4155550123' },

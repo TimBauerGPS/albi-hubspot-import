@@ -284,10 +284,12 @@ function contactMatches(source, candidates) {
   return { byEmail, byPhone, unsupportedPhone, phoneResults }
 }
 
+const byId = (left, right) => String(idOf(left) ?? '').localeCompare(String(idOf(right) ?? ''))
+
 function contactReviewCandidates(source, candidates) {
   const { byEmail, byPhone, unsupportedPhone } = contactMatches(source, candidates)
-  const related = [...byEmail, ...byPhone, ...unsupportedPhone]
-  return related.length ? related : nameMatches(source, candidates)
+  const related = [byEmail, byPhone, unsupportedPhone].flatMap(tier => [...tier].sort(byId))
+  return related.length ? related : nameMatches(source, candidates).sort(byId)
 }
 
 function organizationReviewCandidates(source, candidates) {
@@ -302,22 +304,26 @@ function organizationReviewCandidates(source, candidates) {
     normalizeName(rawValue(propertiesOf(candidate), ['name', 'companyName'])) === name) : []
 }
 
-// Diagnostics only: selection never participates in the match decision.
-// Forced-create validation uses the uncapped form so an eleventh match can
-// never fall outside the exact set the administrator approved ignoring.
-export function selectAllReviewCandidates(input = {}, decision = {}, entityType = 'contact') {
+// Strongest evidence first: the decision's target, then email, then phone, then name.
+function rankedReviewCandidates(input, decision, entityType) {
   const candidates = [...(input.candidates ?? input.albiCandidates ?? [])]
   const target = decision.targetId == null ? [] : candidates.filter(item => idOf(item) === String(decision.targetId))
   const related = entityType === 'organization'
     ? organizationReviewCandidates(sourceOf(input, 'organization'), candidates)
     : contactReviewCandidates(sourceOf(input, 'contact'), candidates)
-  return [...new Map([...target, ...related].map(item => [idOf(item), item])).values()]
-    .filter(item => idOf(item))
-    .sort((left, right) => idOf(left).localeCompare(idOf(right)))
+  return [...new Map([...target, ...related].map(item => [idOf(item), item])).values()].filter(item => idOf(item))
 }
 
+// Diagnostics only: selection never participates in the match decision.
+// Forced-create validation uses the uncapped form so an eleventh match can
+// never fall outside the exact set the administrator approved ignoring.
+export function selectAllReviewCandidates(input = {}, decision = {}, entityType = 'contact') {
+  return rankedReviewCandidates(input, decision, entityType).sort(byId)
+}
+
+// The cap keeps the strongest evidence, so coworkers sharing a company phone never crowd out the email match.
 export function selectReviewCandidates(input = {}, decision = {}, entityType = 'contact') {
-  return selectAllReviewCandidates(input, decision, entityType).slice(0, 10)
+  return rankedReviewCandidates(input, decision, entityType).slice(0, 10).sort(byId)
 }
 
 function matchDecisionConflict(sourceId, targetId, input) {
@@ -337,7 +343,9 @@ export function decideContactMatch(input = {}) {
   const { byEmail, byPhone, unsupportedPhone, phoneResults } = contactMatches(source, candidates)
   if (byEmail.length > 1) return result('conflict', 'duplicate_candidates')
   let candidate = byEmail[0]
-  if (candidate && unsupportedPhone.includes(candidate) && !byPhone.includes(candidate)) {
+  // Same email and same name outranks a phone with an extension (a shared company line).
+  if (candidate && unsupportedPhone.includes(candidate) && !byPhone.includes(candidate) &&
+    !nameMatches(source, [candidate]).length) {
     return result('conflict', 'unsupported_phone_evidence')
   }
   if (!candidate) {

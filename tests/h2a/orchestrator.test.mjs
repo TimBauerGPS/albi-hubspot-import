@@ -1603,11 +1603,12 @@ test('a different portal mapping with the same source ID does not change safe cu
 })
 
 // Sample capture computes triage (no extra provider reads, so readiness stays unknown).
+// The names differ: same email and same name would link past the phone extension.
 function exactEmailSample(mappings = []) {
   const deps = reviewSampleFixture({ companyIds: [], albiContacts: [{ id: '200', firstName: 'First10', lastName: 'Last10',
     email: '10@example.com', phoneNumber: '4155550123' }] })
   const getContacts = deps.hubspot.getContacts
-  deps.hubspot.getContacts = async ids => (await getContacts(ids)).map(row => ({ ...row, properties: { ...row.properties, phone: '415-555-0123 ext 5' } }))
+  deps.hubspot.getContacts = async ids => (await getContacts(ids)).map(row => ({ ...row, properties: { ...row.properties, firstname: 'Other', phone: '415-555-0123 ext 5' } }))
   const getMappings = deps.repository.getMappings
   deps.repository.getMappings = async (...args) => { const all = await getMappings(...args); return { ...all, contacts: [...all.contacts, ...mappings] } }
   return deps
