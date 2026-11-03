@@ -2,8 +2,15 @@ import { decryptSecret, loadCredentialKeyring } from './crypto.js'
 import { HubSpotClient } from './hubspotClient.js'
 import { AlbiClient } from './albiClient.js'
 import { withAlbiMirror } from './albiMirror.js'
+import { AlbiWrapperClient, withAlbiActivityFallback } from './albiWrapperClient.js'
 
 const fromRpc = ({ key_version, ...envelope }) => ({ ...envelope, keyVersion: key_version })
+
+// An envelope that cannot be decrypted counts as no key: the Public API's refusal then stands and nothing is resent.
+export function wrapperClient(envelope, keyring, fetch) {
+  if (!envelope) return null
+  try { return new AlbiWrapperClient({ apiKey: decryptSecret(fromRpc(envelope), keyring), fetch }) } catch { return null }
+}
 
 export async function createH2AProviderClients({ companyId, repository, keyring, env = process.env, fetch } = {}) {
   const credentials = await repository.getCredentials(companyId)
@@ -12,8 +19,9 @@ export async function createH2AProviderClients({ companyId, repository, keyring,
   return {
     hubspot: new HubSpotClient({ token: decryptSecret(fromRpc(credentials.hubspot_envelope), resolvedKeyring), fetch }),
     // Contact and organization lists come from the company's Albi copy, refreshed with what changed in Albi.
-    albi: withAlbiMirror(new AlbiClient({ apiKey: decryptSecret(fromRpc(credentials.albi_envelope), resolvedKeyring), fetch }),
-      { store: repository, companyId }),
+    // Activity reads fall back to the wrapper while the Albi key lacks the scope.
+    albi: withAlbiActivityFallback(withAlbiMirror(new AlbiClient({ apiKey: decryptSecret(fromRpc(credentials.albi_envelope), resolvedKeyring), fetch }),
+      { store: repository, companyId }), wrapperClient(await repository.getAlbiWrapperCredential?.(companyId), resolvedKeyring, fetch)),
   }
 }
 

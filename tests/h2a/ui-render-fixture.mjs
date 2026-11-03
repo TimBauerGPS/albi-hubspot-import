@@ -21,7 +21,7 @@ export async function renderWorkflowPage(name, data, bindings, { isAdmin = true 
     useOutletContext: () => ({ session: { access_token: 'token' }, companyId: 'company-1', companyName: 'Example',
       isAdmin, tenantRevision: 0, completeTenantTransition() {} }),
     Link: ({ to, children, ...props }) => createElement('a', { href: to, ...props }, children),
-    CredentialFields: () => null, OptionMappingForm: () => null, PreflightChecklist: () => null,
+    CredentialFields: () => null, WrapperKeyField: () => null, OptionMappingForm: () => null, PreflightChecklist: () => null,
     Date, Intl, Set, Map, AbortController,
   }
   const component = vm.runInNewContext(`${code}\n${name}`, context)

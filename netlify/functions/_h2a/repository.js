@@ -1,3 +1,4 @@
+import { readAlbiWrapperCredential } from './albiWrapperClient.js'
 import { randomUUID } from 'node:crypto'
 import { DRY_RUN_PROPOSED_ACTION_TOTALS, DRY_RUN_REVIEW_TOTAL_FIELDS, SAMPLE_LIMIT_PER_TYPE } from './constants.js'
 import { assertReviewClassification, projectReviewEvent, REVIEW_REASONS, safeReviewCandidates,
@@ -974,6 +975,7 @@ export function createH2ARepository(supabase) {
       return checked(await supabase.rpc('h2a_release_lease', { p_company_id: companyId, p_owner_token: ownerToken })) === true
     },
     async getConfig(companyId) { return checked(await scoped(supabase, 'h2a_company_config', companyId).maybeSingle()) },
+    async getAlbiWrapperCredential(companyId) { return readAlbiWrapperCredential(supabase, companyId) },
     async getCredentials(companyId) {
       return checked(await supabase.rpc('h2a_get_credentials', { p_company_id: companyId }))
     },

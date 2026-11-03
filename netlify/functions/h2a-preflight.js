@@ -2,6 +2,8 @@ import { H2AAuthError, requireH2ARequest } from './_h2a/auth.js'
 import { decryptSecret, loadCredentialKeyring } from './_h2a/crypto.js'
 import { HubSpotClient } from './_h2a/hubspotClient.js'
 import { AlbiClient } from './_h2a/albiClient.js'
+import { readAlbiWrapperCredential, withAlbiActivityFallback } from './_h2a/albiWrapperClient.js'
+import { wrapperClient } from './_h2a/providerClients.js'
 import { completeConfirmedMappings, runPreflight } from './_h2a/preflight.js'
 import { HUBSPOT_ACTIVITY_TYPES } from './_h2a/constants.js'
 import { pacificBusinessDate, pacificStartOfDate } from './_h2a/time.js'
@@ -50,9 +52,11 @@ export function createH2AReadHandler(options = {}, { estimate = false } = {}) {
       if (!credentials) fail(409, 'Save H2A credentials in Settings first.')
       const keyring = options.keyring ?? loadCredentialKeyring(options.env ?? process.env)
       const secrets = { hubspotToken: decryptSecret(fromRpc(credentials.hubspot_envelope), keyring), albiApiKey: decryptSecret(fromRpc(credentials.albi_envelope), keyring) }
+      const wrapperEnvelope = await readAlbiWrapperCredential(supabase, companyId)
       const clients = options.makeClients ? options.makeClients(secrets) : {
         hubspot: new HubSpotClient({ token: secrets.hubspotToken, fetch: options.fetch }),
-        albi: new AlbiClient({ apiKey: secrets.albiApiKey, fetch: options.fetch }),
+        albi: withAlbiActivityFallback(new AlbiClient({ apiKey: secrets.albiApiKey, fetch: options.fetch }),
+          wrapperClient(wrapperEnvelope, keyring, options.fetch)),
       }
       if (estimate) {
         const byObjectType = {}; let capped = false
@@ -63,7 +67,7 @@ export function createH2AReadHandler(options = {}, { estimate = false } = {}) {
         }
         return response(200, { total: Object.values(byObjectType).reduce((sum, count) => sum + count, 0), byObjectType, capped })
       }
-      const protectedValues = [...Object.values(secrets), ...Object.values(credentials.hubspot_envelope), ...Object.values(credentials.albi_envelope)].filter(value => typeof value === 'string' && value)
+      const protectedValues = [...Object.values(secrets), ...Object.values(wrapperEnvelope ?? {}), ...Object.values(credentials.hubspot_envelope), ...Object.values(credentials.albi_envelope)].filter(value => typeof value === 'string' && value)
       const result = await runPreflight({ ...clients, protectedValues })
       // Both versions are captured before external calls and reloaded immediately before persistence.
       const freshConfig = await loadConfig()

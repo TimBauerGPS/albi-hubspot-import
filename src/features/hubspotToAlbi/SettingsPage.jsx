@@ -7,7 +7,7 @@ import {
   runH2ASync,
   saveH2ASettings,
 } from '../../lib/hubspotToAlbi'
-import CredentialFields from './CredentialFields'
+import CredentialFields, { WrapperKeyField } from './CredentialFields'
 import OptionMappingForm from './OptionMappingForm'
 import PreflightChecklist from './PreflightChecklist'
 import { presentDryRunTotals } from './dryRunTotals.js'
@@ -219,6 +219,12 @@ export default function SettingsPage() {
     return Boolean(result)
   }
 
+  async function saveWrapperKey(albiWrapperKey) {
+    const result = await perform('wrapper-key', signal => saveH2ASettings(session, companyId, { action: 'replace_albi_wrapper_key', albiWrapperKey }, { signal }),
+      'Wrapper key saved. Run the connection check again.')
+    return Boolean(result)
+  }
+
   async function runPreflight() {
     const result = await perform('preflight', async signal => {
       await runH2APreflight(session, companyId, { signal })
@@ -358,6 +364,7 @@ export default function SettingsPage() {
             onSave={saveCredentials}
             disabledReason={disabledReason}
           />
+          {credentialsReady && <WrapperKeyField mask={settings.albiWrapperKeyMask} isAdmin={isAdmin} busy={busyAction === 'wrapper-key'} onSave={saveWrapperKey} />}
         </SetupCard>
 
         <SetupCard number="02" title="Verify the connection" complete={connectionReady} description="Check authentication, required read/write capabilities, and the current tenant’s Albi option lists without creating records.">

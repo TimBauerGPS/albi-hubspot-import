@@ -1,6 +1,6 @@
 # Albi HubSpot Importer
 
-Vite and Netlify application for the existing Albi-to-HubSpot importer and the separate, tenant-scoped HubSpot-to-Albi (H2A) sync module. H2A uses the [Albi Public API](https://albi-public.readme.io/docs/getting-started) at `https://publicapi.albiware.com/api/v1` with a company key (issued by Albi support, `albi_...`) sent only as `Authorization: Bearer`. H2A credentials and scheduled-job secrets are server-side only (`H2A_CREDENTIAL_KEY_V1`, `SUPABASE_SERVICE_ROLE_KEY`, and `INTERNAL_CRON_SECRET`); never add them to browser/Vite variables.
+Vite and Netlify application for the existing Albi-to-HubSpot importer and the separate, tenant-scoped HubSpot-to-Albi (H2A) sync module. H2A uses the [Albi Public API](https://albi-public.readme.io/docs/getting-started) at `https://publicapi.albiware.com/api/v1` with a company key (issued by Albi support, `albi_...`) sent only as `Authorization: Bearer`. While that key lacks `Permissions.Activities.View`, an optional Guardian wrapper key (`X-API-Key`, requires [h2a-albi-wrapper-credential.sql](supabase/h2a-albi-wrapper-credential.sql)) reads activities for the duplicate check only. H2A credentials and scheduled-job secrets are server-side only (`H2A_CREDENTIAL_KEY_V1`, `SUPABASE_SERVICE_ROLE_KEY`, and `INTERNAL_CRON_SECRET`); never add them to browser/Vite variables.
 
 ## Local development
 

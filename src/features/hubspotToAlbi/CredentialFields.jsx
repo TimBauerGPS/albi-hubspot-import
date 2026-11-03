@@ -87,3 +87,45 @@ export default function CredentialFields({
     </form>
   )
 }
+
+// Optional: reads activities through the Guardian wrapper for the duplicate check, while the Albi key lacks that scope.
+export function WrapperKeyField({ mask, isAdmin, busy, onSave }) {
+  const [key, setKey] = useState('')
+  const canSubmit = isAdmin && !busy && Boolean(key.trim())
+
+  async function handleSubmit(event) {
+    event.preventDefault()
+    if (!canSubmit) return
+    if (await onSave(key.trim())) setKey('')
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="mt-5 border-t border-gray-200 pt-4">
+      <label htmlFor="h2a-albi-wrapper-key" className="block text-sm font-medium text-gray-800">Guardian wrapper key (optional)</label>
+      <p id="h2a-albi-wrapper-help" className="mt-1 text-xs leading-5 text-gray-500">
+        Used only to check for duplicate activities, and only while the Albi key can’t read activities. Saved value: <code className="font-mono text-gray-700">{mask || 'Not saved'}</code>. Saving it disables sync until the connection check passes again.
+      </p>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
+        <input
+          id="h2a-albi-wrapper-key"
+          type="password"
+          autoComplete="new-password"
+          spellCheck={false}
+          value={key}
+          onChange={event => setKey(event.target.value)}
+          disabled={!isAdmin || busy}
+          aria-describedby="h2a-albi-wrapper-help"
+          placeholder={mask ? 'Leave blank to keep current key' : 'Enter Guardian wrapper key'}
+          className={inputClass}
+        />
+        <button
+          type="submit"
+          disabled={!canSubmit}
+          className="mt-1.5 shrink-0 rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm font-semibold text-gray-700 shadow-sm transition hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {busy ? 'Saving…' : mask ? 'Replace key' : 'Save key'}
+        </button>
+      </div>
+    </form>
+  )
+}

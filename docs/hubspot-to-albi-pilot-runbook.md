@@ -67,6 +67,16 @@ Relationship types supply the contact-type and organization-type choices used in
 
 The connection check is read-only. It validates authentication, exact-one-company access, list operations, and required option lists. Creates and updates appear as **Verified when first used** because proving their scopes during setup would change real records; the informational state does not block activation. A `401` means the key is missing, invalid, disabled or expired (Albi does not say which). A `403` names the exact scope the key lacks, which the application displays. Quote the response `trackId` when contacting Albi support.
 
+### Activity reads through the wrapper (duplicate check)
+
+A send with an unclear result (timeout, lost connection, unreadable reply) is searched for by its source marker before it is sent again, because activities have no duplicate refusal and no external id. That search reads activities. New sends never read them.
+
+The read tries the Public API first. If Albi refuses for permission (a key without `Permissions.Activities.View`) and a wrapper key is saved, the read goes to `https://albi.guardianrestoration.com` (`X-API-Key`, scope `activities:list`). The connection check's activity read follows the same path. The wrapper is used for nothing else, and it stops being used by itself once Albi adds the scope.
+
+Setup: apply `supabase/h2a-albi-wrapper-credential.sql`, save the key under **Guardian wrapper key (optional)** in H2A Settings (this disables sync and needs a new connection check; mappings stay confirmed), then run the connection check. A key for a different company than the Albi key is refused. With no working read, a retry stops before sending: the activity stays undelivered, never duplicated.
+
+Before going live, prove the wrapper sees activities created through the Public API, with their notes: create one marked activity (the guarded smoke flow), then confirm its marker appears in the wrapper's list. Until that is done, a "not found" from the wrapper cannot be trusted to mean the activity is absent.
+
 ### Albi updates from HubSpot
 
 Albi edits that used to be manual tasks are now sent as partial updates (`PUT /api/v1/contacts/{id}`, `PUT /api/v1/organizations/{id}`; scopes `Permissions.Contacts.Edit` and `Permissions.Organizations.Edit`):

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createSettingsHandler } from '../../netlify/functions/h2a-settings.js'
 import { createPreflightHandler } from '../../netlify/functions/h2a-preflight.js'
-import { encryptSecret, decryptSecret } from '../../netlify/functions/_h2a/crypto.js'
+import { encryptSecret, decryptSecret, maskSecret } from '../../netlify/functions/_h2a/crypto.js'
 
 const keyring = { activeVersion: 1, keys: { 1: Buffer.alloc(32, 7) } }
 const now = '2026-10-02T10:00:00.000Z'
@@ -50,6 +50,7 @@ function fixture({ role = 'admin', superAdmin = false, config = {}, credentials 
     hubspot_envelope: toRpc(encryptSecret(hubspotToken, keyring)),
     albi_envelope: toRpc(encryptSecret(albiApiKey, keyring)), updated_by: 'user-1', updated_at: now,
   }]] : [])
+  const wrapperCredentials = new Map()
   const writes = []
   const rpcCalls = []
   const reads = []
@@ -125,6 +126,12 @@ function fixture({ role = 'admin', superAdmin = false, config = {}, credentials 
     async rpc(name, args) {
       rpcCalls.push({ name, args: structuredClone(args) })
       if (name === 'h2a_get_credentials') return { data: structuredClone(privateCredentials.get(args.p_company_id) ?? null), error: null }
+      if (name === 'h2a_get_albi_wrapper_credential') return { data: structuredClone(wrapperCredentials.get(args.p_company_id) ?? null), error: null }
+      if (name === 'h2a_put_albi_wrapper_credential') {
+        if (failure === name) return { data: null, error: { message: 'function does not exist' } }
+        wrapperCredentials.set(args.p_company_id, args.p_envelope)
+        return { data: null, error: null }
+      }
       assert.equal(name, 'h2a_put_credentials')
       const current = tables.h2a_company_config.find(row => row.company_id === args.p_company_id)
       assert.equal(current.state, 'disabled', 'private credential writes must follow public invalidation')
@@ -144,7 +151,7 @@ function fixture({ role = 'admin', superAdmin = false, config = {}, credentials 
     return { ...response, json: JSON.parse(response.body) }
   }
   return {
-    request, handle, supabase, tables, privateCredentials, writes, rpcCalls, reads,
+    request, handle, supabase, tables, privateCredentials, wrapperCredentials, writes, rpcCalls, reads,
     setBeforeCredentialWrite(fn) { beforeCredentialWrite = fn },
     setAfterCredentialWrite(fn) { afterCredentialWrite = fn },
     setAfterReviewCount(fn) { afterReviewCount = fn },
@@ -812,4 +819,26 @@ test('unsupported actions and fields cannot set state or submit credentials thro
   const f = fixture()
   assert.equal((await f.handle({ httpMethod: 'PUT', headers: { authorization: 'Bearer valid-jwt' }, body: 'bad-json' })).statusCode, 400)
   assert.equal((await f.request('POST', {})).statusCode, 405)
+})
+
+test('saving the wrapper key encrypts it, requires a new connection check, and keeps mappings confirmed', async () => {
+  const f = fixture({ config: { state: 'live', preflight_status: 'valid', option_confirmation_status: 'confirmed' } })
+  const secret = 'guardian-wrapper-key-9999'
+  const result = await f.request('PUT', { action: 'replace_albi_wrapper_key', albiWrapperKey: secret })
+  assert.equal(result.statusCode, 200)
+  assert.equal(result.json.albiWrapperKeyMask, maskSecret(secret))
+  assert.equal(result.body.includes(secret), false)
+  assert.equal(decryptSecret(fromRpc(f.wrapperCredentials.get('company-a')), keyring), secret)
+  const config = f.tables.h2a_company_config.find(row => row.company_id === 'company-a')
+  assert.deepEqual([config.state, config.preflight_status, config.option_confirmation_status], ['disabled', 'unchecked', 'confirmed'])
+  assert.equal((await f.request('GET')).json.albiWrapperKeyMask, maskSecret(secret))
+})
+
+test('a wrapper key that cannot be stored yet says what to apply, and a blank one is refused', async () => {
+  const f = fixture({ failure: 'h2a_put_albi_wrapper_credential' })
+  const result = await f.request('PUT', { action: 'replace_albi_wrapper_key', albiWrapperKey: 'key' })
+  assert.equal(result.statusCode, 409)
+  assert.match(result.json.error, /h2a-albi-wrapper-credential\.sql/)
+  assert.equal((await fixture().request('PUT', { action: 'replace_albi_wrapper_key', albiWrapperKey: '  ' })).statusCode, 400)
+  assert.equal((await fixture().request('GET')).json.albiWrapperKeyMask, null)
 })

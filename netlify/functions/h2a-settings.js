@@ -5,6 +5,7 @@ import { decryptSecret, encryptSecret, loadCredentialKeyring, maskSecret } from 
 import { pacificBusinessDate, pacificStartOfDate } from './_h2a/time.js'
 import { mappingsMatchOptions, safePreflightDetails } from './_h2a/preflight.js'
 import { createH2ARepository } from './_h2a/repository.js'
+import { readAlbiWrapperCredential } from './_h2a/albiWrapperClient.js'
 import { loadHubspotWriteReadiness, WRITE_AUTH_REJECTION_MESSAGE } from './_h2a/resolutionCapability.js'
 
 const CONFIG_FIELDS = ['company_id', 'state', 'portal_id', 'selected_start_date', 'initial_start_locked_at',
@@ -14,6 +15,7 @@ const CONFIG_SELECT = [...CONFIG_FIELDS, 'preflight_details'].join(', ')
 const MAPPING_SELECT = 'mapping_kind, source_key, albi_id, label, confirmed_by, confirmed_at'
 const ACTION_FIELDS = {
   replace_credentials: ['hubspotToken', 'albiApiKey'],
+  replace_albi_wrapper_key: ['albiWrapperKey'],
   save_notification_recipients: ['notificationRecipients'],
   save_start_date: ['startDate'],
   confirm_option_mappings: ['optionMappings'],
@@ -156,6 +158,7 @@ export function createSettingsHandler(options = {}) {
       config.selected_start_date ??= today
       let mappings = await checked(supabase.from('h2a_option_mappings').select(MAPPING_SELECT).eq('company_id', companyId))
       let credentials = await checked(supabase.rpc('h2a_get_credentials', { p_company_id: companyId }))
+      let wrapperEnvelope = await readAlbiWrapperCredential(supabase, companyId)
       let backfillRequestId
       let keyring
       const getKeyring = () => keyring ??= options.keyring ?? loadCredentialKeyring(options.env ?? process.env)
@@ -273,6 +276,17 @@ export function createSettingsHandler(options = {}) {
             credentials = { hubspot_envelope: hubspotEnvelope, albi_envelope: albiEnvelope }
             break
           }
+          // The wrapper key only backs activity reads, so option mappings stay confirmed; the connection check runs again.
+          case 'replace_albi_wrapper_key': {
+            if (!credentials) fail(409, 'Save the HubSpot and Albi credentials first.')
+            if (typeof body.albiWrapperKey !== 'string' || !body.albiWrapperKey.trim() || body.albiWrapperKey.length > 16384) fail(400, 'Enter the wrapper key.')
+            const envelope = toRpc(encryptSecret(body.albiWrapperKey.trim(), getKeyring()))
+            await saveConfig({ state: 'disabled', preflight_status: 'unchecked', preflight_details: {}, preflight_checked_at: null })
+            const saved = await supabase.rpc('h2a_put_albi_wrapper_credential', { p_company_id: companyId, p_envelope: envelope, p_updated_by: userId })
+            if (saved?.error) fail(409, 'The wrapper key could not be saved. Apply supabase/h2a-albi-wrapper-credential.sql, then try again.')
+            wrapperEnvelope = envelope
+            break
+          }
           case 'save_start_date': {
             const startDate = validateDate(body.startDate, today)
             if (config.initial_start_locked_at && startDate !== config.selected_start_date) {
@@ -334,7 +348,8 @@ export function createSettingsHandler(options = {}) {
         }
       }
       const secrets = getSecrets()
-      const protectedValues = [...Object.values(secrets),
+      const wrapperKey = (() => { try { return wrapperEnvelope ? decryptSecret(fromRpc(wrapperEnvelope), getKeyring()) : null } catch { return null } })()
+      const protectedValues = [...Object.values(secrets), wrapperKey, ...Object.values(wrapperEnvelope ?? {}),
         ...Object.values(credentials?.hubspot_envelope ?? {}), ...Object.values(credentials?.albi_envelope ?? {})]
         .filter(value => typeof value === 'string' && value.length > 0)
       const safeConfig = Object.fromEntries(CONFIG_FIELDS.filter(field => config[field] !== undefined).map(field => [field, config[field]]))
@@ -351,6 +366,7 @@ export function createSettingsHandler(options = {}) {
         preflight: { status: config.preflight_status, details: preflightDetails, checkedAt: config.preflight_checked_at,
           hubspotWrites, ...(hubspotWrites === 'rejected' ? { writeMessage: WRITE_AUTH_REJECTION_MESSAGE } : {}) },
         hubspotTokenMask: maskSecret(secrets.hubspotToken), albiApiKeyMask: maskSecret(secrets.albiApiKey),
+        albiWrapperKeyMask: maskSecret(wrapperKey),
         dryRunReviewReady: Boolean(completedDryRun), lastCompletedDryRun: toCompletedDryRun(completedDryRun),
         lastCompletedSampleDryRun: toCompletedDryRun(completedSampleDryRun),
         sampleReview, lastSampleDryRun: toSampleAttempt(latestSampleDryRun),
