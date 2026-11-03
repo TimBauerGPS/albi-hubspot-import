@@ -13,12 +13,12 @@ test('shared provider factory decrypts only selected tenant credentials and supp
   const calls = []
   const clients = await createH2AProviderClients({ companyId: 'tenant-1', keyring,
     repository: { getCredentials: async company => { assert.equal(company, 'tenant-1'); return { hubspot_envelope: envelope('hubspot-token'), albi_envelope: envelope('albi-key') } } },
-    fetch: async (url, options) => { calls.push([url, options.headers]); return new Response(JSON.stringify(url.includes('hubapi') ? { portalId: '123' } : { data: [{ companyId: 'trusted-company', name: 'Allied' }] }), { status: 200 }) },
+    fetch: async (url, options) => { calls.push([url, options.headers]); return new Response(JSON.stringify(url.includes('hubapi') ? { portalId: '123' } : url.includes('/company/') ? { data: { id: '1319', name: 'Allied' } } : { data: [{ id: '29', name: 'Active', companyId: '1319' }] }), { status: 200 }) },
   })
   assert.equal((await clients.hubspot.getAccountInfo()).portalId, '123')
-  assert.equal((await clients.albi.verifyCredentials()).company.id, 'trusted-company')
+  assert.equal((await clients.albi.verifyCredentials()).company.id, '1319')
   assert.equal(calls[0][1].Authorization, 'Bearer hubspot-token')
-  assert.equal(calls[1][1]['X-API-Key'], 'albi-key')
+  assert.equal(calls[1][1].Authorization, 'Bearer albi-key')
   await assert.rejects(createH2AProviderClients({ companyId: 'tenant-1', repository: { getCredentials: async () => null }, keyring }), /H2A credentials are missing/)
 })
 

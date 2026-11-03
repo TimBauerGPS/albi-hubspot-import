@@ -13,6 +13,7 @@ import { decideContactMatch, decideOrganizationMatch, selectAllReviewCandidates 
 import { normalizePhone } from './normalize.js'
 import { loadReviewResolutionOptions } from './reviewResolutionOptions.js'
 import { followOrganizationMerge } from './organizationMerges.js'
+import { applyAlbiTasks } from './albiUpdates.js'
 import { H2A_REVIEW_ERROR_CATEGORIES, H2A_REVIEW_ERROR_CODES } from '../../../shared/h2aReviewReasons.js'
 
 const fail = (status, message) => { throw new H2AReviewError(status, message) }
@@ -698,16 +699,62 @@ async function runClaim(deps, input, saved, context) {
   // Keep storage failures outside the provider-error catch: a failed finalization
   // leaves a live/expired lease for reconciliation instead of pretending success.
   const forced = plan.action === 'force_create_albi'
+  // HubSpot values that won go to Albi as partial updates; only what Albi cannot take (or refused) stays a manual task.
+  const albiUpdate = await sendAlbiTasks(deps, clients, plan.manualTasks, claimed)
+  const manualTasks = albiUpdate?.remaining ?? plan.manualTasks
+  const albiDetails = albiUpdate ? { albiUpdates: albiUpdate.applied, ...(albiUpdate.failure ? { albiUpdateError: albiUpdate.failure } : {}) } : {}
   // Live link/create completes now and closes the row with every linked conflict (one resume each).
-  const liveClose = live && !plan.manualTasks.length ? LIVE_CLOSE_FOR_ACTION[plan.action] : null
+  const liveClose = live && !manualTasks.length ? LIVE_CLOSE_FOR_ACTION[plan.action] : null
   if (liveClose) {
     const finished = await finish('completed', 'completed', forced ? 'forced_created' : plan.action === 'link_existing' ? 'linked' : 'created',
       forced ? { outcome: 'forced_created' } : {})
     return { ...finished, close: await closeSafely(deps, { companyId: input.companyId, reviewId: row.id, actorId: input.actorId, ...liveClose }) }
   }
-  return finish(plan.verification.successStatus, plan.providerOperation ? reconciled ? 'provider_reconciled' : 'provider_applied'
-    : plan.manualTasks.length ? 'waiting_on_albi' : 'recheck_requested', forced ? 'forced_created' : undefined,
-  { manualTasks: plan.manualTasks, ...(forced ? { outcome: 'forced_created' } : {}) })
+  return finish(manualTasks.length ? 'waiting_on_albi' : 'ready_to_recheck', plan.providerOperation ? reconciled ? 'provider_reconciled' : 'provider_applied'
+    : manualTasks.length ? 'waiting_on_albi' : 'recheck_requested', forced ? 'forced_created' : undefined,
+  { manualTasks, ...albiDetails, ...(forced ? { outcome: 'forced_created' } : {}) })
+}
+
+// Albi tasks are sent within what is left of the claim's lease (each update may take up to Albi's write timeout).
+async function sendAlbiTasks(deps, clients, tasks, claimed) {
+  if (!tasks?.length || !clients?.albiWrite) return null
+  const deadline = Math.min(Date.parse(claimed.lease_expires_at) - 1000, clock(deps) + 45000)
+  return applyAlbiTasks(clients.albiWrite, tasks, run => bounded(deps, run, deadline))
+}
+
+// "Send to Albi" for a resolution waiting on a manual Albi edit: sends its remaining tasks as Albi updates. All sent
+// moves it to ready to recheck; whatever Albi cannot take or refused stays waiting, with the reason. The outbox runs it.
+export async function sendWaitingAlbiUpdates(deps, { companyId, reviewId, actorId }) {
+  const repository = deps.resolutionRepository ?? deps.repository
+  const saved = await repository.getCurrentReviewResolution(companyId, reviewId)
+  if (!saved || saved.status !== 'waiting_on_albi') return { resolution: saved ?? null, unchanged: true }
+  const caps = createReviewResolutionCapabilities(repository), owner = randomUUID()
+  const claim = await caps.claimReviewResolution(companyId, saved.id, owner, actorId, 120)
+  if (claim?.error === 'not_claimable' || claim?.error === 'review_busy') return { resolution: saved, busy: true }
+  const claimed = rpc(claim)
+  if (claimed.execution_phase !== 'waiting_on_albi') fail(409, 'This resolution is no longer waiting on Albi.')
+  const finish = async (status, eventType, details) => {
+    const resolution = rpc(await caps.finishReviewResolution(companyId, claimed.id, owner,
+      { actorId, status, eventType, providerOutcomeCode: eventType, details: safeResolutionEventDetails({ ...details, code: eventType }) }))
+    const row = await deps.repository.getReview?.(companyId, reviewId).catch(() => null)
+    if (row) await refreshReviewTriage(deps.triageRepository ?? deps.repository, { companyId, row, resolutionStatus: resolution.status ?? status }).catch(() => {})
+    return resolution
+  }
+  let update
+  try {
+    const events = await repository.listReviewResolutionEvents(companyId, saved.id)
+    const tasks = [...(Array.isArray(events) ? events : [])].reverse().find(event => event?.sanitized_details?.manualTasks?.length)?.sanitized_details.manualTasks ?? []
+    const config = await deps.repository.getConfig(companyId)
+    const clients = deps.getResolutionClients ? await deps.getResolutionClients(companyId, config) : deps
+    update = await sendAlbiTasks(deps, clients, tasks, claimed) ?? { applied: [], remaining: tasks, failure: null }
+  } catch (error) {
+    const details = fixedFailure(error)
+    return { resolution: await finish('waiting_on_albi', 'failed', details), failure: details }
+  }
+  const details = { manualTasks: update.remaining, albiUpdates: update.applied, ...(update.failure ? { albiUpdateError: update.failure } : {}) }
+  const resolution = update.remaining.length ? await finish('waiting_on_albi', 'waiting_on_albi', details)
+    : await finish('ready_to_recheck', 'recheck_requested', details)
+  return { resolution, applied: update.applied, remaining: update.remaining, failure: update.failure }
 }
 
 export async function executeReviewResolution(deps, input) {

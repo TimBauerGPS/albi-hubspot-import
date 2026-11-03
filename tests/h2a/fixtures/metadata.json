@@ -28,27 +28,29 @@
     }
   },
   "albi": {
-    "baseUrl": "https://albi.guardianrestoration.com",
-    "apiVersion": "wrapper-v1",
+    "baseUrl": "https://publicapi.albiware.com",
+    "apiVersion": "v1",
     "officialReferences": [
-      "https://albi.guardianrestoration.com/docs",
-      "https://albi.guardianrestoration.com/openapi.json"
+      "https://albi-public.readme.io/docs/getting-started",
+      "https://albi-public.readme.io/docs/conventions",
+      "https://albi-public.readme.io/docs/authentication-and-scopes",
+      "https://albi-public.readme.io/llms.txt"
     ],
-    "requiredScopes": "Wrapper operations use documented per-operation scopes and the X-API-Key header.",
-    "rateLimitHeaders": [],
-    "rateLimitSource": "The public endpoint reference reviewed does not specify rate-limit headers or quotas.",
+    "requiredScopes": "Authorization: Bearer <key>; each endpoint needs one Permissions.<Domain>.<Action> scope, and a 403 names the missing one.",
+    "rateLimitHeaders": ["X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset", "X-RateLimit-Limit-Hour", "X-RateLimit-Remaining-Hour", "X-RateLimit-Reset-Hour", "Retry-After"],
+    "rateLimitSource": "Per key: 150 requests/minute (sliding), 5,000/hour, 10 in flight by default. A 429 carries Retry-After in seconds (1 = concurrency, 60 = minute window, longer = hourly quota).",
     "methods": {
-      "verifyCredentials": { "method": "GET", "path": "/v1/companies", "required": "X-API-Key header; exactly one authorized company", "pagination": "none", "fixture": "inline AccessibleCompanies response", "writes": false, "retrySafe": true },
-      "listOptions": { "method": "GET", "path": "/v1/companies/{companyId}/options/{relationship-types|referral-sources|relationship-statuses|activity-types}", "required": "options.relationship-types:list, options.referral-sources:list, options.relationship-statuses:list, options.activity-types:list", "pagination": "none in adapter contract", "fixture": "albi.responses.json#/relationshipTypes, #/referralSources, #/relationshipStatuses, #/activityTypes", "retrySafe": true },
-      "listContacts": { "method": "GET", "path": "/v1/companies/{companyId}/contacts", "required": "contacts:list", "pagination": "numeric page and pageSize; bounded data envelope with short-page cursor, or explicit pagination metadata", "fixture": "albi.responses.json#/contacts", "retrySafe": true },
-      "listOrganizations": { "method": "GET", "path": "/v1/companies/{companyId}/organizations", "required": "organizations:list", "pagination": "numeric page and pageSize; bounded data envelope with short-page cursor, or explicit pagination metadata", "fixture": "albi.responses.json#/organizations", "retrySafe": true },
-      "createContact": { "method": "POST", "path": "/v1/companies/{companyId}/contacts", "required": "contacts:create; firstName, lastName, contactTypeIds", "pagination": "none", "fixture": "albi.responses.json#/createContact", "preflightProbe": false, "retrySafe": false },
-      "createOrganization": { "method": "POST", "path": "/v1/companies/{companyId}/organizations", "required": "organizations:create; name, organizationTypeIds", "pagination": "none", "fixture": "albi.responses.json#/createOrganization", "preflightProbe": false, "retrySafe": false },
-      "createActivity": { "method": "POST", "path": "/v1/companies/{companyId}/activities", "required": "activities:create; date, notes, and a contactId or organizationId; typeId is required by the adapter", "pagination": "none", "fixture": "albi.responses.json#/createActivity", "preflightProbe": false, "retrySafe": false, "sourceFields": "source and sourceId are passed through as fields; their visibility and idempotency behavior are unverified." },
-      "updateContact": { "supported": false, "handledThrough": "conflict_review", "reason": "The wrapper exposes status updates only, not general field updates." },
-      "updateOrganization": { "supported": false, "handledThrough": "conflict_review", "reason": "The wrapper exposes status updates only, not general field updates." },
-      "associateContact": { "supported": false, "handledThrough": "conflict_review", "reason": "The wrapper supports organization association during contact creation only." },
-      "listActivities": { "method": "GET", "path": "/v1/companies/{companyId}/activities", "required": "activities:list; optional organizationId/contactId/date range", "pagination": "page and pageSize; bounded data envelope with short-page cursor, or explicit pagination metadata", "fixture": "albi.responses.json#/activities", "retrySafe": true }
+      "verifyCredentials": {"method": "GET", "path": "/api/v1/relationship-statuses, then /api/v1/company/{companyId}", "required": "Contacts.View (or Organizations.View); Company.View is optional and only supplies the display name; the key's rows must name exactly one company", "pagination": "none", "fixture": "albi.responses.json#/relationshipStatuses, #/company", "writes": false, "retrySafe": true},
+      "listOptions": {"method": "GET", "path": "/api/v1/{relationship-types|referral-sources|relationship-statuses|activity-types}?companyId=", "required": "Contacts.View or Organizations.View", "pagination": "none (full catalogue)", "fixture": "albi.responses.json#/relationshipTypes, #/referralSources, #/relationshipStatuses, #/activityTypes", "retrySafe": true},
+      "listContacts": {"method": "GET", "path": "/api/v1/contacts?companyId=", "required": "Contacts.View", "pagination": "limit (max 100) and opaque continuationToken; the adapter maps numbered cursors onto tokens", "fixture": "albi.responses.json#/contacts", "retrySafe": true},
+      "listOrganizations": {"method": "GET", "path": "/api/v1/organizations?companyId=", "required": "Organizations.View", "pagination": "limit (max 100) and opaque continuationToken; the adapter maps numbered cursors onto tokens", "fixture": "albi.responses.json#/organizations", "retrySafe": true},
+      "createContact": {"method": "POST", "path": "/api/v1/contacts", "required": "Contacts.Create; firstName, lastName, contactTypeIds, referralSourceId; companyId is sent", "pagination": "none", "fixture": "albi.responses.json#/createContact", "preflightProbe": false, "retrySafe": false, "duplicates": "Re-posting the same contact returns 409."},
+      "createOrganization": {"method": "POST", "path": "/api/v1/organizations", "required": "Organizations.Create; name, organizationTypeIds, referralSourceId; companyId is sent", "pagination": "none", "fixture": "albi.responses.json#/createOrganization", "preflightProbe": false, "retrySafe": false, "duplicates": "Re-posting the same organization returns 409."},
+      "createActivity": {"method": "POST", "path": "/api/v1/activities", "required": "Activities.Edit; activityTypeId, date, notes, and exactly one of contactId or organizationId", "pagination": "none", "fixture": "albi.responses.json#/createActivity", "preflightProbe": false, "retrySafe": false, "sourceFields": "source is stored and returned; there is no external id field, so the notes source marker stays the dedupe key."},
+      "updateContact": {"method": "PUT", "path": "/api/v1/contacts/{id}", "required": "Contacts.Edit; partial update of firstName, lastName, email, phoneNumber, jobTitle, organizationId and address fields; blanks are refused", "pagination": "none", "fixture": "inline updated contact", "writes": true, "retrySafe": true},
+      "updateOrganization": {"method": "PUT", "path": "/api/v1/organizations/{id}", "required": "Organizations.Edit; partial update of name, email, phoneNumber and address fields; blanks are refused", "pagination": "none", "fixture": "inline updated organization", "writes": true, "retrySafe": true},
+      "associateContact": {"method": "PUT", "path": "/api/v1/contacts/{id}", "required": "Contacts.Edit; organizationId only", "pagination": "none", "fixture": "inline updated contact", "writes": true, "retrySafe": true},
+      "listActivities": {"method": "GET", "path": "/api/v1/activities?companyId=", "required": "Activities.View; optional contactId/organizationId and dateAfter/dateBefore", "pagination": "limit and opaque continuationToken, newest first", "fixture": "albi.responses.json#/activities", "retrySafe": true}
     }
   }
 }

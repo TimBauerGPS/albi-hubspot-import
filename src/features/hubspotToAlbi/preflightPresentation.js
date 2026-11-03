@@ -1,4 +1,5 @@
 import { listH2AReviewReasonOptions } from '../../../shared/h2aReviewReasons.js'
+import { KNOWN_ALBI_SCOPES } from '../../../shared/h2aAlbiScopes.js'
 
 const reviewReasons = new Set(listH2AReviewReasonOptions().map(option => option.value))
 
@@ -21,10 +22,6 @@ const DIAGNOSTIC_LABELS = Object.freeze({
   handled_through_conflicts: 'Handled through Conflicts',
 })
 
-const WRAPPER_SCOPES = new Set([
-  'contacts:list', 'contacts:create', 'organizations:list', 'organizations:create', 'activities:list', 'activities:create',
-  'options.relationship-types:list', 'options.referral-sources:list', 'options.relationship-statuses:list', 'options.activity-types:list',
-])
 
 const PROTOCOL_ISSUE_LABELS = Object.freeze({
   envelope_invalid: 'response envelope',
@@ -45,7 +42,7 @@ const PROTOCOL_ISSUE_LABELS = Object.freeze({
 export function presentPreflightCheck(check = {}) {
   const status = ['valid', 'invalid', 'informational'].includes(check.status) ? check.status : 'invalid'
   const label = status === 'valid' ? 'available' : DIAGNOSTIC_LABELS[check.reason] ?? 'Unavailable'
-  const scope = WRAPPER_SCOPES.has(check.requiredScope) ? ` · Required scope: ${check.requiredScope}` : ''
+  const scope = KNOWN_ALBI_SCOPES.has(check.requiredScope) ? ` · Required scope: ${check.requiredScope}` : ''
   const diagnostic = status === 'invalid' && PROTOCOL_ISSUE_LABELS[check.protocolIssue]
     ? ` · Diagnostic: ${PROTOCOL_ISSUE_LABELS[check.protocolIssue]}` : ''
   return {

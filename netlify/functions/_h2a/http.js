@@ -23,7 +23,7 @@ const redact = text => text
   .replace(/'[^']*'|"[^"]*"/g, '[value]')
   .replace(/\d{3,}/g, '[number]')
 // Keeps field names and validator messages; never echoes request input.
-const FIELD_KEYS = ['field', 'fieldName', 'propertyName', 'property']
+const FIELD_KEYS = ['field', 'fieldName', 'propertyName', 'property', 'name']
 const MESSAGE_KEYS = ['message', 'errorMessage', 'error', 'msg', 'description']
 function collectReasons(value, parts, depth = 0) {
   if (parts.length >= 5 || depth > 3 || value == null) return

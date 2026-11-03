@@ -142,7 +142,7 @@ test('an organization mismatch says plainly which organization each side has and
   assert.match(out, /In Albi this contact is under a different organization/)
   assert.match(out, /HubSpot organization:.*Sperry Equities/)
   assert.match(out, /Albi organization:.*Old Org LLC/)
-  assert.match(out, /change it in Albi/)
+  assert.match(out, /the move is sent to Albi/)
   const noneInAlbi = await html({ ...base, reason: 'albi_contact_association_contract_unverified', hubspotOrganizations: [{ sourceId: '99', name: 'Sperry Equities' }] })
   assert.match(noneInAlbi, /Albi organization:.*None/)
 })

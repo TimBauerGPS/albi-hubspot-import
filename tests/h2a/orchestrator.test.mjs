@@ -417,13 +417,13 @@ test('missing name leaves a review conflict and does not create a contact', asyn
 test('activity create scope denial keeps delivery disposition and names the required scope', async () => {
   const deps = exactAssociations(liveFixture(existingAlbi()))
   deps.albi.createActivity = async () => {
-    throw new ApiError('permission', { operation: 'createActivity', status: 403, requiredScope: 'activities:create' })
+    throw new ApiError('permission', { operation: 'createActivity', status: 403, requiredScope: 'Permissions.Activities.Edit' })
   }
   const result = await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
   const failed = deps.items.find(item => item.object_type === 'calls' && item.outcome === 'failed')
   assert.equal(result.status, 'partially_failed')
   assert.equal(failed.sanitized_details.reason, 'failed')
-  assert.equal(failed.sanitized_details.requiredScope, 'activities:create')
+  assert.equal(failed.sanitized_details.requiredScope, 'Permissions.Activities.Edit')
   assert.equal(deps.cursors.length, 0)
 })
 
@@ -1655,4 +1655,33 @@ test('a targeted release drains the other pending releases under its lease, putt
   assert.equal(result.status, 'completed')
   assert.deepEqual(finished, [['resume-2', true], ['resume-3', true], ['resume-4', false]])
   assert.deepEqual(pending, ['resume-4'])
+})
+
+test('live sync fills a linked Albi contact’s blank phone and address from HubSpot, never overwriting, once per run', async () => {
+  const deps = exactAssociations(throwingCreates(liveFixture({ ...existingAlbi(),
+    activities: [{ id: '50', occurredAt: '2026-10-02T12:00:00Z', objectType: 'calls', properties: { hs_timestamp: '2026-10-02T12:00:00Z' } },
+      { id: '51', occurredAt: '2026-10-02T13:00:00Z', objectType: 'calls', properties: { hs_timestamp: '2026-10-02T13:00:00Z' } }] })))
+  deps.mappings.organizations.push({ portal_id: '123', hubspot_id: '20', albi_organization_id: '100' })
+  deps.mappings.contacts.push({ portal_id: '123', hubspot_id: '10', albi_contact_id: '200' })
+  deps.hubspot.getContacts = async ids => ids.map(id => ({ id, properties: { firstname: `First${id}`, lastname: `Last${id}`, email: 'other@example.com',
+    phone: '(415) 555-0199', address: '9 Pine St', city: 'Oakland', zip: '94601' } }))
+  const updates = []
+  deps.albi.updateContact = async (id, payload) => { updates.push([id, payload]); return { id } }
+  deps.albi.updateOrganization = async () => { throw Error('organization has no blanks to fill') }
+  const result = await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
+  assert.equal(result.status, 'completed')
+  // Albi's email differs (not blank), so it is left alone; the blanks are filled once though the contact is seen twice.
+  assert.deepEqual(updates, [['200', { phoneNumber: '415-555-0199', address1: '9 Pine St', city: 'Oakland', zipCode: '94601' }]])
+  const linked = deps.items.find(item => item.object_type === 'contacts' && item.outcome === 'linked')
+  assert.deepEqual(linked.sanitized_details.albiFilled, ['phoneNumber', 'address1', 'city', 'zipcode'])
+})
+
+test('a dry run never fills Albi blanks', async () => {
+  const deps = exactAssociations(throwingCreates(liveFixture(existingAlbi())))
+  deps.mappings.contacts.push({ portal_id: '123', hubspot_id: '10', albi_contact_id: '200' })
+  deps.hubspot.getContacts = async ids => ids.map(id => ({ id, properties: { firstname: `First${id}`, lastname: `Last${id}`, email: `${id}@example.com`, phone: '4155550199' } }))
+  deps.albi.updateContact = async () => { throw Error('dry run must not update Albi') }
+  deps.repository.getConfig = async () => ({ state: 'dry_run', portal_id: '123', selected_start_date: '2026-10-01', preflight_status: 'valid' })
+  const result = await runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'manual' })
+  assert.notEqual(result.status, 'failed')
 })

@@ -1,5 +1,6 @@
 import { HUBSPOT_ACTIVITY_TYPES } from './constants.js'
 import { isRecord } from './http.js'
+import { ALBI_SCOPES, KNOWN_ALBI_SCOPES } from '../../../shared/h2aAlbiScopes.js'
 
 export const PREFLIGHT_CAPABILITIES = {
   hubspot: {
@@ -25,22 +26,18 @@ const DIAGNOSTIC_REASONS = new Set([
   'authentication_rejected', 'permission_denied', 'unexpected_response', 'provider_unavailable',
   'verified_on_first_use', 'handled_through_conflicts',
 ])
-const WRAPPER_SCOPES = new Set([
-  'contacts:list', 'contacts:create', 'organizations:list', 'organizations:create', 'activities:list', 'activities:create',
-  'options.relationship-types:list', 'options.referral-sources:list', 'options.relationship-statuses:list', 'options.activity-types:list',
-])
 const PROTOCOL_ISSUES = new Set([
   'envelope_invalid', 'data_invalid', 'pagination_missing', 'pagination_invalid', 'page_mismatch', 'page_size_mismatch',
   'total_invalid', 'total_pages_invalid', 'total_pages_mismatch', 'record_count_mismatch', 'record_invalid',
   'record_id_invalid', 'record_field_invalid',
 ])
 const INFORMATIONAL_CAPABILITIES = Object.freeze({
-  contacts_create: { reason: 'verified_on_first_use', requiredScope: 'contacts:create' },
-  organizations_create: { reason: 'verified_on_first_use', requiredScope: 'organizations:create' },
-  activities_create: { reason: 'verified_on_first_use', requiredScope: 'activities:create' },
-  contacts_update: { reason: 'handled_through_conflicts' },
-  organizations_update: { reason: 'handled_through_conflicts' },
-  contacts_associate_organization: { reason: 'handled_through_conflicts' },
+  contacts_create: { reason: 'verified_on_first_use', requiredScope: ALBI_SCOPES.contactsCreate },
+  organizations_create: { reason: 'verified_on_first_use', requiredScope: ALBI_SCOPES.organizationsCreate },
+  activities_create: { reason: 'verified_on_first_use', requiredScope: ALBI_SCOPES.activitiesEdit },
+  contacts_update: { reason: 'verified_on_first_use', requiredScope: ALBI_SCOPES.contactsEdit },
+  organizations_update: { reason: 'verified_on_first_use', requiredScope: ALBI_SCOPES.organizationsEdit },
+  contacts_associate_organization: { reason: 'verified_on_first_use', requiredScope: ALBI_SCOPES.contactsEdit },
 })
 function diagnosticReason(error, authenticated = false) {
   if (error?.category === 'auth') return authenticated ? 'permission_denied' : 'authentication_rejected'
@@ -77,7 +74,7 @@ export function safePreflightDetails(value, protectedValues = []) {
         .map(check => ({ capability: check.capability, status: check.status, label: PREFLIGHT_CAPABILITIES[provider][check.capability],
           ...(['invalid', 'informational'].includes(check.status) && DIAGNOSTIC_REASONS.has(check.reason) ? { reason: check.reason } : {}),
           ...(check.status === 'invalid' && PROTOCOL_ISSUES.has(check.protocolIssue) ? { protocolIssue: check.protocolIssue } : {}),
-          ...(WRAPPER_SCOPES.has(check.requiredScope) ? { requiredScope: check.requiredScope } : {}) }))
+          ...(KNOWN_ALBI_SCOPES.has(check.requiredScope) ? { requiredScope: check.requiredScope } : {}) }))
     }
     result[provider] = safe
   }
@@ -131,7 +128,7 @@ export async function runPreflight({ hubspot, albi, protectedValues = [] }) {
       else reason ??= 'unexpected_response'
     } catch (error) {
       reason = diagnosticReason(error, provider === 'albi' && details.albi.authenticated)
-      if (WRAPPER_SCOPES.has(error?.requiredScope)) requiredScope = error.requiredScope
+      if (KNOWN_ALBI_SCOPES.has(error?.requiredScope)) requiredScope = error.requiredScope
       if (PROTOCOL_ISSUES.has(error?.protocolIssue)) protocolIssue = error.protocolIssue
     }
     const label = PREFLIGHT_CAPABILITIES[provider][capability]

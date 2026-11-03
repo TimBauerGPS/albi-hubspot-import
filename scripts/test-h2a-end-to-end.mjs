@@ -43,7 +43,7 @@ export function smokeWriteBlockers(env = process.env, capabilities = null) {
   }
   if (capabilities) {
     for (const name of REQUIRED_WRITE_CAPABILITIES) {
-      if (capabilities[name] !== 'verified_on_first_use') blockers.push(`Albi wrapper create contract is unavailable: ${name}`)
+      if (capabilities[name] !== 'verified_on_first_use') blockers.push(`Albi create contract is unavailable: ${name}`)
     }
   }
   return blockers
@@ -735,7 +735,7 @@ async function readAndReport(hubspot, albi, runId, log) {
     albi.listContacts({ pageSize: 1 }), albi.listOrganizations({ pageSize: 1 }), albi.listActivities({ page: 1 }),
   ])
   log(`HubSpot account authenticated (portal ending ${cleanId(account.portalId)}).`)
-  log(`Guardian Albi wrapper authenticated for ${verification.company.name} (company ${verification.company.id}).`)
+  log(`Albi Public API authenticated for ${verification.company.name} (company ${verification.company.id}).`)
   log(`Albi options loaded: contacts=${options.contactTypes.length}, organizations=${options.organizationTypes.length}, activities=${options.activityTypes.length}.`)
   log(`Albi read shapes passed: contacts=${contacts.records.length ? 'sample available' : 'empty'}, organizations=${organizations.records.length ? 'sample available' : 'empty'}, activities=${albiActivities.records.length ? 'sample available' : 'empty'}.`)
 

@@ -12,6 +12,8 @@ import { computeCaptureReadiness } from './createDefaults.js'
 import { computeTriage } from './triage.js'
 import { rankReviewCandidates } from './ranking.js'
 import { followOrganizationMerge } from './organizationMerges.js'
+import { KNOWN_ALBI_SCOPES } from '../../../shared/h2aAlbiScopes.js'
+import { applyAlbiTasks } from './albiUpdates.js'
 
 const text = value => value == null ? '' : String(value).trim()
 const sourceFields = record => record?.properties ?? record ?? {}
@@ -26,11 +28,7 @@ const capturesReview = ctx => ctx?.mode === 'dry_run' && ctx.sampleLimitPerType 
   ctx.reviewCaptureVersion === 1
 const ERROR_CATEGORIES = new Set(['auth', 'permission', 'validation', 'permanent', 'transient', 'rate_limit'])
 const ERROR_CODES = new Set(['pagination_loop', 'malformed_response', 'application_error', 'unsupported_contract', 'timeout', 'network'])
-const WRAPPER_SCOPES = new Set([
-  'contacts:list', 'contacts:create', 'organizations:list', 'organizations:create', 'activities:list', 'activities:create',
-  'options.relationship-types:list', 'options.referral-sources:list', 'options.relationship-statuses:list', 'options.activity-types:list',
-])
-const safeScope = error => WRAPPER_SCOPES.has(error?.requiredScope) ? { requiredScope: error.requiredScope } : {}
+const safeScope = error => KNOWN_ALBI_SCOPES.has(error?.requiredScope) ? { requiredScope: error.requiredScope } : {}
 function safeFailure(error) {
   return { reason: `${ERROR_CATEGORIES.has(error?.category) ? error.category : 'error'}:${ERROR_CODES.has(error?.code) ? error.code : 'operation_failed'}`,
     ...safeScope(error) }
@@ -115,6 +113,21 @@ async function recordOnce(repo, companyId, runId, row) {
   await repo.recordItem(companyId, { ...row, run_id: runId })
 }
 
+// A live sync fills an already-linked Albi record's blank fields from HubSpot (phone, address, email, ...). It never
+// overwrites a value Albi has; a real difference still needs a reviewer. The record's copy in this run's Albi index
+// is filled too, so a record seen again in the same run is not sent twice. Returns details for the item result.
+async function fillAlbiBlanks(deps, ctx, objectType, targetId, evaluation, index) {
+  const updates = evaluation?.reason === 'existing_mapping' ? evaluation.proposedChanges?.updates ?? {} : {}
+  const fields = Object.entries(updates).filter(([, value]) => typeof value === 'string' && value.trim()).map(([field, value]) => ({ field, value }))
+  if (ctx.mode === 'dry_run' || !fields.length || !targetId || typeof deps.albi?.[objectType === 'contacts' ? 'updateContact' : 'updateOrganization'] !== 'function') return {}
+  const albi = objectType === 'contacts' ? { updateContact: deps.albi.updateContact.bind(deps.albi) } : { updateOrganization: deps.albi.updateOrganization.bind(deps.albi) }
+  const { applied, failure } = await applyAlbiTasks(albi, [{ objectType, targetId, fields }])
+  const filled = applied[0]?.fields ?? []
+  const candidate = index.find(item => idOf(item) === targetId)
+  if (candidate) for (const { field, value } of fields) if (filled.includes(field)) candidate[field] = value
+  return { ...(filled.length ? { albiFilled: filled } : {}), ...(failure ? { albiFillError: `${failure.category}${failure.status ? `_${failure.status}` : ''}`.slice(0, 40) } : {}) }
+}
+
 async function conflict(deps, ctx, data) {
   const { companyId, runId, portalId, activity } = ctx
   if (capturesReview(ctx) && ['contacts', 'companies'].includes(data.objectType)) {
@@ -192,9 +205,10 @@ async function resolveOrganization(deps, ctx, source) {
         albi_organization_id: targetId, match_method: 'automatic' })
       mappings.organizations.push(saved)
     }
+    const filled = await fillAlbiBlanks(deps, ctx, 'companies', targetId, evaluation, indexes.organizations)
     await recordOnce(deps.repository, companyId, runId, { portal_id: portalId, object_type: 'companies', source_id: sourceId,
       albi_target_type: 'organization', albi_target_id: targetId,
-      outcome: ctx.mode === 'dry_run' ? 'dry_run' : 'linked', sanitized_details: { reason: evaluation.reason,
+      outcome: ctx.mode === 'dry_run' ? 'dry_run' : 'linked', sanitized_details: { reason: evaluation.reason, ...filled,
         ...(ctx.mode === 'dry_run' ? { proposedAction: 'link_organization' } : {}) } })
     const candidate = indexes.organizations.find(item => idOf(item) === targetId)
     const types = candidate?.organizationTypeIds ?? []
@@ -236,9 +250,10 @@ async function resolveContact(deps, ctx, source, organization, associatedCompany
         albi_contact_id: targetId, match_method: 'automatic' })
       mappings.contacts.push(saved)
     }
+    const filled = await fillAlbiBlanks(deps, ctx, 'contacts', targetId, evaluation, indexes.contacts)
     await recordOnce(deps.repository, companyId, runId, { portal_id: portalId, object_type: 'contacts', source_id: sourceId,
       albi_target_type: 'contact', albi_target_id: targetId,
-      outcome: ctx.mode === 'dry_run' ? 'dry_run' : 'linked', sanitized_details: { reason: evaluation.reason,
+      outcome: ctx.mode === 'dry_run' ? 'dry_run' : 'linked', sanitized_details: { reason: evaluation.reason, ...filled,
         ...(ctx.mode === 'dry_run' ? { proposedAction: 'link_contact' } : {}) } })
     return { id: sourceId, action: 'link', targetId }
   }

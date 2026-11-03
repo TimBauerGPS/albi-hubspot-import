@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { executeReviewResolution, executeOrganizationThenContactCreate } from './reviewResolutionService.js'
+import { executeReviewResolution, executeOrganizationThenContactCreate, sendWaitingAlbiUpdates } from './reviewResolutionService.js'
 import { normalizeResolutionDecision } from './reviewResolution.js'
 import { H2AReviewError } from './reviewService.js'
 import { refreshReviewTriage } from './triage.js'
@@ -31,9 +31,9 @@ const object = value => value !== null && typeof value === 'object' && !Array.is
 const providerId = value => typeof value === 'string' && /^[1-9]\d{0,99}$/.test(value)
 const reasonCode = value => typeof value === 'string' && /^[a-z_]{1,40}$/.test(value) ? value : null
 
-// What a queued action may be: a review resolution decision, "create the organization, then the contact", or
+// What a queued action may be: a review resolution decision, "create the organization, then the contact",
 // "create with the record's default referral source" (its Albi organization's, else its salesperson's; the
-// optional fallback covers a record without one).
+// optional fallback covers a record without one), or "send the Albi edits this record is waiting on as updates".
 export function normalizeOutboxAction(input) {
   if (!object(input)) throw new TypeError('Invalid outbox action')
   if (input.kind === 'resolution' && Object.keys(input).every(key => ['kind', 'decision'].includes(key))) {
@@ -48,6 +48,7 @@ export function normalizeOutboxAction(input) {
     return { kind: 'create_with_organization', referralSourceId,
       ...(input.organizationReviewId ? { organizationReviewId: input.organizationReviewId, organizationExpectedUpdatedAt: input.organizationExpectedUpdatedAt } : {}) }
   }
+  if (input.kind === 'send_albi_updates' && Object.keys(input).length === 1) return { kind: 'send_albi_updates' }
   if (input.kind === 'create_default_referral' && Object.keys(input).every(key => ['kind', 'fallbackReferralSourceId'].includes(key))) {
     if (input.fallbackReferralSourceId === undefined) return { kind: 'create_default_referral' }
     const { referralSourceId } = normalizeResolutionDecision({ action: 'create_albi', referralSourceId: input.fallbackReferralSourceId })
@@ -78,7 +79,8 @@ function classify(details = {}) {
   if (details.category === 'transient') return { outcome: 'retry', errorCode: 'provider_unavailable', retryMs: OUTBOX_SEND_RETRY_MS, detail }
   const errorCode = details.staleCheck === 'candidates' ? 'possible_match' : details.code === 'malformed_response' ? 'reply_unreadable'
     : details.staleCheck ? 'record_changed' : ['permission', 'auth'].includes(details.category) ? 'not_allowed'
-      : details.category === 'validation' ? 'albi_rejected' : reasonCode(details.exception?.reason) ?? 'error'
+      : details.category === 'validation' && Number(details.providerStatus) === 409 ? 'albi_duplicate'
+        : details.category === 'validation' ? 'albi_rejected' : reasonCode(details.exception?.reason) ?? 'error'
   return { outcome: 'failed', errorCode, detail }
 }
 
@@ -126,6 +128,18 @@ export async function runOutboxItem(deps, row) {
       const status = result?.contact?.resolution?.status
       if (SENT.has(status)) return { outcome: 'sent' }
       return status === 'failed' ? classify(await failureOf(deps, companyId, result.contact.resolution)) : { outcome: 'failed', errorCode: 'error', detail: {} }
+    }
+    if (action.kind === 'send_albi_updates') {
+      const result = await (deps.sendAlbiUpdates ?? sendWaitingAlbiUpdates)(deps, { companyId, reviewId: row.review_id, actorId: row.requested_by })
+      if (result?.busy) return { outcome: 'retry', errorCode: 'record_busy', retryMs: OUTBOX_CHECKS_RETRY_MS, detail: {} }
+      // Nothing waiting any more (sent earlier, or rechecked) is done; anything else that is not waiting cannot be sent.
+      if (result?.unchanged) return ['ready_to_recheck', 'completed'].includes(result.resolution?.status) ? { outcome: 'sent' }
+        : { outcome: 'failed', errorCode: 'not_waiting_on_albi', detail: {} }
+      const failure = result?.failure
+      if (!failure) return { outcome: 'sent' }
+      if (failure.category === 'rate_limit') return { outcome: 'busy', errorCode: 'albi_busy', detail: { category: 'rate_limit' } }
+      if (failure.category === 'transient') return { outcome: 'retry', errorCode: 'provider_unavailable', retryMs: OUTBOX_CHECKS_RETRY_MS, detail: { category: 'transient' } }
+      return classify(failure)
     }
     let decision = action.decision
     if (action.kind === 'create_default_referral') {

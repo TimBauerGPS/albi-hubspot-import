@@ -16,6 +16,7 @@ import { processBatched, withRetry } from '../lib/rateLimiter'
 import CSVUploader from '../components/CSVUploader'
 import ImportProgress from '../components/ImportProgress'
 import AppShell from '../components/AppShell'
+import AlbiApiImportCard from '../components/AlbiApiImportCard'
 
 // ── In-memory cache lookup helpers ────────────────────────────────────────────
 // Most rows resolve via Map lookups against data prefetched at the start of each
@@ -1238,6 +1239,11 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
                 </p>
               )}
             </div>
+          )}
+
+          {isAlliedCompany && !isRunning && !isDone && (
+            <AlbiApiImportCard session={session} userConfig={userConfig} setUserConfig={setUserConfig}
+              disabled={configBlocked || cacheStatus === 'empty' && !syncPolling?.done} />
           )}
 
           {/* Uploader — blocked until first sync completes */}

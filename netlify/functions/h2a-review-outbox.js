@@ -33,7 +33,7 @@ export function projectOutboxItem(row) {
   const name = text(snapshot.name) || [text(snapshot.firstName), text(snapshot.lastName)].filter(Boolean).join(' ') || 'Unnamed record'
   const action = object(row?.action) ? row.action : {}
   const kind = action.kind === 'create_with_organization' ? 'create_with_organization' : action.kind === 'create_default_referral' ? 'create_albi'
-    : typeof action.decision?.action === 'string' ? action.decision.action : 'unknown'
+    : action.kind === 'send_albi_updates' ? 'send_albi_updates' : typeof action.decision?.action === 'string' ? action.decision.action : 'unknown'
   return { id: row.id, reviewId: row.review_id, name: name.slice(0, 200),
     objectType: row?.review?.object_type === 'companies' ? 'companies' : 'contacts', action: kind,
     status: ['queued', 'sending', 'failed'].includes(row.status) ? row.status : 'queued',

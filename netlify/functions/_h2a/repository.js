@@ -1133,6 +1133,40 @@ export function createH2ARepository(supabase) {
       return checked(await scoped(supabase, 'h2a_item_results', companyId).eq('run_id', runId)
         .eq('object_type', objectType).eq('source_id', sourceId))
     },
+    // The per-company Albi copy (supabase/h2a-albi-mirror.sql); see albiMirror.js.
+    async getAlbiMirrorState(companyId, objectType) {
+      requireReviewIdentity(companyId)
+      return checked(await supabase.from('h2a_albi_mirror_state').select('full_at, synced_at')
+        .eq('company_id', companyId).eq('object_type', objectType).maybeSingle())
+    },
+    async readAlbiMirror(companyId, objectType) {
+      requireReviewIdentity(companyId)
+      const records = []
+      for (let start = 0; start < 1000000; start += 1000) {
+        const page = checked(await supabase.from('h2a_albi_mirror').select('record').eq('company_id', companyId)
+          .eq('object_type', objectType).order('albi_id', { ascending: true }).range(start, start + 999))
+        if (!Array.isArray(page)) throw new Error('Invalid Albi mirror page')
+        records.push(...page.map(row => row.record))
+        if (page.length < 1000) return records
+      }
+      throw new Error('Albi mirror page limit exceeded')
+    },
+    async upsertAlbiMirror(companyId, objectType, records, seenAt) {
+      requireReviewIdentity(companyId)
+      const rows = records.map(record => ({ company_id: companyId, object_type: objectType, albi_id: String(record.id), record, seen_at: seenAt }))
+      for (let start = 0; start < rows.length; start += 500) {
+        checked(await supabase.from('h2a_albi_mirror').upsert(rows.slice(start, start + 500), { onConflict: 'company_id,object_type,albi_id' }))
+      }
+      checked(await supabase.from('h2a_albi_mirror_state').upsert({ company_id: companyId, object_type: objectType, synced_at: seenAt,
+        updated_at: new Date().toISOString() }, { onConflict: 'company_id,object_type' }))
+    },
+    // A complete walk: every record it saw is kept, every record it did not see (deleted in Albi) is removed.
+    async replaceAlbiMirror(companyId, objectType, records, seenAt) {
+      await this.upsertAlbiMirror(companyId, objectType, records, seenAt)
+      checked(await supabase.from('h2a_albi_mirror').delete().eq('company_id', companyId).eq('object_type', objectType).lt('seen_at', seenAt))
+      checked(await supabase.from('h2a_albi_mirror_state').upsert({ company_id: companyId, object_type: objectType, full_at: seenAt, synced_at: seenAt,
+        updated_at: new Date().toISOString() }, { onConflict: 'company_id,object_type' }))
+    },
     async recordItem(companyId, item) {
       const row = { ...item, company_id: companyId }
       return checked(await supabase.from('h2a_item_results').insert(row).select('*').single())

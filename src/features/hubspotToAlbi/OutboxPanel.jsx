@@ -8,6 +8,7 @@ import { blockedReasonCopy } from '../../../shared/h2aBlockedReasons.js'
 const ACTION_LABELS = {
   create_albi: 'Create in Albi', force_create_albi: 'Create new in Albi', link_existing: 'Link', resolve_fields: 'Apply field choices',
   choose_organization: 'Set organization', skip_live: 'Skip', create_with_organization: 'Create organization and contact',
+  send_albi_updates: 'Send edits to Albi',
 }
 const REASONS = {
   albi_busy: 'Albi was busy (too many requests) and kept refusing. Retry when it is quieter.',
@@ -16,11 +17,14 @@ const REASONS = {
   possible_match: 'A possible match appeared in Albi. Back to review to choose link or create.',
   reply_unreadable: 'Albi’s reply couldn’t be read, so it may have gone through. Retry checks Albi first, so nothing is duplicated.',
   not_allowed: 'This isn’t allowed for the record any more (permissions, or it was already handled).',
+  albi_duplicate: 'Albi already has this record and refused a duplicate. Back to review to recheck and link it.',
   albi_rejected: 'Albi rejected it (a required value is missing or invalid). Back to review to check the record.',
   not_found: 'The record no longer exists.',
   no_default_referral: 'It has no default referral source (none on its organization or salesperson). Back to review to choose one.',
   not_ready: 'Its create checks did not pass. Back to review to see why.',
   provider_unavailable: 'Albi or HubSpot didn’t answer in time, several times. Retry checks Albi first, so nothing is duplicated.',
+  not_waiting_on_albi: 'It is no longer waiting on an Albi edit. Back to review to see where it stands.',
+  record_busy: 'Another action on this record was still running.',
   error: 'Something went wrong sending it. Retry, or send it back to review.',
 }
 const time = value => { const parsed = Date.parse(value ?? ''); return Number.isFinite(parsed) ? new Date(parsed).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '' }

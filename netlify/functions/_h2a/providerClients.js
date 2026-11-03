@@ -1,6 +1,7 @@
 import { decryptSecret, loadCredentialKeyring } from './crypto.js'
 import { HubSpotClient } from './hubspotClient.js'
 import { AlbiClient } from './albiClient.js'
+import { withAlbiMirror } from './albiMirror.js'
 
 const fromRpc = ({ key_version, ...envelope }) => ({ ...envelope, keyVersion: key_version })
 
@@ -10,7 +11,9 @@ export async function createH2AProviderClients({ companyId, repository, keyring,
   const resolvedKeyring = keyring ?? loadCredentialKeyring(env)
   return {
     hubspot: new HubSpotClient({ token: decryptSecret(fromRpc(credentials.hubspot_envelope), resolvedKeyring), fetch }),
-    albi: new AlbiClient({ apiKey: decryptSecret(fromRpc(credentials.albi_envelope), resolvedKeyring), fetch }),
+    // Contact and organization lists come from the company's Albi copy, refreshed with what changed in Albi.
+    albi: withAlbiMirror(new AlbiClient({ apiKey: decryptSecret(fromRpc(credentials.albi_envelope), resolvedKeyring), fetch }),
+      { store: repository, companyId }),
   }
 }
 
@@ -42,6 +45,8 @@ export function reviewResolutionProviderCapabilities(clients) {
       updateCompany: clients.hubspot.updateCompany.bind(clients.hubspot),
       addContactCompanyAssociation: clients.hubspot.addContactCompanyAssociation.bind(clients.hubspot) }),
     albiWrite: Object.freeze({ createContact: clients.albi.createContact.bind(clients.albi),
-      createOrganization: clients.albi.createOrganization.bind(clients.albi) }),
+      createOrganization: clients.albi.createOrganization.bind(clients.albi),
+      updateContact: clients.albi.updateContact.bind(clients.albi),
+      updateOrganization: clients.albi.updateOrganization.bind(clients.albi) }),
   })
 }

@@ -266,6 +266,19 @@ Apps 1 and 3 both query the same `super_admins` table (same Supabase project). A
 
 ---
 
+## HubSpot Importer — Albi Public API
+
+The HubSpot-to-Albi module talks to the **Albi Public API** (reference: https://albi-public.readme.io/docs/getting-started, index: https://albi-public.readme.io/llms.txt). It replaced the Guardian Albi Wrapper (`albi.guardianrestoration.com`) in November 2026.
+
+- Base URL `https://publicapi.albiware.com`, paths under `/api/v1/...`. Auth: `Authorization: Bearer <key>`. Keys are issued per company by support@albiware.com (`albi_...`) and saved encrypted per company in H2A Settings, never in env vars.
+- All provider code lives in `netlify/functions/_h2a/albiClient.js`. It keeps the app-facing interface (numbered page cursors, `zipcode` / `referralSourceID` / `relationshipStatusID` field names) and translates to Albi's (continuation tokens, `zipCode` / `referralSourceId` / `relationshipStatusId`). Change the translation there, not in callers.
+- The company is discovered from the key (every row names its `companyId`); Allied is `1319`. Lists are narrowed with `?companyId=` and creates send `companyId`.
+- Ids are strings. `PUT` is a partial update. Creates return the full record; a repeated contact/organization create is a `409`. Limits: 150/min, 5,000/hour, 10 in flight; `429` carries `Retry-After`.
+- Scope names (`Permissions.<Domain>.<Action>`) live in `shared/h2aAlbiScopes.js`; only those are shown to users.
+- Albi edits from HubSpot go through `netlify/functions/_h2a/albiUpdates.js`: review resolutions send HubSpot-wins fields as Albi updates (what Albi cannot take stays a manual task), Albi to-do's "Send to Albi" queues `send_albi_updates` Outbox actions, and the live sync only fills blank fields on linked records, never overwriting.
+- Contact/organization lists are served from the per-company Albi copy (`_h2a/albiMirror.js`, `supabase/h2a-albi-mirror.sql`), refreshed with `changedSince` and fully rebuilt daily. Keep new list reads going through `listContacts` / `listOrganizations` so they use it.
+- The deal import can read Albi projects (`albi-project-import.js`, `_albiProjectSource.js`) instead of the Google Sheet; it builds sheet-shaped records so the existing parser and import run unchanged.
+
 ## HubSpot Importer — Albi Writes Go Through the Outbox
 
 In the HubSpot-to-Albi review workspace, **every action that creates records in Albi is queued in the review Outbox** (`h2a_review_outbox`, `netlify/functions/h2a-review-outbox.js`, worker in `netlify/functions/_h2a/outbox.js`). This includes single creates, create organization and contact, and bulk creates (Create selected). The page never waits on Albi: the records move to the Outbox tab at once and the background worker sends them at a steady pace, backing off when Albi is busy.

@@ -52,6 +52,8 @@ function failureNote(action, details = {}) {
   const what = ['create_albi', 'force_create_albi'].includes(action) ? 'create' : action === 'link_existing' ? 'link' : 'change'
   const nothing = what === 'create' ? ' Nothing was created.' : what === 'link' ? ' Nothing was linked.' : ''
   const detail = details?.category === 'rate_limit' ? `Albi was busy (too many requests at once).${nothing} Try again.`
+    : what === 'create' && details?.category === 'validation' && Number(details?.providerStatus) === 409
+      ? 'Albi says this record already exists, so it refused a duplicate. Recheck to find it in Albi, then link it.'
     : details?.staleCheck === 'candidates' ? `A possible match appeared in Albi since this record was checked.${nothing} Review the matches, then link or create.`
       : details?.code === 'malformed_response' ? 'Albi’s reply couldn’t be read, so it may have gone through. Trying again checks Albi first, so nothing is duplicated.'
         : details?.staleCheck ? `This record changed since it was checked.${nothing} Recheck it, then try again.`
@@ -253,7 +255,7 @@ export default function ReviewRecord({
           <ul className="space-y-1 text-amber-900">{task.fields.map(field => <li key={field.field} className="flex flex-wrap items-center gap-2">
             <span>{field.label}: {display(field.value)}</span><CopyButton value={field.value} /></li>)}</ul>
           <div className="mt-2 flex flex-wrap gap-3 text-sm"><Link url={task.url}>Open {task.objectType === 'contacts' ? 'contact' : 'organization'} in Albi</Link><Link url={task.organizationUrl}>Open organization in Albi</Link></div></div>)}
-        <p className="mt-2 text-xs text-amber-900">Opening Albi does not complete this task. Make the change there, then recheck this record. Also listed in Albi to-do (t).</p></div>}
+        <p className="mt-2 text-xs text-amber-900">Opening Albi does not complete this task. Send it from Albi to-do (t), or make the change in Albi, then recheck this record.</p></div>}
 
       <CandidateList candidates={candidates} selectedIndex={candidateIndex} suggestedId={suggested?.id ?? null} onPick={onPickCandidate} objectLabel={objectLabel} />
       <FieldDiff rows={rows} hasCandidate={Boolean(selected)} candidateId={selected?.id ?? ''} showMatching={showMatching}

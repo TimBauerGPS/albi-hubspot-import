@@ -354,6 +354,12 @@ export function queueH2AOutboxCreates(session, companyId, { items = [], useRecor
   return request(session, 'h2a-review-outbox', { method: 'POST', companyId: resolutionCompany(companyId), body: { op: 'enqueue', items: clean }, signal })
 }
 
+// "Send to Albi": queues the Albi edits up to 50 records are waiting on, sent as Albi updates by the outbox worker.
+export function queueH2AOutboxAlbiUpdates(session, companyId, items = [], { signal } = {}) {
+  const clean = (Array.isArray(items) ? items : []).map(item => ({ ...pick(item, ['reviewId', 'expectedUpdatedAt', 'clientRequestId']), action: { kind: 'send_albi_updates' } }))
+  return request(session, 'h2a-review-outbox', { method: 'POST', companyId: resolutionCompany(companyId), body: { op: 'enqueue', items: clean }, signal })
+}
+
 export function getH2AOutbox(session, companyId, kind = 'live', { signal } = {}) {
   return request(session, 'h2a-review-outbox', { companyId, query: { kind: kind === 'sample' ? 'sample' : 'live' }, signal })
 }

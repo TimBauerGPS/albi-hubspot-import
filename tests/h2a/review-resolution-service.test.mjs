@@ -550,8 +550,9 @@ test('real provider client reads retain address2 and contact jobTitle evidence',
     return new Response(JSON.stringify({ status: 'COMPLETE', results: [{ id: '42', properties: { address2: 'Suite 1', jobtitle: 'Manager' } }] }))
   } })
   const albi = new AlbiClient({ apiKey: 'key', fetch: async url => new Response(JSON.stringify(
-    new URL(url).pathname.endsWith('/companies') ? { data: [{ companyId: '1319', name: 'Allied' }] }
-      : { data: [{ id: 20, jobTitle: 'Manager', address2: 'Suite 1' }] })) })
+    new URL(url).pathname.endsWith('/relationship-statuses') ? { data: [{ id: '29', name: 'Active', companyId: '1319' }] }
+      : new URL(url).pathname.startsWith('/api/v1/company/') ? { data: { id: '1319', name: 'Allied' } }
+        : { data: [{ id: '20', jobTitle: 'Manager', address2: 'Suite 1' }], continuationToken: null })) })
   assert.equal((await hubspot.getContacts(['42']))[0].properties.address2, 'Suite 1')
   assert.equal((await albi.listContacts({ cursor: '1', pageSize: 100 })).records[0].jobTitle, 'Manager')
 })
@@ -1343,4 +1344,12 @@ test('a contact with only a first name, matching nothing in Albi, is created (no
   const result = await executeReviewResolution(f.deps, createInput)
   assert.equal(result.resolution.status, 'ready_to_recheck', JSON.stringify(f.events.filter(e => e.eventType === 'failed').map(e => e.details)))
   assert.equal(mutations(f)[0][1].lastName, '.')
+})
+
+test('a create Albi refuses as already existing (409) links the exact record Albi now shows instead of failing', async () => {
+  const f = fixture(), createInput = asCreate(f)
+  f.writeError = new ApiError('validation', { operation: 'createContact', status: 409 })
+  const result = await executeReviewResolution(f.deps, createInput)
+  assert.equal(result.resolution.status, 'ready_to_recheck')
+  assert.equal(f.mappings.contacts[0].albi_contact_id, '30')
 })

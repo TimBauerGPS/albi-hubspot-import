@@ -345,6 +345,28 @@ function projectedDecision(value, action) {
   try { return normalizeResolutionDecision(cleaned) } catch { return null }
 }
 
+// Albi updates H2A sent: the record and the field names, never values.
+function safeAlbiUpdates(value) {
+  return value.slice(0, 10).flatMap(item => {
+    const update = record(item)
+    if (!['contacts', 'companies'].includes(update.objectType) || !providerId(update.targetId)) return []
+    const allowed = update.objectType === 'contacts' ? [...CONTACT_FIELDS, 'organizationId'] : ORGANIZATION_FIELDS
+    const fields = (Array.isArray(update.fields) ? update.fields : []).filter(field => allowed.includes(field)).slice(0, 20)
+    return fields.length ? [{ objectType: update.objectType, targetId: update.targetId, fields }] : []
+  })
+}
+// Why an Albi update was not made: category, code, status, the sanitized reason and any missing scope.
+function safeAlbiUpdateError(value) {
+  const input = record(value)
+  const word = key => typeof input[key] === 'string' && /^[a-z_]{1,40}$/.test(input[key]) ? input[key] : null
+  const error = Object.fromEntries([['category', word('category')], ['code', word('code')],
+    ['status', Number.isInteger(input.status) && input.status >= 100 && input.status <= 599 ? input.status : null],
+    ['providerReason', typeof input.providerReason === 'string' ? input.providerReason.slice(0, 200) : null],
+    ['requiredScope', typeof input.requiredScope === 'string' && /^Permissions\.\w{1,40}\.\w{1,40}$/.test(input.requiredScope) ? input.requiredScope : null]]
+    .filter(([, item]) => item !== null))
+  return error.category ? error : null
+}
+
 function safeManualTasks(value) {
   if (!Array.isArray(value)) return []
   return value.slice(0, 10).flatMap(item => {
@@ -384,6 +406,9 @@ export function safeResolutionEventDetails(value) {
   }
   if (RESOLUTION_OUTCOME_CODES.includes(input.outcome)) details.outcome = input.outcome
   if (Array.isArray(input.manualTasks)) details.manualTasks = safeManualTasks(input.manualTasks)
+  if (Array.isArray(input.albiUpdates)) details.albiUpdates = safeAlbiUpdates(input.albiUpdates)
+  const updateError = safeAlbiUpdateError(input.albiUpdateError)
+  if (updateError) details.albiUpdateError = updateError
   const exception = safeResolutionException(input.exception)
   if (exception) details.exception = exception
   return details

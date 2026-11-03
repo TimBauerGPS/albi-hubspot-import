@@ -349,7 +349,7 @@ export default function SettingsPage() {
       )}
 
       <ol className="space-y-4">
-        <SetupCard number="01" title="Secure credentials" complete={credentialsReady} completeLabel="Saved" savedOnly description="Store one HubSpot private-app token and one company-scoped Guardian Albi API key. Only server-generated masks return to this page.">
+        <SetupCard number="01" title="Secure credentials" complete={credentialsReady} completeLabel="Saved" savedOnly description="Store one HubSpot private-app token and one company-scoped Albi Public API key. Only server-generated masks return to this page.">
           <CredentialFields
             hubspotTokenMask={settings.hubspotTokenMask}
             albiApiKeyMask={settings.albiApiKeyMask}

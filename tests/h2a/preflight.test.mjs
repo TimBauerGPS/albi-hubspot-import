@@ -9,10 +9,9 @@ import { ApiError } from '../../netlify/functions/_h2a/http.js'
 const types = ['meetings', 'calls', 'emails', 'communications', 'notes']
 const groups = ['contactTypes', 'organizationTypes', 'relationshipTypes', 'referralSources', 'relationshipStatuses', 'activityTypes']
 const writes = ['contacts_create', 'organizations_create', 'contacts_update', 'organizations_update', 'contacts_associate_organization', 'activities_create']
-const unsupportedWrites = ['contacts_update', 'organizations_update', 'contacts_associate_organization']
-const createScopes = { contacts_create: 'contacts:create', organizations_create: 'organizations:create', activities_create: 'activities:create' }
-const capabilityStates = Object.fromEntries(writes.map(key => [key,
-  unsupportedWrites.includes(key) ? 'handled_through_conflicts' : 'verified_on_first_use']))
+const createScopes = { contacts_create: 'Permissions.Contacts.Create', organizations_create: 'Permissions.Organizations.Create', activities_create: 'Permissions.Activities.Edit',
+  contacts_update: 'Permissions.Contacts.Edit', organizations_update: 'Permissions.Organizations.Edit', contacts_associate_organization: 'Permissions.Contacts.Edit' }
+const capabilityStates = Object.fromEntries(writes.map(key => [key, 'verified_on_first_use']))
 const options = Object.fromEntries(groups.map(group => [group, [{ id: '1', label: 'Example' }]]))
 function clients({ missing, unavailableGroup, onRead = () => {} } = {}) {
   const calls = []
@@ -42,16 +41,12 @@ test('preflight allows activation when required reads pass and writes are inform
   assert.equal(result.details.hubspot.writes, 'verified_when_first_used')
   assert.deepEqual(result.details.albi.company, { id: '1319', name: 'Allied Restoration Services Inc' })
   assert.equal(result.details.albi.checks.find(check => check.capability === 'company_access').status, 'valid')
-  for (const capability of ['contacts_create', 'organizations_create', 'activities_create']) {
+  // Creates and updates are both proven on first use: checking them during setup would change real records.
+  for (const capability of writes) {
     const check = result.details.albi.checks.find(item => item.capability === capability)
     assert.equal(check.status, 'informational')
     assert.equal(check.reason, 'verified_on_first_use')
     assert.equal(check.requiredScope, createScopes[capability])
-  }
-  for (const capability of unsupportedWrites) {
-    const check = result.details.albi.checks.find(item => item.capability === capability)
-    assert.equal(check.status, 'informational')
-    assert.equal(check.reason, 'handled_through_conflicts')
   }
   assert.ok(!result.details.missing.includes('Albi contact updates'))
 
@@ -81,7 +76,7 @@ test('Albi failures retain only safe actionable diagnostic reasons', async () =>
   c.albi.listOrganizations = async () => { throw new ApiError('permission', { operation: 'listOrganizations', status: 403 }) }
   c.albi.listActivities = async () => { throw new ApiError('transient', { operation: 'listActivities', status: 503 }) }
   c.albi.listOptions = async () => { throw new ApiError('permission', { operation: 'listActivityTypes', status: 403,
-    requiredScope: 'options.activity-types:list', message: 'private-token raw provider failure' }) }
+    requiredScope: 'Permissions.Contacts.View', message: 'private-token raw provider failure' }) }
 
   const result = await runPreflight(c)
   assert.equal(result.status, 'invalid')
@@ -90,9 +85,9 @@ test('Albi failures retain only safe actionable diagnostic reasons', async () =>
   assert.equal(byCapability.organizations_read.reason, 'permission_denied')
   assert.equal(byCapability.activities_read.reason, 'provider_unavailable')
   assert.equal(byCapability.options_read.reason, 'permission_denied')
-  assert.equal(byCapability.options_read.requiredScope, 'options.activity-types:list')
+  assert.equal(byCapability.options_read.requiredScope, 'Permissions.Contacts.View')
   assert.equal(byCapability.contacts_create.reason, 'verified_on_first_use')
-  assert.equal(byCapability.contacts_update.reason, 'handled_through_conflicts')
+  assert.equal(byCapability.contacts_update.reason, 'verified_on_first_use')
   assert.equal(JSON.stringify(result).includes('listContacts'), false)
   assert.equal(JSON.stringify(result).includes('503'), false)
   assert.equal(JSON.stringify(result).includes('private-token'), false)

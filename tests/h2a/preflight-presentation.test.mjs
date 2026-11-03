@@ -12,14 +12,14 @@ test('preflight presentation distinguishes verified, informational, and blocking
   assert.deepEqual(presentPreflightCheck({ status: 'valid' }), {
     detail: 'available', markerClass: 'bg-green-500', textClass: 'text-gray-700',
   })
-  assert.deepEqual(presentPreflightCheck({ status: 'informational', reason: 'verified_on_first_use', requiredScope: 'contacts:create' }), {
-    detail: 'Verified when first used · Required scope: contacts:create', markerClass: 'bg-blue-400', textClass: 'text-gray-700',
+  assert.deepEqual(presentPreflightCheck({ status: 'informational', reason: 'verified_on_first_use', requiredScope: 'Permissions.Contacts.Create' }), {
+    detail: 'Verified when first used · Required scope: Permissions.Contacts.Create', markerClass: 'bg-blue-400', textClass: 'text-gray-700',
   })
   assert.deepEqual(presentPreflightCheck({ status: 'informational', reason: 'handled_through_conflicts' }), {
     detail: 'Handled through Conflicts', markerClass: 'bg-blue-400', textClass: 'text-gray-700',
   })
-  assert.deepEqual(presentPreflightCheck({ status: 'invalid', reason: 'permission_denied', requiredScope: 'options.activity-types:list' }), {
-    detail: 'Permission denied · Required scope: options.activity-types:list', markerClass: 'bg-amber-500', textClass: 'text-gray-700',
+  assert.deepEqual(presentPreflightCheck({ status: 'invalid', reason: 'permission_denied', requiredScope: 'Permissions.Contacts.View' }), {
+    detail: 'Permission denied · Required scope: Permissions.Contacts.View', markerClass: 'bg-amber-500', textClass: 'text-gray-700',
   })
   assert.deepEqual(presentPreflightCheck({ status: 'invalid', reason: 'unexpected_response', protocolIssue: 'page_size_mismatch' }), {
     detail: 'Unexpected response · Diagnostic: pagination page size mismatch', markerClass: 'bg-amber-500', textClass: 'text-gray-700',

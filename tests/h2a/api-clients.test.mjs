@@ -9,7 +9,8 @@ import { createHttpClient } from '../../netlify/functions/_h2a/http.js'
 const hs = JSON.parse(readFileSync(new URL('./fixtures/hubspot/responses.json', import.meta.url)))
 const al = JSON.parse(readFileSync(new URL('./fixtures/albi/responses.json', import.meta.url)))
 const contractMetadata = JSON.parse(readFileSync(new URL('./fixtures/metadata.json', import.meta.url)))
-const accessibleCompany = { data: [{ companyId: '1319', name: 'Allied Restoration Services Inc' }] }
+// Company discovery: the key's own rows name its company, then the company is read for its display name.
+const discovery = [al.relationshipStatuses, al.company]
 const start = '2026-10-01T07:00:00.000Z'
 const end = '2026-10-02T07:00:00.000Z'
 function transport(responses) {
@@ -26,7 +27,7 @@ function transport(responses) {
   return { fetch, calls }
 }
 
-test('contract metadata covers every adapter method and records unsupported Albi contracts', () => {
+test('contract metadata covers every adapter method, including Albi updates', () => {
   assert.deepEqual(Object.keys(contractMetadata.hubspot.methods).sort(), [
     'addContactCompanyAssociation', 'estimateActivities', 'getAccountInfo', 'getActivity', 'getAssociations', 'getCompanies', 'getCompany', 'getContact', 'getContacts', 'listActivities', 'listOwners', 'updateCompany', 'updateContact',
   ])
@@ -35,7 +36,7 @@ test('contract metadata covers every adapter method and records unsupported Albi
     'listOrganizations', 'updateContact', 'updateOrganization', 'verifyCredentials',
   ])
   for (const method of ['updateContact', 'updateOrganization', 'associateContact']) {
-    assert.equal(contractMetadata.albi.methods[method].supported, false)
+    assert.equal(contractMetadata.albi.methods[method].method, 'PUT')
   }
 })
 
@@ -252,9 +253,9 @@ test('malformed records, invalid input and repeating pagination fail closed', as
   await assert.rejects(c.getContacts(['../steal']), { category: 'validation' })
 })
 
-test('Albi wrapper discovers exactly one company and scopes every read to it', async () => {
-  const f = transport([accessibleCompany, al.contacts, al.organizations, al.relationshipTypes, al.referralSources, al.relationshipStatuses, al.activityTypes])
-  const c = new AlbiClient({ apiKey: 'private-key', fetch: f.fetch })
+test('Albi client discovers exactly one company from its key and scopes every read to it', async () => {
+  const f = transport([...discovery, al.contacts, al.organizations, al.relationshipTypes, al.referralSources, al.relationshipStatuses, al.activityTypes])
+  const c = new AlbiClient({ apiKey: 'albi_private-key', fetch: f.fetch })
   assert.deepEqual(await c.verifyCredentials(), {
     authenticated: true,
     company: { id: '1319', name: 'Allied Restoration Services Inc' },
@@ -262,42 +263,66 @@ test('Albi wrapper discovers exactly one company and scopes every read to it', a
       contacts_create: 'verified_on_first_use',
       organizations_create: 'verified_on_first_use',
       activities_create: 'verified_on_first_use',
-      contacts_update: 'handled_through_conflicts',
-      organizations_update: 'handled_through_conflicts',
-      contacts_associate_organization: 'handled_through_conflicts',
+      contacts_update: 'verified_on_first_use',
+      organizations_update: 'verified_on_first_use',
+      contacts_associate_organization: 'verified_on_first_use',
     },
   })
-  const contacts = await c.listContacts({ cursor: '2', pageSize: 1 })
+  const contacts = await c.listContacts({ pageSize: 1 })
   assert.equal(contacts.records[0].id, '101')
-  assert.equal(contacts.cursor, '3')
-  assert.equal(f.calls[0].url.pathname, '/v1/companies')
-  assert.equal(f.calls[0].headers['X-API-Key'], 'private-key')
-  assert.equal(f.calls[0].headers.ApiKey, undefined)
-  assert.equal(f.calls[1].url.searchParams.get('page'), '2')
+  assert.equal(contacts.cursor, '2')
+  assert.equal(f.calls[0].url.origin, 'https://publicapi.albiware.com')
+  assert.equal(f.calls[0].url.pathname, '/api/v1/relationship-statuses')
+  assert.equal(f.calls[1].url.pathname, '/api/v1/company/1319')
+  assert.equal(f.calls[0].headers.Authorization, 'Bearer albi_private-key')
+  assert.equal(f.calls[0].headers['X-API-Key'], undefined)
+  assert.equal(f.calls[2].url.pathname, '/api/v1/contacts')
+  assert.equal(f.calls[2].url.searchParams.get('limit'), '1')
+  assert.equal(f.calls[2].url.searchParams.get('continuationToken'), null)
   assert.equal((await c.listOrganizations({ pageSize: 25 })).cursor, null)
   const options = await c.listOptions()
   assert.deepEqual(options.contactTypes, [{ id: '11616', label: 'Customer' }, { id: '11611', label: 'Referrer' }])
   assert.deepEqual(options.organizationTypes, options.relationshipTypes)
   assert.equal(options.activityTypes[2].label, 'Text Message')
-  assert.ok(f.calls.slice(1).every(call => call.url.pathname.startsWith('/v1/companies/1319/')))
-  assert.equal(f.calls.filter(call => call.url.pathname === '/v1/companies').length, 1)
+  assert.ok(f.calls.slice(2).every(call => call.url.searchParams.get('companyId') === '1319'))
+  assert.equal(f.calls.filter(call => call.url.pathname === '/api/v1/company/1319').length, 1)
 })
 
-test('Albi wrapper fails closed for zero, multiple, or malformed authorized companies', async () => {
+test('Albi continuation tokens back numbered cursors, and an out-of-order page is reached from page 1', async () => {
+  const page = (id, token) => ({ data: [{ ...al.contacts.data[0], id }], continuationToken: token, status: 1 })
+  const f = transport([...discovery, page('1', 'tok-2'), page('2', 'tok-3'), page('3', null)])
+  const c = new AlbiClient({ apiKey: 'k', fetch: f.fetch })
+  assert.deepEqual((await c.listContacts({ pageSize: 1 })).cursor, '2')
+  assert.deepEqual((await c.listContacts({ cursor: '2', pageSize: 1 })).cursor, '3')
+  const last = await c.listContacts({ cursor: '3', pageSize: 1 })
+  assert.deepEqual([last.records[0].id, last.cursor], ['3', null])
+  assert.deepEqual(f.calls.slice(2, 5).map(call => call.url.searchParams.get('continuationToken')), [null, 'tok-2', 'tok-3'])
+  // A fresh client asked for page 3 walks the tokens from the start.
+  const g = transport([...discovery, page('1', 'tok-2'), page('2', 'tok-3'), page('3', null)])
+  const walked = await new AlbiClient({ apiKey: 'k', fetch: g.fetch }).listContacts({ cursor: '3', pageSize: 1 })
+  assert.deepEqual([walked.records[0].id, walked.cursor], ['3', null])
+  assert.equal(g.calls.length, 5)
+})
+
+test('Albi client fails closed for zero, multiple, or malformed companies on its key', async () => {
   const invalid = [
     { data: [] },
-    { data: [{ companyId: '1319', name: 'Allied' }, { companyId: '1351', name: 'Sandbox' }] },
+    { data: [{ id: '1', name: 'Active', companyId: '1319' }, { id: '2', name: 'Active', companyId: '1351' }] },
     { data: 'not-an-array' },
-    { data: [{ companyId: '', name: 'Allied' }] },
-    { data: [{ companyId: '../1319', name: 'Allied' }] },
-    { data: [{ companyId: '1319', name: `${'a'.repeat(201)}` }] },
-    { data: [{ companyId: '1319', name: 'Allied\u0000' }] },
+    { data: [{ id: '1', name: 'Active', companyId: '' }] },
+    { data: [{ id: '1', name: 'Active', companyId: '../1319' }] },
   ]
   for (const response of invalid) {
     const f = transport([response])
     const client = new AlbiClient({ apiKey: 'private-key', fetch: f.fetch })
     await assert.rejects(client.listContacts(), { category: 'permanent', code: 'company_access_invalid' })
     assert.equal(f.calls.length, 1)
+  }
+  // The name is display-only: a key without Company.View, or an unusable name, falls back to the id.
+  for (const reply of [{ statusCode: 403, body: { message: 'Credential is missing required scope(s): Permissions.Company.View.', status: 11 } },
+    { data: { id: '1319', name: `${'a'.repeat(201)}` } }, { data: { id: '1319', name: 'Allied\u0000' } }]) {
+    const f = transport([al.relationshipStatuses, reply])
+    assert.deepEqual((await new AlbiClient({ apiKey: 'k', fetch: f.fetch }).verifyCredentials()).company, { id: '1319', name: 'Albi company 1319' })
   }
 })
 
@@ -312,74 +337,60 @@ test('Albi wrapper reports authentication rejection from company discovery', asy
   assert.equal(f.calls.length, 1)
 })
 
-test('Albi creates validate payloads, preserve source fields, and normalize success IDs', async () => {
-  const f = transport([accessibleCompany, al.createContact, al.createOrganization, al.createActivity, al.activities])
+test('Albi creates validate payloads, send string ids with the company, and normalize success IDs', async () => {
+  const f = transport([...discovery, al.createContact, al.createOrganization, al.createActivity, al.activities])
   const c = new AlbiClient({ apiKey: 'key', fetch: f.fetch })
   await assert.rejects(c.createContact({ firstName: 'Test', contactTypeIds: [11616] }), { category: 'validation', operation: 'createContact' })
   await assert.rejects(c.createOrganization({ name: 'Example' }), { category: 'validation', operation: 'createOrganization' })
   await assert.rejects(c.createActivity({ typeId: 6711, date: start }), { category: 'validation', operation: 'createActivity' })
+  await assert.rejects(c.createActivity({ contactId: 101, organizationId: 201, typeId: 6711, date: start, notes: 'x' }), { category: 'validation', operation: 'createActivity' })
   assert.deepEqual(await c.createContact({ firstName: 'Test', lastName: 'Contact', contactTypeIds: [11616] }), { id: '102' })
+  assert.deepEqual(f.calls[2].body, { companyId: '1319', firstName: 'Test', lastName: 'Contact', contactTypeIds: ['11616'] })
   assert.deepEqual(await c.createOrganization({ name: 'Example', organizationTypeIds: [11616] }), { id: '202' })
-  assert.deepEqual(await c.createActivity({ contactId: 101, typeId: 6711, date: start, notes: 'Test', source: 'hubspot', sourceId: 102 }), { id: '402' })
-  assert.equal(f.calls[3].body.sourceId, 102)
-  assert.equal(f.calls[3].body.source, 'hubspot')
-  assert.equal(f.calls[3].url.pathname, '/v1/companies/1319/activities')
-  const activities = await c.listActivities({ contactId: '101', startDate: '2024-06-01', endDate: '2024-06-06', page: 2 })
-  assert.equal(activities.records[0].sourceId, '102')
+  assert.deepEqual(await c.createActivity({ contactId: 101, typeId: 6711, date: start, notes: 'Test', source: 'hubspot', sourceId: 102, relationshipName: 'Test Contact' }), { id: '402' })
+  assert.deepEqual(f.calls[4].body, { companyId: '1319', contactId: '101', activityTypeId: '6711', date: start, notes: 'Test', source: 'hubspot' })
+  assert.equal(f.calls[4].url.pathname, '/api/v1/activities')
+  const activities = await c.listActivities({ contactId: '101', startDate: '2024-06-01', endDate: '2024-06-06' })
+  assert.equal(activities.records[0].source, 'hubspot')
+  assert.equal(activities.records[0].type, 'Text Message')
   assert.equal(activities.cursor, null)
-  assert.equal(f.calls[4].url.searchParams.get('page'), '2')
-  assert.deepEqual(f.calls.slice(1, 4).map(call => call.method), ['POST', 'POST', 'POST'])
+  assert.equal(f.calls[5].url.searchParams.get('dateAfter'), '2024-06-01')
+  assert.equal(f.calls[5].url.searchParams.get('dateBefore'), '2024-06-06')
+  assert.deepEqual(f.calls.slice(2, 5).map(call => call.method), ['POST', 'POST', 'POST'])
 })
 
-test('Albi wrapper validates empty and malformed list pagination envelopes', async () => {
-  const empty = transport([accessibleCompany, {
-    data: [], pagination: { page: 1, pageSize: 25, totalPages: 1, total: 0 },
-  }])
-  assert.deepEqual(await new AlbiClient({ apiKey: 'key', fetch: empty.fetch }).listContacts(), {
-    records: [], cursor: null,
-  })
-
-  for (const response of [
-    { data: [], pagination: null },
-    { data: [], pagination: { page: 2, pageSize: 25, totalPages: 2, total: 26 } },
-    { data: [], pagination: { page: 1, pageSize: 100, totalPages: 1, total: 0 } },
-    { data: [], pagination: { page: 1, pageSize: 25, totalPages: 2, total: 0 } },
-  ]) {
-    const malformed = transport([accessibleCompany, response])
-    await assert.rejects(new AlbiClient({ apiKey: 'key', fetch: malformed.fetch }).listContacts(), {
-      code: 'malformed_response',
-    })
+test('Albi client validates empty and malformed list envelopes', async () => {
+  const empty = transport([...discovery, { data: [], continuationToken: null, status: 1 }])
+  assert.deepEqual(await new AlbiClient({ apiKey: 'key', fetch: empty.fetch }).listContacts(), { records: [], cursor: null })
+  for (const response of [{ data: null }, { data: [], continuationToken: 42 }, { records: [] }]) {
+    const malformed = transport([...discovery, response])
+    await assert.rejects(new AlbiClient({ apiKey: 'key', fetch: malformed.fetch }).listContacts(), { code: 'malformed_response' })
   }
 })
 
-test('Albi wrapper uses bounded short-page pagination when the documented list omits pagination metadata', async () => {
-  const full = transport([accessibleCompany, { data: [al.contacts.data[0]] }])
-  assert.deepEqual(await new AlbiClient({ apiKey: 'key', fetch: full.fetch }).listContacts({ cursor: '2', pageSize: 1 }), {
+test('Albi records are mapped onto the domain field names the sync compares', async () => {
+  const full = transport([...discovery, { data: [al.contacts.data[0]], continuationToken: 'next' }])
+  assert.deepEqual(await new AlbiClient({ apiKey: 'key', fetch: full.fetch }).listContacts({ pageSize: 1 }), {
     records: [{ id: '101', firstName: 'Test', lastName: 'Contact', email: 'contact@example.invalid', phoneNumber: '555-555-0100',
-      mobileNumber: null, organizationId: '201', contactTypeIds: ['11616'], referralSourceID: '8287', relationshipStatusID: '522' }],
-    cursor: '3',
+      jobTitle: null, organizationId: '201', organizationName: 'Example Organization', parentOrganizationId: null, contactTypeIds: ['11616'],
+      address1: '1 Main St', address2: null, city: 'Seattle', state: 'WA', zipcode: '98101', country: null,
+      referralSourceID: '8287', relationshipStatusID: '522' }],
+    cursor: '2',
   })
-
-  const last = transport([accessibleCompany, { data: [] }])
-  assert.deepEqual(await new AlbiClient({ apiKey: 'key', fetch: last.fetch }).listContacts({ pageSize: 1 }), {
-    records: [], cursor: null,
-  })
-
-  const oversized = transport([accessibleCompany, { data: [al.contacts.data[0], al.contacts.data[0]] }])
+  const oversized = transport([...discovery, { data: [al.contacts.data[0], al.contacts.data[0]] }])
   await assert.rejects(new AlbiClient({ apiKey: 'key', fetch: oversized.fetch }).listContacts({ pageSize: 1 }), {
     code: 'malformed_response', protocolIssue: 'record_count_mismatch',
   })
 })
 
-test('Albi wrapper identifies the failed response invariant without retaining provider data', async () => {
+test('Albi client identifies the failed response invariant without retaining provider data', async () => {
   const cases = [
-    [{ data: [], pagination: null }, 'pagination_missing'],
-    [{ data: [], pagination: { page: 2, pageSize: 25, totalPages: 2, total: 26 } }, 'page_mismatch'],
-    [{ data: [], pagination: { page: 1, pageSize: 100, totalPages: 1, total: 0 } }, 'page_size_mismatch'],
-    [{ data: [{}], pagination: { page: 1, pageSize: 25, totalPages: 1, total: 1 } }, 'record_id_invalid'],
+    [{ data: 'x' }, 'data_invalid'],
+    [{ data: [], continuationToken: 7 }, 'pagination_invalid'],
+    [{ data: [{}] }, 'record_id_invalid'],
   ]
   for (const [response, protocolIssue] of cases) {
-    const malformed = transport([accessibleCompany, response])
+    const malformed = transport([...discovery, response])
     await assert.rejects(new AlbiClient({ apiKey: 'key', fetch: malformed.fetch }).listContacts(), error => {
       assert.equal(error.code, 'malformed_response')
       assert.equal(error.protocolIssue, protocolIssue)
@@ -392,31 +403,47 @@ test('Albi wrapper identifies the failed response invariant without retaining pr
 
 test('Albi never retries ambiguous create responses; application errors and malformed IDs fail', async () => {
   for (const response of [{ statusCode: 503 }, { status: 2, data: 0, message: 'private-key' }, { status: 1 }]) {
-    const f = transport([accessibleCompany, response])
+    const f = transport([...discovery, response])
     await assert.rejects(new AlbiClient({ apiKey: 'private-key', fetch: f.fetch }).createContact({ firstName: 'Test', lastName: 'Contact', contactTypeIds: [1] }))
-    assert.equal(f.calls.length, 2)
+    assert.equal(f.calls.length, 3)
     assert.equal(f.calls.filter(call => call.method === 'POST').length, 1)
   }
 })
 
-test('Albi wrapper attaches only the known required scope to permission failures', async () => {
-  const f = transport([accessibleCompany, { statusCode: 403, body: { detail: 'private-key raw provider text' } }])
+test('Albi client attaches only the known required scope to permission failures', async () => {
+  const f = transport([...discovery, { statusCode: 403, body: { detail: 'private-key raw provider text' } }])
   const client = new AlbiClient({ apiKey: 'private-key', fetch: f.fetch })
   await assert.rejects(
     client.createContact({ firstName: 'A', lastName: 'B', contactTypeIds: [1] }),
-    error => error.category === 'permission' && error.requiredScope === 'contacts:create' &&
+    error => error.category === 'permission' && error.requiredScope === 'Permissions.Contacts.Create' &&
       !JSON.stringify(error).includes('private-key'),
   )
-  assert.equal(f.calls.length, 2)
+  assert.equal(f.calls.length, 3)
 })
 
-test('Albi unverified update/association contracts fail without network calls', async () => {
-  const f = transport([])
-  const c = new AlbiClient({ apiKey: 'key', fetch: f.fetch })
-  for (const promise of [c.updateContact('101', {}), c.updateOrganization('201', {}), c.associateContact({ contactId: '101', organizationId: '201' })]) {
-    await assert.rejects(promise, { category: 'permanent', code: 'unsupported_contract' })
+test('Albi updates send a partial PUT with only the given fields, retry a refusal, and refuse blanks before fetch', async () => {
+  const updated = { status: 1, data: { ...al.contacts.data[0], phoneNumber: '555-111-2222', zipCode: '98102' } }
+  const f = transport([{ statusCode: 429, headers: { 'Retry-After': '1' }, body: { status: 12 } }, updated,
+    { status: 1, data: { ...al.organizations.data[0], city: 'Tacoma' } }, { status: 1, data: { ...al.contacts.data[0], organizationId: '202' } }])
+  const c = new AlbiClient({ apiKey: 'k', fetch: f.fetch, sleep: async () => {} })
+  const contact = await c.updateContact('101', { phoneNumber: '555-111-2222', zipCode: ' 98102 ' })
+  assert.deepEqual([contact.id, contact.phoneNumber, contact.zipcode], ['101', '555-111-2222', '98102'])
+  assert.deepEqual(f.calls.map(call => call.method), ['PUT', 'PUT'])
+  assert.equal(f.calls[1].url.pathname, '/api/v1/contacts/101')
+  assert.deepEqual(f.calls[1].body, { phoneNumber: '555-111-2222', zipCode: '98102' })
+  assert.equal((await c.updateOrganization('201', { city: 'Tacoma' })).city, 'Tacoma')
+  assert.equal(f.calls[2].url.pathname, '/api/v1/organizations/201')
+  await c.associateContact({ contactId: '101', organizationId: 202 })
+  assert.deepEqual(f.calls[3].body, { organizationId: '202' })
+  const none = transport([]), d = new AlbiClient({ apiKey: 'k', fetch: none.fetch })
+  for (const work of [() => d.updateContact('101', {}), () => d.updateContact('101', { phoneNumber: '' }), () => d.updateContact('101', { mobileNumber: '5551112222' }),
+    () => d.updateContact('101', { relationshipStatusId: '2' }), () => d.updateOrganization('201', { domain: 'example.com' }), () => d.updateContact('x', { city: 'A' })]) {
+    await assert.rejects(work, { category: 'validation' })
   }
-  assert.equal(f.calls.length, 0)
+  assert.equal(none.calls.length, 0)
+  const denied = transport([{ statusCode: 403, body: { message: 'Credential is missing required scope(s): Permissions.Contacts.Edit.', status: 11 } }])
+  await assert.rejects(new AlbiClient({ apiKey: 'k', fetch: denied.fetch }).updateContact('101', { city: 'A' }),
+    { category: 'permission', requiredScope: 'Permissions.Contacts.Edit' })
 })
 
 test('Albi payload and list validation rejects undocumented fields, unsafe IDs, and invalid dates before fetch', async () => {
@@ -427,7 +454,8 @@ test('Albi payload and list validation rejects undocumented fields, unsafe IDs, 
     () => c.listContacts({ cursor: '0' }),
     () => c.listContacts({ arbitraryQuery: 'secret' }),
     () => c.listActivities({ startDate: '2026-99-99' }),
-    () => c.createActivity({ contactId: 1, typeId: 2, date: start, notes: 'Example', sourceId: 9007199254740992 }),
+    () => c.createActivity({ contactId: 1, typeId: 2, date: start, notes: 'Example', htmlNotes: 5 }),
+    () => c.createContact({ firstName: 'A', lastName: 'B', contactTypeIds: [1], organizationName: 'Wrapper-only field' }),
   ]) await assert.rejects(work, { category: 'validation' })
   assert.equal(f.calls.length, 0)
 })
@@ -458,7 +486,7 @@ test('validation reason capture is opt-in so other providers never retain bodies
 })
 
 test('Albi create failures add a value-free request and response shape', async () => {
-  const f = transport([accessibleCompany, { statusCode: 400, body: { detail: 'Invalid request.', trace: 'secret-trace' } }])
+  const f = transport([...discovery, { statusCode: 400, body: { detail: 'Invalid request.', trace: 'secret-trace' } }])
   const albi = new AlbiClient({ apiKey: 'k', fetch: f.fetch })
   const error = await albi.createContact({ firstName: 'Jo', lastName: 'Ro', contactTypeIds: [12], phoneNumber: '555-111-2222' }).catch(e => e)
   assert.equal(error.providerReason, 'Invalid request.')
@@ -479,21 +507,21 @@ test('Albi validationErrors are reduced to field names and redacted messages', a
 })
 
 test('Albi create options load types, statuses and salespeople by name', async () => {
-  const f = transport([accessibleCompany,
+  const f = transport([...discovery,
     [{ id: 12, name: 'Referrer' }], [{ id: 2, name: 'Active' }],
     [{ id: 70, name: 'Ali Brown' }, { id: 71, firstName: 'Sam', lastName: 'Green' }, { id: 72, name: '' }, { id: 73, firstName: 'Solo' }]])
   const options = await new AlbiClient({ apiKey: 'k', fetch: f.fetch }).listCreateOptions()
   // An unnamed salesperson can never be matched by name, so it is left out instead of failing the whole list.
   assert.deepEqual(options.salespeople, [{ id: '70', label: 'Ali Brown' }, { id: '71', label: 'Sam Green' }, { id: '73', label: 'Solo' }])
   // Entries without a usable id (Albi's create takes an integer salesperson id) are left out; a wrapped list is read.
-  const g = transport([accessibleCompany, [{ id: 12, name: 'Referrer' }], [{ id: 2, name: 'Active' }],
+  const g = transport([...discovery, [{ id: 12, name: 'Referrer' }], [{ id: 2, name: 'Active' }],
     { data: [{ id: null, name: 'Unassigned' }, { id: 0, name: 'Nobody' }, 'x', { id: 'a1b2', name: 'Guid Person' }, { id: 74, name: 'Real Person' }] }])
   assert.deepEqual((await new AlbiClient({ apiKey: 'k', fetch: g.fetch }).listCreateOptions()).salespeople, [{ id: '74', label: 'Real Person' }])
-  const h = transport([accessibleCompany, [{ id: 12, name: 'Referrer' }], [{ id: 2, name: 'Active' }], { unexpected: true }])
+  const h = transport([...discovery, [{ id: 12, name: 'Referrer' }], [{ id: 2, name: 'Active' }], { unexpected: true }])
   await assert.rejects(new AlbiClient({ apiKey: 'k', fetch: h.fetch }).listCreateOptions(), { code: 'malformed_response', protocolIssue: 'salespeople_not_list' })
   assert.deepEqual(options.relationshipTypes, [{ id: '12', label: 'Referrer' }])
   assert.deepEqual(options.relationshipStatuses, [{ id: '2', label: 'Active' }])
-  assert.deepEqual(f.calls.slice(1).map(call => call.url.pathname.split('/').at(-1)), ['relationship-types', 'relationship-statuses', 'salespeople'])
+  assert.deepEqual(f.calls.slice(2).map(call => call.url.pathname.split('/').at(-1)), ['relationship-types', 'relationship-statuses', 'salespeople'])
 })
 
 test('HubSpot owner lookup reads only the owner property and tolerates unowned records', async () => {
@@ -509,19 +537,19 @@ test('an intermittent Albi list failure is retried; persistent ones name the fai
   const flaky = { statusCode: 400, body: { message: 'There was an unexpected error getting contacts according to this search criteria', validationErrors: [] } }
   const ok = { data: [{ id: 5, firstName: 'A', lastName: 'B' }] }
   const delays = []
-  const retried = transport([accessibleCompany, flaky, flaky, ok])
+  const retried = transport([...discovery, flaky, flaky, ok])
   const client = new AlbiClient({ apiKey: 'k', fetch: retried.fetch, sleep: async ms => delays.push(ms), random: () => 0 })
-  assert.deepEqual((await client.listContacts({ cursor: '3', pageSize: 100 })).records.map(record => record.id), ['5'])
-  assert.equal(retried.calls.length, 4)
+  assert.deepEqual((await client.listContacts({ pageSize: 100 })).records.map(record => record.id), ['5'])
+  assert.equal(retried.calls.length, 5)
   assert.equal(delays.length, 2)
-  const failing = transport([accessibleCompany, flaky, flaky, flaky])
+  const failing = transport([...discovery, flaky, flaky, flaky])
   const error = await new AlbiClient({ apiKey: 'k', fetch: failing.fetch, sleep: async () => {}, random: () => 0 })
-    .listContacts({ cursor: '7', pageSize: 100 }).catch(e => e)
+    .listContacts({ pageSize: 100 }).catch(e => e)
   assert.equal(error.status, 400)
-  assert.match(error.providerShape, /^list=contacts;page=7/)
-  const other = transport([accessibleCompany, { statusCode: 400, body: { message: 'Invalid request.' } }])
+  assert.match(error.providerShape, /^list=contacts;page=1/)
+  const other = transport([...discovery, { statusCode: 400, body: { message: 'Invalid request.' } }])
   await new AlbiClient({ apiKey: 'k', fetch: other.fetch, sleep: async () => {} }).listContacts().catch(() => {})
-  assert.equal(other.calls.length, 2)
+  assert.equal(other.calls.length, 3)
 })
 
 test('a HubSpot record merged into another reads as missing instead of malformed', async () => {
@@ -562,22 +590,22 @@ test('a contact’s primary HubSpot company is listed first among its associatio
 
 test('an Albi create reply carrying the new record as an object still yields its id; an unknown shape names its fields', async () => {
   for (const reply of [{ status: 1, data: 402 }, { status: 1, data: { id: 402, notes: 'x' } }, { status: 1, data: { activityId: '402' } }, { status: 1, id: 402 }]) {
-    const f = transport([accessibleCompany, reply])
+    const f = transport([...discovery, reply])
     assert.deepEqual(await new AlbiClient({ apiKey: 'k', fetch: f.fetch }).createActivity({ contactId: 101, typeId: 6711, date: '2026-10-02T12:00:00Z', notes: 'Test' }), { id: '402' })
   }
-  const f = transport([accessibleCompany, { status: 1, data: { created: true, secret: 'value' } }])
+  const f = transport([...discovery, { status: 1, data: { created: true, secret: 'value' } }])
   await assert.rejects(new AlbiClient({ apiKey: 'k', fetch: f.fetch }).createActivity({ contactId: 101, typeId: 6711, date: '2026-10-02T12:00:00Z', notes: 'Test' }),
     error => error.code === 'malformed_response' && error.protocolIssue === 'reply_no_id' && /data=object\(created,secret\)/.test(error.providerShape) && !/value/.test(error.providerShape))
 })
 
-test('one Albi organization is read by id with its referral source; a missing one is null', async () => {
-  for (const reply of [{ status: 1, data: { id: 465682, name: 'Pure Insurance', referralSourceID: 29513 } }, { id: 465682, name: 'Pure Insurance', referralSourceID: 29513 }]) {
-    const f = transport([accessibleCompany, reply])
+test('one Albi organization is read by id (no company lookup) with its referral source; a missing one is null', async () => {
+  for (const reply of [{ status: 1, data: { id: '465682', name: 'Pure Insurance', referralSourceId: '29513' } }, { id: 465682, name: 'Pure Insurance', referralSourceID: 29513 }]) {
+    const f = transport([reply])
     const organization = await new AlbiClient({ apiKey: 'k', fetch: f.fetch }).getOrganization('465682')
     assert.equal(organization.id, '465682'); assert.equal(organization.referralSourceID, '29513')
     assert.match(f.calls.at(-1).url.pathname, /\/organizations\/465682$/)
   }
-  const missing = transport([accessibleCompany, { statusCode: 404, body: { detail: 'Not found' } }])
+  const missing = transport([{ statusCode: 404, body: { detail: 'Not found' } }])
   assert.equal(await new AlbiClient({ apiKey: 'k', fetch: missing.fetch }).getOrganization('1'), null)
 })
 
@@ -601,7 +629,7 @@ test('a write the server refused as too busy (429) is retried after its delay; a
 })
 
 test('an Albi create refused as too busy is retried and succeeds', async () => {
-  const f = transport([accessibleCompany, { statusCode: 429, headers: { 'Retry-After': '1' }, body: {} }, { status: 1, data: 55 }])
+  const f = transport([...discovery, { statusCode: 429, headers: { 'Retry-After': '1' }, body: {} }, { status: 1, data: 55 }])
   const c = new AlbiClient({ apiKey: 'k', fetch: f.fetch, sleep: async () => {} })
   assert.deepEqual(await c.createContact({ firstName: 'Costa', lastName: 'Costa', contactTypeIds: [12] }), { id: '55' })
 })

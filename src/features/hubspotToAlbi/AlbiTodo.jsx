@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { getH2ADryRunReview, getH2ARecheckAll, getH2AReviews, startH2ARecheckAll } from '../../lib/hubspotToAlbi'
+import { getH2ADryRunReview, getH2ARecheckAll, getH2AReviews, queueH2AOutboxAlbiUpdates, startH2ARecheckAll } from '../../lib/hubspotToAlbi'
 import { presentSampleReviewItem } from './sampleReview.js'
 import { btn, primary } from './ResolutionBar.jsx'
 
@@ -8,6 +8,11 @@ const POLL_MS = 3000
 const DETAIL_CONCURRENCY = 4
 const display = value => value === null || value === undefined || value === '' ? 'Blank' : String(value)
 const storageKey = companyId => `h2a.albiTodo.${companyId ?? 'none'}`
+const SEND_CHUNK = 50
+// Albi has no field for a contact's mobile number or an organization's website, and a blank never clears a field:
+// those stay manual edits. Everything else can be sent to Albi as an update.
+const MANUAL_ONLY = { contacts: new Set(['mobileNumber']), companies: new Set(['domain']) }
+const sendable = (objectType, field) => !MANUAL_ONLY[objectType]?.has(field.field) && display(field.value) !== 'Blank'
 
 function readTicks(companyId) {
   try { const parsed = JSON.parse(localStorage.getItem(storageKey(companyId)) ?? '[]'); return new Set(Array.isArray(parsed) ? parsed.filter(value => typeof value === 'string') : []) } catch { return new Set() }
@@ -49,7 +54,8 @@ function groupTasks(loaded) {
       if (!groups.has(key)) groups.set(key, { key, objectType: task.objectType, targetId: task.targetId, url: task.url,
         name: albiName(item, task.targetId) ?? review.displayName, entries: [] })
       groups.get(key).entries.push({ tick: `${resolution.id ?? review.id}:${fingerprint(task)}`, reviewId: review.id, kind,
-        displayName: review.displayName, fields: task.fields })
+        updatedAt: review.updatedAt, displayName: review.displayName, fields: task.fields,
+        canSend: task.fields.some(field => sendable(task.objectType, field)) })
     }
   }
   return [...groups.values()]
@@ -65,6 +71,8 @@ export default function AlbiTodo({ session, companyId, tenantKey, readOnly = fal
   const [reload, setReload] = useState(0)
   const [recheck, setRecheck] = useState(null)
   const [poll, setPoll] = useState(0)
+  const [sending, setSending] = useState(false)
+  const [notice, setNotice] = useState('')
 
   useEffect(() => {
     const controller = new AbortController()
@@ -99,7 +107,7 @@ export default function AlbiTodo({ session, companyId, tenantKey, readOnly = fal
     return () => controller.abort()
   }, [session, companyId, tenantKey, reload])
 
-  useEffect(() => { setRecheck(null) }, [tenantKey])
+  useEffect(() => { setRecheck(null); setNotice('') }, [tenantKey])
 
   // After "Recheck done", poll each started batch and reload the list once all of them have finished.
   useEffect(() => {
@@ -141,19 +149,46 @@ export default function AlbiTodo({ session, companyId, tenantKey, readOnly = fal
       if (tenantRef.current === startedFor) setError(cause.message)
     }
   }
+  // Queues the records' Albi edits in the Outbox, which sends them as Albi updates; they leave this list at once.
+  async function sendToAlbi(entries) {
+    const reviews = [...new Map(entries.filter(entry => entry.canSend && entry.updatedAt).map(entry => [entry.reviewId, entry])).values()]
+    if (readOnly || sending || !reviews.length) return
+    const startedFor = tenantKey
+    setSending(true); setError(''); setNotice('')
+    try {
+      for (let index = 0; index < reviews.length; index += SEND_CHUNK) {
+        await queueH2AOutboxAlbiUpdates(session, companyId, reviews.slice(index, index + SEND_CHUNK)
+          .map(entry => ({ reviewId: entry.reviewId, expectedUpdatedAt: entry.updatedAt, clientRequestId: crypto.randomUUID() })))
+      }
+      if (tenantRef.current !== startedFor) return
+      setNotice(`Sending ${reviews.length} ${reviews.length === 1 ? 'record’s edits' : 'records’ edits'} to Albi. Follow them in the Outbox.`)
+      setReload(value => value + 1)
+    } catch (cause) {
+      if (tenantRef.current === startedFor) setError(cause.message)
+    } finally {
+      if (tenantRef.current === startedFor) setSending(false)
+    }
+  }
+  const sendableEntries = groups.flatMap(group => group.entries).filter(entry => entry.canSend)
+  const sendableCount = new Set(sendableEntries.map(entry => entry.reviewId)).size
   function copy(value) { try { navigator.clipboard?.writeText(String(value ?? '')) } catch { /* clipboard unavailable */ } }
 
   return <section className="rounded-xl border border-gray-200 bg-white" aria-labelledby="albi-todo-title">
     <header className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-200 px-5 py-3">
       <div className="min-w-0">
         <h3 id="albi-todo-title" className="text-lg font-semibold text-gray-900">Albi to-do</h3>
-        <p className="text-xs leading-5 text-gray-600">Albi’s API can’t edit existing records. Make these edits in Albi, tick them, then recheck once. A tick is a reminder; the recheck verifies.</p>
+        <p className="text-xs leading-5 text-gray-600">Send these edits to Albi, or make them there yourself, tick them, and recheck once. A mobile number or website has no Albi field and stays a manual edit. A tick is a reminder; the recheck verifies.</p>
       </div>
-      <button type="button" className={primary} disabled={readOnly || !tickedReviews.length || Boolean(recheck) || loading} onClick={recheckDone}>
-        {recheck ? 'Rechecking…' : `Recheck done (${tickedReviews.length})`}</button>
+      <div className="flex flex-wrap gap-2">
+        <button type="button" className={primary} disabled={readOnly || !sendableCount || sending || loading} onClick={() => sendToAlbi(sendableEntries)}>
+          {sending ? 'Sending…' : `Send all to Albi (${sendableCount})`}</button>
+        <button type="button" className={btn} disabled={readOnly || !tickedReviews.length || Boolean(recheck) || loading} onClick={recheckDone}>
+          {recheck ? 'Rechecking…' : `Recheck done (${tickedReviews.length})`}</button>
+      </div>
     </header>
     <div aria-live="polite" className="text-sm">
       {recheck && <p className="border-b border-brand-200 bg-brand-50 px-5 py-2 text-brand-800" role="status">{`Rechecking ${recheck.count} ${recheck.count === 1 ? 'record' : 'records'} with one Albi read. This list refreshes when it finishes.`}</p>}
+      {notice && <p className="border-b border-green-200 bg-green-50 px-5 py-2 text-green-800" role="status">{notice}</p>}
       {error && <p className="border-b border-red-200 bg-red-50 px-5 py-2 text-red-800" role="alert">{error}</p>}
     </div>
     {loading ? <p className="px-5 py-8 text-sm text-gray-600" role="status">Loading the Albi to-do…</p>
@@ -168,9 +203,14 @@ export default function AlbiTodo({ session, companyId, tenantKey, readOnly = fal
             <input type="checkbox" className="mt-1 text-brand-600 focus:ring-brand-500" checked={ticks.has(entry.tick)} aria-label={`Done in Albi: ${entry.displayName}`}
               onChange={event => toggle(entry.tick, event.target.checked)} />
             <div className="min-w-0 flex-1">
-              <p className="text-xs text-gray-500">From {entry.kind === 'live' ? 'Conflicts' : 'Sample review'}: {entry.displayName}</p>
+              <p className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
+                <span>From {entry.kind === 'live' ? 'Conflicts' : 'Sample review'}: {entry.displayName}</span>
+                {entry.canSend && <button type="button" className={`${btn} px-1.5 py-0.5 text-xs`} disabled={readOnly || sending}
+                  onClick={() => sendToAlbi([entry])}>Send to Albi</button>}
+              </p>
               <ul className="mt-1 space-y-1">{entry.fields.map(field => <li key={field.field} className="flex flex-wrap items-center gap-2 text-sm">
                 <span className="text-gray-600">Set {field.label} to</span><span className="break-all font-medium text-gray-900">{display(field.value)}</span>
+                {!sendable(group.objectType, field) && <span className="text-xs text-amber-800">Edit in Albi</span>}
                 <button type="button" className={`${btn} px-1.5 py-0.5 text-xs`} onClick={() => copy(field.value)}>Copy</button></li>)}</ul>
             </div>
           </li>)}</ul>
