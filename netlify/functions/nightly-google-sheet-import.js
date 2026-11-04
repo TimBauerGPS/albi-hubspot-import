@@ -45,7 +45,7 @@ async function markStaleGoogleSheetImports(supabase) {
   const { data: staleRows, error } = await supabase
     .from('hs_imports')
     .select('id, user_id, filename, imported_at, error_count')
-    .or('filename.like.Google Sheet:%,filename.like.Albi API:%')
+    .or('filename.like.Google Sheet:%,filename.like.Mother Brain:%')
     .eq('status', 'processing')
     .lt('imported_at', cutoff)
     .order('imported_at', { ascending: true })
@@ -92,8 +92,8 @@ export default async () => {
   const [{ data: accessRows, error: accessError }, { data: memberRows, error: memberError }, { data: configRows, error: configError }] = await Promise.all([
     supabase.from('user_app_access').select('user_id').eq('app_name', APP_NAME),
     supabase.from('company_members').select('user_id, companies(name)'),
-    // import_source (supabase/hs-albi-project-import.sql) picks the Albi Projects API over the Google Sheet; '*' keeps
-    // this working before that column exists.
+    // import_source 'albi_api' (supabase/hs-albi-project-import.sql) picks the Mother Brain import over the Google Sheet;
+    // '*' keeps this working before that column exists.
     supabase.from('hs_user_config').select('*'),
   ])
 
@@ -110,19 +110,19 @@ export default async () => {
   )
 
   const eligible = (configRows || []).filter(row => row.user_id && appUsers.has(row.user_id) && alliedUsers.has(row.user_id))
-  const apiUserIds = new Set(eligible.filter(row => row.import_source === 'albi_api').map(row => row.user_id))
-  const sheetUserIds = new Set(eligible.filter(row => !apiUserIds.has(row.user_id) && row.google_sheet_url).map(row => row.user_id))
+  const motherBrainUserIds = new Set(eligible.filter(row => row.import_source === 'albi_api').map(row => row.user_id))
+  const sheetUserIds = new Set(eligible.filter(row => !motherBrainUserIds.has(row.user_id) && row.google_sheet_url).map(row => row.user_id))
 
   const results = await Promise.allSettled([
     ...[...sheetUserIds].map(userId => dispatchBackground('google-sheet-import-background', { userId, skipIfRecent: true })),
-    ...[...apiUserIds].map(userId => dispatchBackground('albi-project-import-background', { userId, skipIfRecent: true })),
+    ...[...motherBrainUserIds].map(userId => dispatchBackground('mother-brain-import-background', { userId, skipIfRecent: true })),
   ])
 
   const queued = results.filter(r => r.status === 'fulfilled').length
   const failed = results.length - queued
 
   return new Response(
-    `${staleRows.length ? `Marked ${staleRows.length} stale Google Sheet import(s) as error. ` : ''}Queued ${queued} nightly import(s) (${sheetUserIds.size} Google Sheet, ${apiUserIds.size} Albi API); ${failed} failed.`,
+    `${staleRows.length ? `Marked ${staleRows.length} stale Google Sheet import(s) as error. ` : ''}Queued ${queued} nightly import(s) (${sheetUserIds.size} Google Sheet, ${motherBrainUserIds.size} Mother Brain); ${failed} failed.`,
     { status: 200 }
   )
 }

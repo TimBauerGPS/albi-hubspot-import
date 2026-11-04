@@ -25,7 +25,6 @@ const SCOPES = Object.freeze({
   listActivityTypes: ALBI_SCOPES.contactsView,
   listSalespeople: ALBI_SCOPES.usersView,
   discoverCompany: ALBI_SCOPES.contactsView,
-  listProjects: ALBI_SCOPES.projectsView, getProject: ALBI_SCOPES.projectsView, getProjectFinancials: ALBI_SCOPES.projectsFinancial,
 })
 const text = value => typeof value === 'string' && Boolean(value.trim())
 // Option lists rarely change; the connection check clears them.
@@ -413,28 +412,6 @@ export class AlbiClient {
     stringId(validated.activityTypeId, 'createActivity')
     if (Boolean(validated.contactId) === Boolean(validated.organizationId) || !validDate(validated.date.slice(0, 10)) || !Number.isFinite(Date.parse(validated.date))) invalid('createActivity')
     return this.#create('activities', validated, 'createActivity')
-  }
-  // Projects (jobs), for the Albi-to-HubSpot deal import. Pages carry Albi's own project shape (nested references).
-  async listProjects(args = {}) {
-    const { cursor = '1', pageSize = 100, ...filters } = listArgs(args, 'listProjects')
-    if (!/^\d+$/.test(String(cursor)) || Number(cursor) < 1 || !Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) invalid('listProjects')
-    const page = await this.#page('projects', 'listProjects', filters, pageSize, Number(cursor))
-    return { records: page.records.filter(record => isRecord(record) && /^[1-9][0-9]*$/.test(String(record.id ?? ''))), cursor: page.cursor }
-  }
-  // One project with its people (customer, referrer, salesperson, project manager), or null when Albi has none.
-  async getProject(projectId) { return this.#getOne(`projects/${encodeURIComponent(id(projectId, 'getProject'))}`, 'getProject') }
-  // The project's money totals (estimated revenue, accrual revenue, invoiced, paid, expenses).
-  async getProjectFinancials(projectId) {
-    return this.#getOne(`projects/${encodeURIComponent(id(projectId, 'getProjectFinancials'))}/financials`, 'getProjectFinancials')
-  }
-  async #getOne(path, operation) {
-    let data
-    try { data = await this.#scopedRequest(`${API_ROOT}/${path}`, { operation }, SCOPES[operation]) } catch (error) {
-      if (error instanceof ApiError && error.status === 404) return null
-      throw error
-    }
-    if (!isRecord(data) || !isRecord(data.data)) malformed(operation, 'record_invalid')
-    return data.data
   }
   // A partial update: only the fields sent change. Setting the same values again is harmless, so a refused or
   // timed-out update may be sent again. Answers the updated record (domain field names).

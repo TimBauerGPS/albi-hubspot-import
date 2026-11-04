@@ -1,5 +1,5 @@
--- Lets a user's nightly Albi-to-HubSpot deal import read Albi's Projects API instead of the Google Sheet.
--- 'google_sheet' (the default) keeps today's behavior. Safe to re-run.
+-- Lets a user's nightly Albi-to-HubSpot deal import skip the Google Sheet. 'google_sheet' (the default) keeps the sheet;
+-- 'albi_api' now reads Mother Brain (the value predates that move and needs no change). Safe to re-run.
 begin;
 
 alter table public.hs_user_config add column if not exists import_source text not null default 'google_sheet';

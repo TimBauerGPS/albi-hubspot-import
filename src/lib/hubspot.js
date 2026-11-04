@@ -116,16 +116,16 @@ export async function syncHubspotData(session) {
   return { background: true }
 }
 
-// The Albi-to-HubSpot deal import read from Albi's Projects API (projects changed since the last run).
-export async function queueAlbiProjectImport(session) {
-  const res = await fetch(`/.netlify/functions/albi-project-import-background`, {
+// The Albi-to-HubSpot deal import read from Mother Brain.
+export async function queueMotherBrainImport(session) {
+  const res = await fetch(`/.netlify/functions/mother-brain-import-background`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
     body: '{}',
   })
   if (!res.ok && res.status !== 202) {
     const data = await res.json().catch(() => ({}))
-    throw new Error(data.error || `Albi import request failed: ${res.status}`)
+    throw new Error(data.error || `Mother Brain import request failed: ${res.status}`)
   }
   return { background: true }
 }

@@ -16,7 +16,7 @@ import { processBatched, withRetry } from '../lib/rateLimiter'
 import CSVUploader from '../components/CSVUploader'
 import ImportProgress from '../components/ImportProgress'
 import AppShell from '../components/AppShell'
-import AlbiApiImportCard from '../components/AlbiApiImportCard'
+import MotherBrainImportCard from '../components/MotherBrainImportCard'
 
 // ── In-memory cache lookup helpers ────────────────────────────────────────────
 // Most rows resolve via Map lookups against data prefetched at the start of each
@@ -1242,7 +1242,7 @@ export default function Import({ session, isAdmin, companyName, companyId }) {
           )}
 
           {isAlliedCompany && !isRunning && !isDone && (
-            <AlbiApiImportCard session={session} userConfig={userConfig} setUserConfig={setUserConfig}
+            <MotherBrainImportCard session={session} userConfig={userConfig} setUserConfig={setUserConfig}
               disabled={configBlocked || cacheStatus === 'empty' && !syncPolling?.done} />
           )}
 

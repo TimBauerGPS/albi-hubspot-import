@@ -60,8 +60,6 @@ The H2A operations and the scope each needs:
 | `GET /api/v1/company/{companyId}` (display name only) | `Permissions.Company.View` (optional) |
 | `PUT /api/v1/contacts/{id}` | `Permissions.Contacts.Edit` |
 | `PUT /api/v1/organizations/{id}` | `Permissions.Organizations.Edit` |
-| `GET /api/v1/projects`, `/projects/{id}` (deal import) | `Permissions.Projects.ViewAllProjects` |
-| `GET /api/v1/projects/{id}/financials` (deal import) | `Permissions.Projects.ManageFinancial` |
 
 Relationship types supply the contact-type and organization-type choices used in create payloads. Contact creation accepts `organizationId`, so H2A associates a new contact with its resolved organization in that request. Albi requires `referralSourceId` on every contact and organization create. The activity request sends `activityTypeId`, `date`, `notes`, `source: 'hubspot'`, and exactly one of `contactId` or `organizationId`; Albi rejects an activity naming both. Read-after-write marker visibility still must be proven against the tenant.
 

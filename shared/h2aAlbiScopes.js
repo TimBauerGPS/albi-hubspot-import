@@ -11,8 +11,6 @@ export const ALBI_SCOPES = Object.freeze({
   activitiesEdit: 'Permissions.Activities.Edit',
   usersView: 'Permissions.Users.View',
   companyView: 'Permissions.Company.View',
-  projectsView: 'Permissions.Projects.ViewAllProjects',
-  projectsFinancial: 'Permissions.Projects.ManageFinancial',
   // The Guardian wrapper's own scope, for its activity read (albiWrapperClient.js).
   wrapperActivitiesList: 'activities:list',
 })

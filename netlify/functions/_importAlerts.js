@@ -48,12 +48,13 @@ export async function notifyGoogleSheetImportError({
   userId,
   companyName,
   sheetUrl,
+  sourceName = 'Google Sheet',
   message,
   details,
 }) {
   const subject = `HubSpot Importer error${importId ? ` (${importId})` : ''}`
   const summary = [
-    'A Google Sheet import failed.',
+    `A ${sourceName} import failed.`,
     '',
     importId ? `Import ID: ${importId}` : null,
     userId ? `User ID: ${userId}` : null,
@@ -75,7 +76,7 @@ export async function notifyGoogleSheetImportError({
     subject,
     text: summary,
     html: `
-      <h2>Google Sheet import failed</h2>
+      <h2>${sourceName} import failed</h2>
       <p><strong>Error:</strong> ${message}</p>
       <ul>
         ${importId ? `<li><strong>Import ID:</strong> ${importId}</li>` : ''}
