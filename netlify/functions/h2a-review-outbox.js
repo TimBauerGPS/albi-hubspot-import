@@ -98,8 +98,10 @@ async function dispatchWorker(companyId, options) {
 export function outboxWorkerDeps(options, repository, companyId) {
   const makeClients = () => options.makeClients ? options.makeClients(companyId)
     : createH2AProviderClients({ companyId, repository, keyring: options.keyring, env: options.env, fetch: options.fetch })
+  let albiClient = null
   const getResolutionClients = async (_company, config) => {
     const clients = await makeClients()
+    albiClient = clients.albi
     if (!options.makeClients && (await clients.hubspot.getAccountInfo()).portalId !== config.portal_id) throw new ApiError('permission', { code: 'authorization_rejected' })
     return reviewResolutionProviderCapabilities(clients)
   }
@@ -111,6 +113,7 @@ export function outboxWorkerDeps(options, repository, companyId) {
     dispatchResume: options.dispatchResume ?? (intent => defaultDispatchResume(intent, options)),
     dispatchContinuation: () => dispatchWorker(companyId, options),
     getResolutionClients,
+    albiBudget: () => albiClient?.rateBudget?.() ?? null,
     readAlbiList: async kind => {
       const clients = await readClients()
       return listAll(args => kind === 'organizations' ? clients.albiRead.listOrganizations(args) : clients.albiRead.listContacts(args))

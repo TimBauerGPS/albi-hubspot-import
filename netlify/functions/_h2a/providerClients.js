@@ -2,6 +2,7 @@ import { decryptSecret, loadCredentialKeyring } from './crypto.js'
 import { HubSpotClient } from './hubspotClient.js'
 import { AlbiClient } from './albiClient.js'
 import { withAlbiMirror } from './albiMirror.js'
+import { createAlbiCache } from './albiCache.js'
 import { AlbiWrapperClient, withAlbiActivityFallback } from './albiWrapperClient.js'
 
 const fromRpc = ({ key_version, ...envelope }) => ({ ...envelope, keyVersion: key_version })
@@ -16,12 +17,13 @@ export async function createH2AProviderClients({ companyId, repository, keyring,
   const credentials = await repository.getCredentials(companyId)
   if (!credentials?.hubspot_envelope || !credentials?.albi_envelope) throw new Error('H2A credentials are missing')
   const resolvedKeyring = keyring ?? loadCredentialKeyring(env)
+  const albiApiKey = decryptSecret(fromRpc(credentials.albi_envelope), resolvedKeyring)
   return {
     hubspot: new HubSpotClient({ token: decryptSecret(fromRpc(credentials.hubspot_envelope), resolvedKeyring), fetch }),
     // Contact and organization lists come from the company's Albi copy, refreshed with what changed in Albi.
     // Activity reads fall back to the wrapper while the Albi key lacks the scope.
-    albi: withAlbiActivityFallback(withAlbiMirror(new AlbiClient({ apiKey: decryptSecret(fromRpc(credentials.albi_envelope), resolvedKeyring), fetch }),
-      { store: repository, companyId }), wrapperClient(await repository.getAlbiWrapperCredential?.(companyId), resolvedKeyring, fetch)),
+    albi: withAlbiActivityFallback(withAlbiMirror(new AlbiClient({ apiKey: albiApiKey, fetch,
+      cache: createAlbiCache({ store: repository, companyId, apiKey: albiApiKey }) }), { store: repository, companyId }), wrapperClient(await repository.getAlbiWrapperCredential?.(companyId), resolvedKeyring, fetch)),
   }
 }
 

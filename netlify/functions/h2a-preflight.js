@@ -69,6 +69,8 @@ export function createH2AReadHandler(options = {}, { estimate = false } = {}) {
       }
       const protectedValues = [...Object.values(secrets), ...Object.values(wrapperEnvelope ?? {}), ...Object.values(credentials.hubspot_envelope), ...Object.values(credentials.albi_envelope)].filter(value => typeof value === 'string' && value)
       const result = await runPreflight({ ...clients, protectedValues })
+      // The check read Albi directly; saved lookups refill from it on next use.
+      try { await supabase.from('h2a_albi_cache').delete().eq('company_id', companyId) } catch { /* Saved lookups expire by themselves. */ }
       // Both versions are captured before external calls and reloaded immediately before persistence.
       const freshConfig = await loadConfig()
       const freshCredentials = await loadCredentials()

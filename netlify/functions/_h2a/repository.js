@@ -1162,6 +1162,26 @@ export function createH2ARepository(supabase) {
       checked(await supabase.from('h2a_albi_mirror_state').upsert({ company_id: companyId, object_type: objectType, synced_at: seenAt,
         updated_at: new Date().toISOString() }, { onConflict: 'company_id,object_type' }))
     },
+    // Albi's reply to one create or update. The read position (synced_at) is left alone.
+    async upsertAlbiMirrorRecord(companyId, objectType, record, seenAt) {
+      requireReviewIdentity(companyId)
+      checked(await supabase.from('h2a_albi_mirror').upsert({ company_id: companyId, object_type: objectType, albi_id: String(record.id), record, seen_at: seenAt },
+        { onConflict: 'company_id,object_type,albi_id' }))
+    },
+    async deleteAlbiMirrorRecord(companyId, objectType, albiId) {
+      requireReviewIdentity(companyId)
+      checked(await supabase.from('h2a_albi_mirror').delete().eq('company_id', companyId).eq('object_type', objectType).eq('albi_id', albiId))
+    },
+    // Saved Albi lookups (supabase/h2a-albi-cache.sql); see albiCache.js.
+    async getAlbiCacheEntry(companyId, name) {
+      requireReviewIdentity(companyId)
+      return checked(await supabase.from('h2a_albi_cache').select('key_fingerprint, value, expires_at')
+        .eq('company_id', companyId).eq('name', name).maybeSingle())
+    },
+    async putAlbiCacheEntry(companyId, entry) {
+      requireReviewIdentity(companyId)
+      checked(await supabase.from('h2a_albi_cache').upsert({ company_id: companyId, ...entry, updated_at: new Date().toISOString() }, { onConflict: 'company_id,name' }))
+    },
     // A complete walk: every record it saw is kept, every record it did not see (deleted in Albi) is removed.
     async replaceAlbiMirror(companyId, objectType, records, seenAt) {
       await this.upsertAlbiMirror(companyId, objectType, records, seenAt)

@@ -1,5 +1,6 @@
 import { ApiError, createHttpClient, id, invalid, isRecord, malformed, responseId } from './http.js'
 import { ALBI_SCOPES } from '../../../shared/h2aAlbiScopes.js'
+import { albiKeyFingerprint } from './albiCache.js'
 
 // Albi Public API (https://albi-public.readme.io). One key per company; the key itself selects the tenant.
 export const ALBI_BASE_URL = 'https://publicapi.albiware.com'
@@ -27,6 +28,28 @@ const SCOPES = Object.freeze({
   listProjects: ALBI_SCOPES.projectsView, getProject: ALBI_SCOPES.projectsView, getProjectFinancials: ALBI_SCOPES.projectsFinancial,
 })
 const text = value => typeof value === 'string' && Boolean(value.trim())
+// Option lists rarely change; the connection check clears them.
+export const OPTIONS_CACHE_MS = 24 * 60 * 60000
+// Albi's limits are per key and the key is shared with other apps, so its rate headers count everyone. Below this
+// hourly budget requests stop until Albi's reset; near the minute limit they wait a moment. A refused request still
+// costs quota, so waiting beats being told no.
+export const HOURLY_FLOOR = 100
+export const MINUTE_RESERVE = 20
+export const MINUTE_WAIT_MS = 10000
+// One budget per key in this process: the Outbox makes a new client for every action.
+const budgets = new Map()
+function budgetFor(apiKey) {
+  const key = albiKeyFingerprint(apiKey)
+  if (!budgets.has(key)) budgets.set(key, { remainingHour: null, remainingMinute: null, minuteSeenAt: 0, resetHourAt: 0, blockedUntil: 0 })
+  return budgets.get(key)
+}
+const headerNumber = (headers, name) => {
+  const raw = headers?.get?.(name)
+  if (raw === null || raw === undefined || raw === '') return null
+  const value = Number(raw)
+  return Number.isFinite(value) ? value : null
+}
+const validCompany = value => isRecord(value) && typeof value.id === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(value.id) && text(value.name)
 // Albi can take well over 10s to answer a create; giving up early leaves it unknown whether the record was made.
 export const CREATE_TIMEOUT_MS = 20000
 const ADDRESS_FIELDS = ['address1', 'address2', 'city', 'state', 'zipCode', 'country', 'latitude', 'longitude', 'email', 'phoneNumber', 'referralSourceId', 'relationshipStatusId', 'salespersonId', 'parentOrganizationId']
@@ -149,11 +172,59 @@ export class AlbiClient {
   #tokens = new Map()
   #sleep
   #random
-  constructor({ apiKey, ...http } = {}) {
+  #now
+  #cache
+  #budget
+  #observer = null
+  constructor({ apiKey, cache = null, ...http } = {}) {
     if (!text(apiKey)) invalid('credentials')
     this.#sleep = http.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)))
     this.#random = http.random ?? Math.random
-    this.#request = createHttpClient({ ...http, baseUrl: ALBI_BASE_URL, captureValidationReason: true, headers: { Authorization: `Bearer ${apiKey}` } })
+    this.#now = http.now ?? Date.now
+    this.#cache = cache
+    this.#budget = budgetFor(apiKey)
+    const send = createHttpClient({ ...http, baseUrl: ALBI_BASE_URL, captureValidationReason: true, headers: { Authorization: `Bearer ${apiKey}` },
+      onResponse: headers => this.#recordBudget(headers) })
+    this.#request = async (path, options) => {
+      await this.#pace(options?.operation)
+      try { return await send(path, options) } catch (error) {
+        if (error instanceof ApiError && error.category === 'rate_limit' && error.retryAfterMs > 1000) {
+          this.#budget.blockedUntil = Math.max(this.#budget.blockedUntil, this.#now() + error.retryAfterMs)
+        }
+        throw error
+      }
+    }
+  }
+  #recordBudget(headers) {
+    const budget = this.#budget
+    const hour = headerNumber(headers, 'x-ratelimit-remaining-hour'), minute = headerNumber(headers, 'x-ratelimit-remaining')
+    const reset = headerNumber(headers, 'x-ratelimit-reset-hour')
+    if (hour !== null) budget.remainingHour = hour
+    if (reset !== null) budget.resetHourAt = reset * 1000
+    if (minute !== null) { budget.remainingMinute = minute; budget.minuteSeenAt = this.#now() }
+  }
+  async #pace(operation = 'request') {
+    const budget = this.#budget, now = this.#now()
+    const hourSpent = budget.remainingHour !== null && budget.remainingHour <= HOURLY_FLOOR && budget.resetHourAt > now
+    const until = Math.max(budget.blockedUntil, hourSpent ? budget.resetHourAt : 0)
+    if (until > now) throw new ApiError('rate_limit', { operation, code: 'rate_limit', retryAfterMs: until - now })
+    if (budget.remainingMinute !== null && budget.remainingMinute <= MINUTE_RESERVE && now - budget.minuteSeenAt < 60000) {
+      budget.remainingMinute = null
+      await this.#sleep(MINUTE_WAIT_MS)
+    }
+  }
+  // What Albi last reported for this key, across every app using it. Null until a response has been seen.
+  rateBudget() {
+    const { remainingHour, resetHourAt } = this.#budget
+    return remainingHour === null || resetHourAt <= this.#now() ? null : { remainingHour, resetHourAt }
+  }
+  // Told the full record of each contact or organization Albi answers a create or update with.
+  observeWrites(observer) { this.#observer = observer }
+  async #observe(kind, raw, fields, operation) {
+    if (!this.#observer || !isRecord(raw)) return
+    let record
+    try { record = normalizeRecord(raw, fields, operation) } catch { return }
+    await this.#observer(kind, record)
   }
   // The key names its own company: every row Albi returns carries companyId. A key that reaches more than one
   // company is refused, so a create can never land in a company nobody chose.
@@ -175,8 +246,15 @@ export class AlbiClient {
     if (!name || name.length > 200 || /[\u0000-\u001f\u007f]/.test(name)) name = `Albi company ${companyId}`
     return { id: companyId, name }
   }
+  async #loadCompany() {
+    const saved = await this.#cache?.get('company')
+    if (validCompany(saved)) return { id: saved.id, name: saved.name }
+    const company = await this.#discoverCompany()
+    await this.#cache?.set('company', company)
+    return company
+  }
   async #company() {
-    this.#companyPromise ??= this.#discoverCompany()
+    this.#companyPromise ??= this.#loadCompany()
     return this.#companyPromise
   }
   async #scopedRequest(path, options, requiredScope) {
@@ -187,8 +265,13 @@ export class AlbiClient {
     }
   }
   async #lookup(resource, operation) {
+    const name = `options:${resource}`
+    const saved = await this.#cache?.get(name)
+    if (Array.isArray(saved)) return saved
     const company = await this.#company()
-    return lookupData(await this.#scopedRequest(`${API_ROOT}/${resource}?${new URLSearchParams({ companyId: company.id })}`, { operation }, SCOPES[operation]))
+    const rows = lookupData(await this.#scopedRequest(`${API_ROOT}/${resource}?${new URLSearchParams({ companyId: company.id })}`, { operation }, SCOPES[operation]))
+    if (Array.isArray(rows)) await this.#cache?.set(name, rows, OPTIONS_CACHE_MS)
+    return rows
   }
   async verifyCredentials() {
     const company = await this.#company()
@@ -317,6 +400,8 @@ export class AlbiClient {
       const shape = `reply=${names(data)};data=${isRecord(data.data) ? `object(${names(data.data)})` : Array.isArray(data.data) ? 'array' : typeof data.data}`
       throw new ApiError('permanent', { operation, code: 'malformed_response', protocolIssue: 'reply_no_id', providerShape: shape.slice(0, 240) })
     }
+    const fields = { contacts: CONTACT_FIELDS, organizations: ORGANIZATION_FIELDS }[resource]
+    if (fields) await this.#observe(resource, data.data, fields, operation)
     return { id: String(found) }
   }
   async createContact(payload) { return this.#create('contacts', validatePayload(payload, ['firstName', 'lastName', 'contactTypeIds'], 'createContact'), 'createContact') }
@@ -365,7 +450,9 @@ export class AlbiClient {
     }
     if (!isRecord(data)) malformed(operation, 'reply_not_object')
     if (data.status !== 1) throw new ApiError('validation', { operation, code: 'application_error' })
-    return normalizeRecord(isRecord(data.data) ? data.data : { id: target }, fields, operation)
+    const record = normalizeRecord(isRecord(data.data) ? data.data : { id: target }, fields, operation)
+    await this.#observe(resource, data.data, fields, operation)
+    return record
   }
   async updateContact(contactId, payload) { return this.#update('contacts', contactId, validateUpdate(payload, 'updateContact'), 'updateContact', CONTACT_FIELDS) }
   async updateOrganization(organizationId, payload) {

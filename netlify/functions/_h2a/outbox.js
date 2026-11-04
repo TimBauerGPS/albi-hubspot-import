@@ -20,6 +20,13 @@ export const OUTBOX_SEND_RETRY_MS = 5 * 60000 + 30000
 // Queued creates share one read of Albi's lists (grown with each record created) instead of each walking Albi;
 // it is read again once it is this old.
 export const OUTBOX_SNAPSHOT_MS = 5 * 60000
+// The gap between actions widens as Albi reports the key's hourly budget running down, so the other apps sharing it
+// keep working and the worker rarely reaches a refusal. At the client's floor, sends stop and the action waits as busy.
+export function outboxPaceFor(pace, budget) {
+  const left = budget?.remainingHour
+  if (!Number.isFinite(left)) return pace
+  return left < 500 ? pace * 8 : left < 1500 ? pace * 4 : left < 2500 ? pace * 2 : pace
+}
 const LEASE_SECONDS = 300
 const WORKER_SECONDS = 900
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -237,7 +244,7 @@ export async function runReviewOutbox(deps, { companyId }) {
         await moveTriage(deps, companyId, row.review_id, 'failed')
       }
       await repository.claimOutboxWorker(companyId, owner, WORKER_SECONDS)
-      await sleep(pace)
+      await sleep(outboxPaceFor(pace, deps.albiBudget?.()))
     }
   } finally {
     await repository.releaseOutboxWorker(companyId, owner).catch(() => {})

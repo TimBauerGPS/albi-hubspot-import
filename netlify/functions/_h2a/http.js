@@ -68,7 +68,7 @@ const classify = status => status === 429 ? 'rate_limit' : status === 401 ? 'aut
 
 export function createHttpClient({ baseUrl, headers = {}, fetch = globalThis.fetch,
   sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), random = Math.random,
-  maxRetries = 2, maxDelayMs = 5000, timeoutMs = 10000, now = Date.now, captureValidationReason = false } = {}) {
+  maxRetries = 2, maxDelayMs = 5000, timeoutMs = 10000, now = Date.now, captureValidationReason = false, onResponse = null } = {}) {
   const origin = new URL(baseUrl).origin
   const retries = Math.max(0, Math.min(3, Number.isInteger(maxRetries) ? maxRetries : 2))
   const delayCap = Math.max(1, Math.min(10000, maxDelayMs))
@@ -103,6 +103,7 @@ export function createHttpClient({ baseUrl, headers = {}, fetch = globalThis.fet
               } else await response.body?.cancel().catch(() => {})
               throw new ApiError(classify(response.status), { operation, status: response.status, retryAfterMs, providerReason, providerShape })
             }
+            onResponse?.(response.headers)
             if (statusOnly) {
               void response.body?.cancel().catch(() => {})
               return { status: response.status, allow: response.headers.get('allow') ?? '' }

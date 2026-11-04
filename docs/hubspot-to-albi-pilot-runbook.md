@@ -89,7 +89,19 @@ A create Albi refuses as a duplicate (`409`; Albi does not return the existing i
 
 ### The Albi copy (incremental reads)
 
-Contact and organization lists come from a per-company copy (`supabase/h2a-albi-mirror.sql`, `netlify/functions/_h2a/albiMirror.js`). A read first asks Albi for what changed since the last read (`changedSince`, 5 minutes' overlap), usually one request. Albi reports no deletes, so a read more than 24 hours after the last full walk is a full walk that rebuilds the copy and drops deleted records. A create or update makes the next read ask Albi again. Until the SQL is applied (or if the copy cannot be read), every read walks Albi directly as before.
+Contact and organization lists come from a per-company copy (`supabase/h2a-albi-mirror.sql`, `netlify/functions/_h2a/albiMirror.js`). A read first asks Albi for what changed since the last read (`changedSince`, 5 minutes' overlap), usually one request. Albi's reply to a create or update goes straight into the copy, so a write doesn't cost a read; a write whose reply can't be saved makes the next read ask Albi.
+
+Albi reports no deletes, so `h2a-albi-copy-weekly` queues a full walk for live and dry-run companies early Wednesday Pacific (2 AM, with 4 AM as a second try). That's the furthest point from Mother Brain's Saturday 1 AM full refresh, and even hours miss its odd-hour refreshes. A copy rebuilt in the last 6 days is left alone. Between rebuilds a record deleted in Albi can still appear as a candidate for up to a week; an update Albi refuses as not found removes it at once. If the job has been missing for 10 days, the next read does the walk. Until the SQL is applied (or if the copy cannot be read), every read walks Albi directly as before.
+
+### Sharing the Albi key
+
+Albi's limits are per key, and this key is shared with Mother Brain and arOS, so the rate headers count all of them. Mother Brain stops its own work at 1,500 requests left in the hour.
+
+- The company a key belongs to and the option lists are saved between functions (`supabase/h2a-albi-cache.sql`, `netlify/functions/_h2a/albiCache.js`): company for the life of the key, option lists for a day. A new key starts clean, and the connection check reads Albi directly and clears them, so run it after adding a salesperson, referral source or type in Albi if it's needed sooner. Without the SQL these read Albi as before.
+- With 100 or fewer requests left in the hour, the client stops until Albi's reset (actions wait in the Outbox as busy). Within 20 of the minute limit it waits 10 seconds. A refusal with a long `Retry-After` stops later requests on that key in the same process.
+- The Outbox's gap of 1.5 seconds widens to 3, 6 and 12 seconds as fewer than 2,500, 1,500 and 500 requests remain in the hour.
+
+H2A doesn't use the shared request gate in Mother Brain's database, so it sees other apps only through these headers.
 
 ### Albi capabilities H2A does not use yet
 
