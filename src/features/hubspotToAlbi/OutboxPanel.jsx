@@ -4,7 +4,10 @@ import { btn, primary } from './ResolutionBar.jsx'
 import { blockedReasonCopy } from '../../../shared/h2aBlockedReasons.js'
 
 // The Outbox: actions waiting to be sent to Albi by the background worker, the one being sent, and any that
-// failed (with the reason). Failed actions stay here until retried or returned to review.
+// failed (with the reason). Failed actions stay here until retried or returned to review. Send all back returns
+// everything not already being sent, in small requests: each record is re-bucketed after its action is cancelled,
+// and a request cut off partway would leave records out of both the Outbox and review.
+const RETURN_BATCH = 25
 const ACTION_LABELS = {
   create_albi: 'Create in Albi', force_create_albi: 'Create new in Albi', link_existing: 'Link', resolve_fields: 'Apply field choices',
   choose_organization: 'Set organization', skip_live: 'Skip', create_with_organization: 'Create organization and contact',
@@ -41,6 +44,8 @@ function statusText(item) {
 export default function OutboxPanel({ session, companyId, kind = 'live', tenantKey, readOnly = false, pollMs = 4000, onChanged }) {
   const [state, setState] = useState({ items: [], summary: null, error: '' })
   const [busy, setBusy] = useState(false)
+  const [confirming, setConfirming] = useState(false)
+  const [progress, setProgress] = useState('')
   const generation = useRef(0)
   const [reload, setReload] = useState(0)
 
@@ -66,13 +71,26 @@ export default function OutboxPanel({ session, companyId, kind = 'live', tenantK
   async function act(run, ids) {
     if (!ids.length || busy) return
     setBusy(true)
-    try { await run(session, companyId, ids); onChanged?.() } catch (cause) { setState(current => ({ ...current, error: cause?.message || 'The Outbox could not be updated.' })) }
-    finally { setBusy(false); setReload(value => value + 1) }
+    try { await run(session, companyId, ids) } catch (cause) { setState(current => ({ ...current, error: cause?.message || 'The Outbox could not be updated.' })) }
+    finally { setBusy(false); setProgress(''); onChanged?.(); setReload(value => value + 1) }
+  }
+
+  async function returnInBatches(_session, _company, ids) {
+    for (let done = 0; done < ids.length; done += RETURN_BATCH) {
+      setProgress(`Sending back ${done} of ${ids.length}…`)
+      await returnH2AOutbox(session, companyId, ids.slice(done, done + RETURN_BATCH))
+    }
+  }
+
+  function sendAllBack() {
+    setConfirming(false)
+    return act(returnInBatches, returnable.map(item => item.id))
   }
 
   const failed = state.items.filter(item => item.status === 'failed')
   const waiting = state.items.filter(item => item.status === 'queued').length
   const sending = state.items.filter(item => item.status === 'sending').length
+  const returnable = state.items.filter(item => item.status === 'queued' || item.status === 'failed')
 
   return <section className="rounded-xl border border-gray-200 bg-white" aria-label="Outbox">
     <header className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-200 px-5 py-3">
@@ -81,7 +99,17 @@ export default function OutboxPanel({ session, companyId, kind = 'live', tenantK
         <p className="text-sm text-gray-600">Actions are sent to Albi one at a time in the background, slowing down when Albi is busy.
           {state.items.length > 0 && ` ${waiting} waiting · ${sending} sending · ${failed.length} failed`}</p>
       </div>
-      {!readOnly && failed.length > 0 && <button type="button" className={primary} disabled={busy} onClick={() => act(retryH2AOutbox, failed.map(item => item.id))}>Retry all failed</button>}
+      {!readOnly && returnable.length > 0 && (confirming
+        ? <span className="flex flex-wrap items-center gap-2">
+          <span className="text-sm text-gray-700">Send {returnable.length} back to review? They won’t go to Albi.{sending > 0 && ' Anything already sending will finish.'}</span>
+          <button type="button" className={primary} disabled={busy} onClick={sendAllBack}>Yes, send back</button>
+          <button type="button" className={btn} disabled={busy} onClick={() => setConfirming(false)}>Keep them</button>
+        </span>
+        : <span className="flex flex-wrap items-center gap-2">
+          {progress && <span className="text-sm text-gray-600" role="status">{progress}</span>}
+          <button type="button" className={btn} disabled={busy} onClick={() => setConfirming(true)}>Send all back to review</button>
+          {failed.length > 0 && <button type="button" className={primary} disabled={busy} onClick={() => act(retryH2AOutbox, failed.map(item => item.id))}>Retry all failed</button>}
+        </span>)}
     </header>
     {state.error && <p className="mx-5 mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-900" role="alert">{state.error}</p>}
     {state.items.length === 0 && !state.error

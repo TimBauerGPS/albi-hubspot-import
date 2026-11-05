@@ -5,7 +5,7 @@ import { mountComponent } from './workspace-harness.mjs'
 const j = value => JSON.parse(JSON.stringify(value))
 const later = new Date(Date.now() + 60000).toISOString()
 
-async function mountPanel(items, extra = {}) {
+async function mountPanel(items, extra = {}, { failReturnOnCall = 0 } = {}) {
   const calls = []
   let current = items
   const bindings = {
@@ -14,7 +14,9 @@ async function mountPanel(items, extra = {}) {
       failed: current.filter(item => item.status === 'failed').length } } },
     retryH2AOutbox: async (_s, _c, ids) => { calls.push(['retry', ids]); current = current.map(item => ids.includes(item.id) ? { ...item, status: 'queued', errorCode: null } : item); return { retried: ids.length } },
     blockedReasonCopy: () => null,
-    returnH2AOutbox: async (_s, _c, ids) => { calls.push(['return', ids]); current = current.filter(item => !ids.includes(item.id)); return { returned: ids.length } },
+    returnH2AOutbox: async (_s, _c, ids) => { calls.push(['return', ids])
+      if (calls.filter(call => call[0] === 'return').length === failReturnOnCall) throw new Error('Albi review update failed.')
+      current = current.filter(item => !ids.includes(item.id)); return { returned: ids.length } },
   }
   const changed = []
   const ui = await mountComponent('OutboxPanel.jsx', { bindings, props: { session: { access_token: 't' }, companyId: 'c1', kind: 'live',
@@ -48,6 +50,45 @@ test('Retry puts a failed action back in line; Back to review returns the record
   const second = await mountPanel(rows)
   second.ui.find('button', 'Retry all failed').props.onClick(); for (let i = 0; i < 3; i++) await second.ui.flush()
   assert.deepEqual(j(second.calls.find(call => call[0] === 'retry')), ['retry', ['o1', 'o2']])
+})
+
+const settle = async ui => { for (let i = 0; i < 12; i++) await ui.flush() }
+const queuedRows = count => Array.from({ length: count }, (_, index) => ({ id: `q${index}`, reviewId: `r${index}`, name: `Record ${index}`,
+  objectType: 'contacts', action: 'create_albi', status: 'queued', attempts: 0, errorCode: null }))
+
+test('Send all back asks first, then returns waiting and failed actions but not the one being sent', async () => {
+  const { ui, calls, changed } = await mountPanel(rows)
+  ui.find('button', 'Send all back to review').props.onClick(); await settle(ui)
+  assert.match(ui.text(), /Send 3 back to review\?/)
+  assert.match(ui.text(), /Anything already sending will finish/)
+  assert.equal(calls.some(call => call[0] === 'return'), false)
+  ui.find('button', 'Keep them').props.onClick(); await settle(ui)
+  assert.equal(calls.some(call => call[0] === 'return'), false)
+  ui.find('button', 'Send all back to review').props.onClick(); await settle(ui)
+  ui.find('button', 'Yes, send back').props.onClick(); await settle(ui)
+  assert.deepEqual(j(calls.filter(call => call[0] === 'return')), [['return', ['o1', 'o2', 'o3']]])
+  assert.ok(changed.length >= 1)
+  assert.match(ui.text(), /Sam Lee/)
+  assert.doesNotMatch(ui.text(), /Send all back to review/)
+})
+
+test('Send all back goes in small requests, and a failure stops it and says so', async () => {
+  const { ui, calls } = await mountPanel(queuedRows(60))
+  ui.find('button', 'Send all back to review').props.onClick(); await settle(ui)
+  ui.find('button', 'Yes, send back').props.onClick(); await settle(ui)
+  assert.deepEqual(calls.filter(call => call[0] === 'return').map(call => call[1].length), [25, 25, 10])
+
+  const failing = await mountPanel(queuedRows(60), {}, { failReturnOnCall: 2 })
+  failing.ui.find('button', 'Send all back to review').props.onClick(); await settle(failing.ui)
+  failing.ui.find('button', 'Yes, send back').props.onClick(); await settle(failing.ui)
+  assert.deepEqual(failing.calls.filter(call => call[0] === 'return').map(call => call[1].length), [25, 25])
+  assert.ok(failing.changed.length >= 1)
+  assert.match(failing.ui.text(), /Send all back to review/)
+})
+
+test('a read-only outbox offers no bulk actions', async () => {
+  const { ui } = await mountPanel(rows, { readOnly: true })
+  assert.doesNotMatch(ui.text(), /Send all back to review|Retry all failed/)
 })
 
 test('while anything is waiting or sending the outbox keeps itself current; an empty outbox says so', async () => {
