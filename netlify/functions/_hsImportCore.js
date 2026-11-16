@@ -47,6 +47,43 @@ function findCachedCompany(cachedCompanies, name) {
   return cachedCompanies.get(normalizeLookupKey(name)) ?? null
 }
 
+// HubSpot rejects a deal create when an associated record was deleted or merged
+// away: "0-1=123 is not a valid object" (0-1 = contact, 0-2 = company).
+function invalidAssociationIds(err) {
+  const message = String(err?.message || '')
+  if (!message.includes('is not a valid object')) return null
+  const ids = { contacts: new Set(), companies: new Set() }
+  for (const [, type, id] of message.matchAll(/0-([12])=(\d+) is not a valid object/g)) {
+    ids[type === '1' ? 'contacts' : 'companies'].add(id)
+  }
+  return ids.contacts.size || ids.companies.size ? ids : null
+}
+
+async function forgetStaleCachedRecords(supabase, userId, staleIds, contactsByLastName, cachedCompanies) {
+  if (staleIds.contacts.size) {
+    for (const [key, list] of contactsByLastName) {
+      contactsByLastName.set(key, list.filter(c => !staleIds.contacts.has(String(c.hubspot_id))))
+    }
+    const { error } = await supabase
+      .from('hs_cached_contacts')
+      .delete()
+      .eq('user_id', userId)
+      .in('hubspot_id', [...staleIds.contacts])
+    if (error) console.warn('Failed to remove stale cached contacts:', error.message)
+  }
+  if (staleIds.companies.size) {
+    for (const [key, id] of cachedCompanies) {
+      if (staleIds.companies.has(String(id))) cachedCompanies.delete(key)
+    }
+    const { error } = await supabase
+      .from('hs_cached_companies')
+      .delete()
+      .eq('user_id', userId)
+      .in('hubspot_id', [...staleIds.companies])
+    if (error) console.warn('Failed to remove stale cached companies:', error.message)
+  }
+}
+
 function buildCachedDealRow(userId, dealId, properties, row, existingCacheRow = null) {
   return {
     user_id: userId,
@@ -720,24 +757,67 @@ export async function runImportRows({
             action = 'held'
             heldCount++
           } else {
-            const associations = []
-            if (resolvedContactId) {
-              associations.push({
-                to: { id: resolvedContactId },
-                types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 3 }],
-              })
+            const buildAssociations = () => {
+              const list = []
+              if (resolvedContactId) {
+                list.push({
+                  to: { id: resolvedContactId },
+                  types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 3 }],
+                })
+              }
+              if (resolvedCompanyId) {
+                list.push({
+                  to: { id: resolvedCompanyId },
+                  types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 5 }],
+                })
+              }
+              return list
             }
-            if (resolvedCompanyId) {
-              associations.push({
-                to: { id: resolvedCompanyId },
-                types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 5 }],
-              })
+
+            // The cache can hold a referrer contact/company that was since deleted or
+            // merged in HubSpot. Forget it, look the referrer up live, and try once more.
+            const createWithFreshReferrer = async () => {
+              try {
+                return await withRetry(() => createDeal(properties, buildAssociations(), apiKey))
+              } catch (assocErr) {
+                const staleIds = invalidAssociationIds(assocErr)
+                if (!staleIds || !row.referrer) throw assocErr
+
+                await forgetStaleCachedRecords(supabase, userId, staleIds, contactsByLastName, cachedCompanies)
+                const contactWasStale = staleIds.contacts.has(String(resolvedContactId))
+                if (contactWasStale) {
+                  resolvedContactId = null
+                  resolvedCompanyId = null
+                  const parts = row.referrer.trim().split(/\s+/)
+                  const lastName = parts.length > 1 ? parts[parts.length - 1] : parts[0]
+                  const firstName = parts.length > 1 ? parts.slice(0, -1).join(' ') : ''
+                  const liveContact = await searchLiveContactByName(firstName, lastName, apiKey)
+                  if (liveContact) {
+                    await persistCachedContact(supabase, contactsByLastName, userId, liveContact)
+                    resolvedContactId = liveContact.hubspot_id
+                    resolvedCompanyId = liveContact.company_hubspot_id || null
+                  }
+                }
+                if (staleIds.companies.has(String(resolvedCompanyId))) resolvedCompanyId = null
+                if (!resolvedContactId && !resolvedCompanyId) {
+                  resolvedCompanyId = await searchLiveCompanyByName(row.referrer, apiKey)
+                  if (resolvedCompanyId) cachedCompanies.set(normalizeLookupKey(row.referrer), resolvedCompanyId)
+                }
+                if (!resolvedContactId && !resolvedCompanyId) throw assocErr
+
+                console.warn(`[hs-import] ${row.name}: replaced stale referrer records`, {
+                  stale: { contacts: [...staleIds.contacts], companies: [...staleIds.companies] },
+                  contactId: resolvedContactId,
+                  companyId: resolvedCompanyId,
+                })
+                return withRetry(() => createDeal(properties, buildAssociations(), apiKey))
+              }
             }
 
             let resolvedDealId
             try {
               madeHubspotCall = true
-              const newDeal = await withRetry(() => createDeal(properties, associations, apiKey))
+              const newDeal = await createWithFreshReferrer()
               resolvedDealId = newDeal.id
               await updateLastDealReferred({
                 contactId: resolvedContactId,
