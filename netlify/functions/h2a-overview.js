@@ -170,7 +170,7 @@ export async function getOverview({ repository, companyId, cursor = null, limit 
   if (typeof companyId !== 'string' || !companyId.trim()) fail(400, 'A valid company is required.')
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) fail(400, 'Overview page size must be between 1 and 100.')
   const before = validateCursor(cursor)
-  const [page, activeRun, recentRun, lastSuccessfulRun, unresolvedConflictCount, sampleRuns, waitingActivityCount] = await Promise.all([
+  const [page, activeRun, recentRun, lastSuccessfulRun, unresolvedConflictCount, sampleRuns, waitingActivityCount, syncedThrough, lastNightlyRun] = await Promise.all([
     repository.listRuns(companyId, { limit, before }),
     repository.getActiveRun(companyId),
     repository.getRecentRun(companyId),
@@ -178,6 +178,8 @@ export async function getOverview({ repository, companyId, cursor = null, limit 
     repository.countOpenConflicts(companyId),
     repository.getSampleReviewRuns(companyId),
     typeof repository.countWaitingActivities === 'function' ? repository.countWaitingActivities(companyId) : 0,
+    typeof repository.getSyncedThrough === 'function' ? repository.getSyncedThrough(companyId) : null,
+    typeof repository.getLastNightlyRun === 'function' ? repository.getLastNightlyRun(companyId) : null,
   ])
   const rows = Array.isArray(page?.items) ? page.items : []
   const selected = rows.slice(0, limit)
@@ -198,6 +200,9 @@ export async function getOverview({ repository, companyId, cursor = null, limit 
       unresolvedConflictCount: Number.isSafeInteger(unresolvedConflictCount) && unresolvedConflictCount >= 0
         ? unresolvedConflictCount : 0,
       waitingActivityCount: Number.isSafeInteger(waitingActivityCount) && waitingActivityCount >= 0 ? waitingActivityCount : 0,
+      // How far every HubSpot activity type has been read: the oldest per-type live cursor.
+      syncedThrough: typeof syncedThrough === 'string' && Number.isFinite(Date.parse(syncedThrough)) ? new Date(syncedThrough).toISOString() : null,
+      lastNightlyRun: sanitizeOverviewRun(lastNightlyRun),
     },
     runs: selected.map(run => {
       const sanitized = sanitizeOverviewRun(run)
@@ -261,6 +266,16 @@ export function createOverviewRepository(supabase) {
         .in('triage_bucket', ['quick', 'todo', 'decision', 'blocked'])
       if (result?.error) throw result.error
       return Number.isSafeInteger(result?.count) ? result.count : 0
+    },
+    // The oldest live cursor across activity types: every activity before it has been read and delivered or held.
+    async getSyncedThrough(companyId) {
+      const row = checked(await supabase.from('h2a_cursors').select('cursor_timestamp').eq('company_id', companyId)
+        .order('cursor_timestamp', { ascending: true }).limit(1).maybeSingle())
+      return row?.cursor_timestamp ?? null
+    },
+    async getLastNightlyRun(companyId) {
+      return maybeOne(scoped(supabase, companyId).eq('trigger', 'scheduled')
+        .order('created_at', { ascending: false }).order('id', { ascending: false }))
     },
     // HubSpot activities held until the contact or organization they belong to is resolved.
     async countWaitingActivities(companyId) {

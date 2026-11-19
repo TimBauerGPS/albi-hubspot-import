@@ -172,6 +172,8 @@ async function conflict(deps, ctx, data) {
         conflictId: text(persisted?.id),
         mappings: data.objectType === 'companies' ? ctx.mappings?.organizations : ctx.mappings?.contacts })
     }
+    // Recorded (and, for a person or company, in the review queue): resolving it releases the activity.
+    ctx.activityHeld = true
   }
   await recordOnce(deps.repository, companyId, runId, { portal_id: portalId, object_type: data.objectType,
     source_id: data.sourceId, outcome: ctx.mode === 'dry_run' ? 'dry_run' : 'conflict',
@@ -305,6 +307,7 @@ async function processActivity(deps, ctx, activity, deadline) {
     try { organizationBySourceId.set(idOf(source), await resolveOrganization(deps, ctx, source)) }
     catch (error) {
       if (error instanceof ReviewCaptureError) throw error
+      ctx.activityFailed = true
       await recordOnce(deps.repository, companyId, runId, { portal_id: portalId, object_type: 'companies', source_id: idOf(source),
         outcome: 'failed', sanitized_details: safeFailure(error) })
       organizationBySourceId.set(idOf(source), { id: idOf(source), action: 'conflict', reason: safeError(error) })
@@ -329,6 +332,7 @@ async function processActivity(deps, ctx, activity, deadline) {
       } catch (error) {
         // Like the create branches: a capture failure fails this item and holds the activity, not the run.
         if (error instanceof ReviewCaptureError) throw error
+        ctx.activityFailed = true
         await recordOnce(deps.repository, companyId, runId, { portal_id: portalId, object_type: 'contacts', source_id: id,
           outcome: 'failed', sanitized_details: safeFailure(error) })
         contactsResolved.push({ id, action: 'conflict', reason: safeError(error) })
@@ -336,8 +340,9 @@ async function processActivity(deps, ctx, activity, deadline) {
       continue
     }
     try {
-      const linkedIds = contactCompanyLinks.find(row => row.fromId === id)?.toIds ?? []
-      const associatedIds = linkedIds.length ? linkedIds : companyIds
+      // A contact's organization is only its own HubSpot company. One with none is created in Albi on its own,
+      // never under a company the activity happens to name (the activity still goes to that organization).
+      const associatedIds = contactCompanyLinks.find(row => row.fromId === id)?.toIds ?? []
       const choiceKey = JSON.stringify([portalId, id])
       if (!ctx.organizationChoices.has(choiceKey)) {
         const repository = deps.resolutionRepository ?? deps.repository
@@ -347,9 +352,8 @@ async function processActivity(deps, ctx, activity, deadline) {
           ? repository.getContactOrganizationChoice(companyId, portalId, id) : null))
       }
       const choice = await ctx.organizationChoices.get(choiceKey)
-      // Activity company context is still a fallback, but it cannot establish
-      // the direct association required for a saved reviewed choice.
-      const organizationChoice = linkedIds.length ? choice : null
+      // A saved reviewed choice needs a direct association to apply.
+      const organizationChoice = associatedIds.length ? choice : null
       const context = selectReviewedOrganizationContext({ associatedCompanyIds: associatedIds, choice: organizationChoice,
         availableCompanies: companies, companyId, portalId, contactId: id })
       const organization = context.companyId
@@ -358,6 +362,7 @@ async function processActivity(deps, ctx, activity, deadline) {
       contactsResolved.push(await resolveContact(deps, ctx, source, organization, associatedIds, organizationChoice, companies))
     } catch (error) {
       if (error instanceof ReviewCaptureError) throw error
+      ctx.activityFailed = true
       await recordOnce(deps.repository, companyId, runId, { portal_id: portalId, object_type: 'contacts', source_id: idOf(source),
         outcome: 'failed', sanitized_details: safeFailure(error) })
       contactsResolved.push({ id: idOf(source), action: 'conflict', reason: safeError(error) })
@@ -392,7 +397,7 @@ async function processActivity(deps, ctx, activity, deadline) {
           sanitized_details: { reason: reservation.disposition === 'reconciled' ? 'delivery_reconciled' : 'already_delivered' } })
         continue
       }
-      if (reservation.disposition !== 'reserved' || reservation.safeToCreate !== true) { allResolved = false; continue }
+      if (reservation.disposition !== 'reserved' || reservation.safeToCreate !== true) { allResolved = false; ctx.activityFailed = true; continue }
       const props = sourceFields(activity)
       const owner = ctx.owners.get(text(props.hubspot_owner_id))
       const payload = buildAlbiActivity({ objectType: activity.objectType, activityId: sourceId,
@@ -405,7 +410,7 @@ async function processActivity(deps, ctx, activity, deadline) {
       let result, error
       try { result = await deps.albi.createActivity(payload) } catch (caught) { error = caught }
       const completed = await completeDelivery({ reservation, store, albi: deps.albi, result, error, now: nowIso(deps) })
-      if (!['delivered', 'reconciled'].includes(completed.disposition)) allResolved = false
+      if (!['delivered', 'reconciled'].includes(completed.disposition)) { allResolved = false; ctx.activityFailed = true }
       await recordOnce(deps.repository, companyId, runId, { portal_id: portalId, object_type: activity.objectType,
         source_id: sourceId, albi_target_type: target.type, albi_target_id: target.id,
         activity_delivery_id: completed.delivery?.id ?? null,
@@ -414,6 +419,7 @@ async function processActivity(deps, ctx, activity, deadline) {
           ...(error && !['delivered', 'reconciled'].includes(completed.disposition) ? safeScope(error) : {}) } })
     } catch (error) {
       allResolved = false
+      ctx.activityFailed = true
       await recordOnce(deps.repository, companyId, runId, { portal_id: portalId, object_type: activity.objectType,
         source_id: sourceId, albi_target_type: target.type, albi_target_id: target.id,
         outcome: 'failed', sanitized_details: safeFailure(error) })
@@ -591,8 +597,14 @@ export async function runCompanySync(deps, input = {}) {
               : Date.parse(activity.occurredAt) <= Date.parse(checkpoint.timestamp) && itemBoundary.objectId === checkpoint.objectId)) continue
             if (sampleRemaining !== null && outcomes.length >= sampleRemaining) break
             ctx.activity = activity
+            ctx.activityHeld = false
+            ctx.activityFailed = false
             try {
-              const resolved = await processActivity(deps, ctx, activity, deadline)
+              const delivered = await processActivity(deps, ctx, activity, deadline)
+              // A live activity held behind a recorded conflict does not stop the cursor: it is released (and delivered)
+              // when the conflict is resolved, so later activities keep flowing and are not re-read every run.
+              // An activity that failed without a conflict (Albi busy, a read error) still stops it, so it is retried.
+              const resolved = delivered || (mode !== 'dry_run' && ctx.activityHeld === true && ctx.activityFailed !== true)
               outcomes.push({ ...itemBoundary, resolved })
             } catch (error) {
               if (capturesReview(ctx) || error instanceof ReviewCaptureError) throw error

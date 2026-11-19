@@ -359,7 +359,7 @@ test('live sync never calls albi.createContact or albi.createOrganization', asyn
   assert.ok(!deps.items.some(item => item.outcome === 'failed'), 'no create was attempted, so nothing failed')
   assert.ok(!deps.items.some(item => item.outcome === 'created'))
   assert.ok(!deps.events.includes('create:activity'))
-  assert.equal(deps.cursors.length, 0)
+  assert.ok(deps.cursors.length > 0, 'an activity held behind a recorded conflict does not stop the cursor')
 })
 
 test('a new live contact is held as new_record_needs_review with a live review row', async () => {
@@ -382,7 +382,7 @@ test('a new live contact is held as new_record_needs_review with a live review r
   assert.equal(item.sanitized_details.reason, 'new_record_needs_review')
   assert.ok(deps.items.some(row => row.object_type === 'calls' && row.outcome === 'conflict'), 'the activity waits on its contact')
   assert.ok(!deps.items.some(row => row.object_type === 'calls' && row.outcome === 'delivered'))
-  assert.equal(deps.cursors.length, 0)
+  assert.ok(deps.cursors.length > 0, 'an activity held behind a recorded conflict does not stop the cursor')
 })
 
 test('a new contact behind a new organization is held, and the organization is held too', async () => {
@@ -411,7 +411,7 @@ test('missing name leaves a review conflict and does not create a contact', asyn
   assert.equal(result.status, 'partially_failed')
   assert.ok(deps.events.includes('conflict:missing_required_name'))
   assert.ok(!deps.events.includes('create:contact'))
-  assert.equal(deps.cursors.length, 0)
+  assert.ok(deps.cursors.length > 0, 'an activity held behind a recorded conflict does not stop the cursor')
 })
 
 test('activity create scope denial keeps delivery disposition and names the required scope', async () => {
@@ -428,10 +428,10 @@ test('activity create scope denial keeps delivery disposition and names the requ
 })
 
 test('existing contact reassociation becomes a conflict without wrapper mutations', async () => {
-  const deps = liveFixture({
+  const deps = exactAssociations(liveFixture({
     albiOrganizations: [{ id: '100', name: 'Company20', phoneNumber: '415-555-0123', organizationTypeIds: ['2'] }],
     albiContacts: [{ id: '200', firstName: 'First10', lastName: 'Last10', email: '10@example.com', organizationId: '999' }],
-  })
+  }))
   let mutationCalls = 0
   deps.albi.updateContact = async () => { mutationCalls += 1; throw new Error('must not mutate') }
   deps.albi.updateOrganization = async () => { mutationCalls += 1; throw new Error('must not mutate') }
@@ -440,10 +440,10 @@ test('existing contact reassociation becomes a conflict without wrapper mutation
   assert.equal(result.status, 'partially_failed')
   assert.equal(mutationCalls, 0)
   assert.ok(deps.events.includes('conflict:albi_contact_association_contract_unverified'))
-  assert.equal(deps.cursors.length, 0)
+  assert.ok(deps.cursors.length > 0, 'an activity held behind a recorded conflict does not stop the cursor')
 })
 
-test('mixed contact targets deliver safe fan-out while unresolved target holds cursor', async () => {
+test('mixed contact targets deliver safe fan-out and a held target does not stop the cursor', async () => {
   const deps = liveFixture({ contactIds: ['10', '11'], companyIds: [],
     albiContacts: [{ id: '201', firstName: 'First10', lastName: 'Last10', email: '10@example.com' }] })
   deps.hubspot.getContacts = async ids => ids.map(id => id === '11'
@@ -452,7 +452,7 @@ test('mixed contact targets deliver safe fan-out while unresolved target holds c
   const result = await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
   assert.equal(result.status, 'partially_failed')
   assert.equal(deps.items.filter(item => item.outcome === 'delivered').length, 1)
-  assert.equal(deps.cursors.length, 0)
+  assert.ok(deps.cursors.length > 0, 'an activity held behind a recorded conflict does not stop the cursor')
 })
 
 test('dry run evaluates associations and proposed creations without provider writes or durable mappings', async () => {
@@ -1003,9 +1003,22 @@ for (const invalid of ['absent', 'missing', 'deleted', 'cross-tenant', 'wrong po
     if (invalid === 'activity only') deps.directIds = []
     await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
     assert.equal(deps.contactPayload, undefined)
-    assert.ok(deps.events.includes('conflict:multiple_associated_organizations'))
+    // A contact with no company of its own is not held for the activity's companies: it waits as a new record.
+    assert.ok(deps.events.includes(invalid === 'activity only' ? 'conflict:new_record_needs_review' : 'conflict:multiple_associated_organizations'))
+    if (invalid === 'activity only') assert.ok(!deps.events.includes('conflict:multiple_associated_organizations'))
   })
 }
+
+test('a contact with no HubSpot company is held as a new record, not under the activity company', async () => {
+  const deps = throwingCreates(liveFixture())
+  deps.hubspot.getAssociations = async ({ objectType, objectIds }) => objectType === 'contacts'
+    ? objectIds.map(id => ({ fromId: id, toObjectType: 'companies', toIds: [] }))
+    : [{ toObjectType: 'contacts', toIds: ['10'] }, { toObjectType: 'companies', toIds: ['20'] }]
+  await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
+  const contact = deps.conflicts.find(row => row.object_type === 'contacts')
+  assert.equal(contact?.reason, 'new_record_needs_review')
+  assert.ok(!deps.events.includes('conflict:organization_unresolved'))
+})
 
 test('a linked organization whose fields differ in Albi does not hold its contact; live sync still creates nothing', async () => {
   const deps = reviewedSyncFixture()
@@ -1041,7 +1054,7 @@ test('missing association records are reviewed instead of falling back to an org
   const result = await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
   assert.equal(result.status, 'partially_failed')
   assert.ok(!deps.events.includes('create:activity'))
-  assert.equal(deps.cursors.length, 0)
+  assert.ok(deps.cursors.length > 0, 'an activity held behind a recorded conflict does not stop the cursor')
 })
 
 test('unverified blank-field updates create review records with safe side-by-side values', async () => {
@@ -1089,17 +1102,17 @@ test('stale post-write delivery reconciles as a durable recovered outcome', asyn
   assert.equal(deps.items.filter(item => item.outcome === 'reconciled').length, 1)
 })
 
-test('organization conflict holds the activity checkpoint while safe contact still delivers', async () => {
+test('organization conflict holds the activity, not the cursor, while safe contact still delivers', async () => {
   const deps = liveFixture({ albiContacts: [{ id: '200', firstName: 'First10', lastName: 'Last10', email: '10@example.com' }] })
   deps.hubspot.getCompanies = async ids => ids.map(id => ({ id, properties: { name: '' } }))
   const result = await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
   assert.equal(result.status, 'partially_failed')
   assert.equal(deps.items.filter(item => item.outcome === 'delivered').length, 1)
-  assert.equal(deps.cursors.length, 0)
+  assert.ok(deps.cursors.length > 0, 'an activity held behind a recorded conflict does not stop the cursor')
 })
 
 test('dry preview shows inherited contact type without creating records', async () => {
-  const deps = liveFixture()
+  const deps = exactAssociations(liveFixture())
   deps.repository.getConfig = async () => ({ state: 'dry_run', portal_id: '123', selected_start_date: '2026-10-01', preflight_status: 'valid' })
   deps.mappings.options.push({ mapping_kind: 'organization_to_contact_type', source_key: '2', albi_id: '9',
     confirmed_at: '2026-10-01T00:00:00Z' })
@@ -1684,4 +1697,12 @@ test('a dry run never fills Albi blanks', async () => {
   deps.repository.getConfig = async () => ({ state: 'dry_run', portal_id: '123', selected_start_date: '2026-10-01', preflight_status: 'valid' })
   const result = await runCompanySync(deps, { companyId: 'c1', mode: 'dry_run', trigger: 'manual' })
   assert.notEqual(result.status, 'failed')
+})
+
+test('an activity that failed without a recorded conflict still stops the cursor so it is retried', async () => {
+  const deps = exactAssociations(liveFixture(existingAlbi()))
+  deps.albi.createActivity = async () => { throw Object.assign(Error('busy'), { status: 503 }) }
+  await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
+  assert.ok(!deps.items.some(item => item.object_type === 'calls' && item.outcome === 'delivered'))
+  assert.equal(deps.cursors.filter(row => row.type === 'calls').length, 0)
 })

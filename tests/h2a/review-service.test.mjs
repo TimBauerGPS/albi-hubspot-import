@@ -363,29 +363,25 @@ for (const existing of [true, false]) test(`reviewed company needing creation ${
 
 for (const reason of ['multiple_associated_organizations', 'albi_contact_association_contract_unverified',
   'association_contract_unverified', 'organization_unresolved']) {
-  test(`empty direct associations retain the existing ${reason} classification with current safe evidence`, async () => {
+  test(`a contact with no HubSpot company clears an old ${reason} hold and links on its own`, async () => {
     const f = fixture({ contacts: [{ id: '20', firstName: 'A', lastName: 'Person', email: 'a@example.com', authorization: 'secret' }] })
     f.row.reason = reason; f.row.conflict_type = 'association'
     f.row.candidate_snapshots = [{ id: 'old-candidate' }]
     await recheckDryRunReview(f.deps, input)
     const payload = f.applied[0][1]
-    assert.equal(payload.status, 'needs_review'); assert.equal(payload.outcome, 'still_needs_review')
-    assert.equal(payload.eventType, 'still_needs_review')
-    assert.equal(payload.reason, reason); assert.equal(payload.conflictType, 'association')
-    assert.deepEqual(payload.sourceSnapshot, { id: '10', firstName: 'A', lastName: 'Person', email: 'a@example.com' })
+    assert.equal(payload.status, 'cleared'); assert.equal(payload.outcome, 'safe_to_link')
     assert.deepEqual(payload.candidateSnapshots, [{ id: '20', firstName: 'A', lastName: 'Person', email: 'a@example.com' }])
-    assert.deepEqual(payload.matchEvidence, { evidence: ['email'] })
     assert.equal(JSON.stringify(payload).includes('secret'), false)
     assert.equal(f.calls.some(call => call[0] === 'companies' || call[0] === 'albiOrganizations'), false)
   })
 }
 
-test('empty direct associations cannot clear an existing association review through a safe create', async () => {
+test('a new contact with no HubSpot company clears an old organization hold as safe to create', async () => {
   const f = fixture({ options: [{ mapping_kind: 'default_contact_type', albi_id: '7', confirmed: true }] })
   f.row.reason = 'organization_unresolved'; f.row.conflict_type = 'association'
   await recheckDryRunReview(f.deps, input)
-  assert.equal(f.applied[0][1].outcome, 'still_needs_review')
-  assert.equal(f.applied[0][1].reason, 'organization_unresolved')
+  assert.equal(f.applied[0][1].outcome, 'safe_to_create')
+  assert.equal(f.applied[0][1].status, 'cleared')
 })
 
 test('corrected direct association clears the original ambiguity using the shared evaluator', async () => {

@@ -100,6 +100,12 @@ export async function loadReviewResolutionOptions({ row, repository, reads, prog
       }
       // Held only because its organization was unresolved, and that organization is now in Albi: a recheck decides
       // the contact (create or link). Walking every Albi contact on each open to offer a choice trips Albi's rate limit.
+      // No HubSpot company at all: there is nothing to choose. A recheck decides the contact on its own (create or link),
+      // without walking every Albi contact here.
+      if (allAssociated.length === 0 && row.conflict_type === 'association' &&
+        !mappings.contacts.some(item => item?.portal_id === row.portal_id && mappedSource(item) === row.source_id)) {
+        return { ...unavailable, organizationNone: true }
+      }
       const resolvedTarget = allAssociated.length === 1 ? exactMapping(mappings.organizations, row.portal_id, allAssociated[0], 'companies') : null
       if (row.reason === 'organization_unresolved' && resolvedTarget &&
         !mappings.contacts.some(item => item?.portal_id === row.portal_id && mappedSource(item) === row.source_id)) {

@@ -267,12 +267,8 @@ async function evaluateReviewRow(deps, { companyId, reviewId, actorId, row, conf
           companyId, portalId: row.portal_id, preferFirst: true,
           mappings: mappings.contacts, optionMappings: mappings.options })
         evaluation = await acceptedLinkDifferences(deps, companyId, row, evaluation, source, candidates, mappings.contacts, deadline)
-        // Samples may have used activity company context when direct associations
-        // were empty. That context is intentionally not retained; only a fresh
-        // sample can prove it resolved. Refresh safe evidence without clearing it.
-        if (!associatedCompanyIds.length && row.conflict_type === 'association') {
-          evaluation = { ...evaluation, outcome: 'needs_review', reason: row.reason, conflictType: row.conflict_type }
-        }
+        // A contact with no HubSpot company is decided on its own. Older captures that borrowed an activity's
+        // companies clear here instead of staying held for an organization the contact never had.
       }
     }
     if (clock(deps) >= deadline) throw timeout()

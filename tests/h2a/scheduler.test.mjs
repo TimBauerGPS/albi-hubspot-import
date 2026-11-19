@@ -137,3 +137,13 @@ test('a live company stays eligible for the nightly run when its last connection
   assert.equal(await defaultActivationReady(repository, 'c1', { ...stale, option_confirmation_status: 'unconfirmed' }), false)
   assert.equal(await defaultActivationReady({ ...repository, getCredentials: async () => null }, 'c1', stale), false)
 })
+
+// Netlify ignores config.schedule on a v1 `handler` export, which left the nightly sync unscheduled for weeks.
+test('every scheduled function uses the default export Netlify schedules', async () => {
+  for (const name of ['nightly-h2a-sync', 'h2a-albi-copy-weekly', 'nightly-hubspot-sync', 'nightly-google-sheet-import']) {
+    const mod = await import(`../../netlify/functions/${name}.js`)
+    assert.equal(typeof mod.config?.schedule, 'string', name)
+    assert.equal(typeof mod.default, 'function', `${name} must export default to be scheduled`)
+    assert.equal(mod.handler, undefined, `${name} must not export a v1 handler`)
+  }
+})

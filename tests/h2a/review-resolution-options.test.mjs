@@ -35,6 +35,16 @@ test('an unlinked contact held for its organization, now mapped, says to recheck
   assert.equal(result.createReadiness.blockedReason, undefined)
 })
 
+test('an unlinked contact held for an organization it does not have says to recheck without walking Albi', async () => {
+  const noWalk = { hubspotRead: { ...reads.hubspotRead, getAssociations: async () => [{ fromId: '123', toObjectType: 'companies', toIds: [] }] },
+    albiRead: { ...reads.albiRead, listContacts: async () => { throw Error('must not scan Albi contacts') },
+      listOrganizations: async () => { throw Error('must not scan Albi organizations') } } }
+  const result = await loadReviewResolutionOptions({ row: { ...row, conflict_type: 'association', candidate_snapshots: [] },
+    repository: { getMappings: async () => ({ ...mappings, contacts: [] }) }, reads: noWalk })
+  assert.equal(result.organizationNone, true)
+  assert.deepEqual(result.organizationOptions, [])
+})
+
 test('missing or contradictory live association evidence leaves organization actions unavailable', async () => {
   for (const current of [[], [{ fromId: '123', toObjectType: 'companies', toIds: ['bad'] }],
     [{ fromId: '123', toObjectType: 'companies', toIds: ['777', '777'] }]]) {

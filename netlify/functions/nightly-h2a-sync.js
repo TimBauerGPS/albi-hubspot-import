@@ -149,4 +149,10 @@ export function createNightlyScheduler(options = {}) {
   }
 }
 
-export const handler = createNightlyScheduler()
+// Netlify registers config.schedule only for the default-export (v2) style; with an exported `handler` the schedule
+// is ignored and the function never runs. Keep this a default export.
+const run = createNightlyScheduler()
+export default async () => {
+  const result = await run()
+  return new Response(result.body, { status: result.statusCode, headers: { 'Content-Type': 'application/json' } })
+}

@@ -143,6 +143,8 @@ export default function ReviewRecord({
       mergeConflict: item.organizationGate.mergeConflict === true } : null
   // Its organization is in Albi now: a recheck decides the contact, so there is nothing to choose here.
   const organizationResolved = organizationOptions.length === 0 && !organizationGate && idPattern.test(item?.organizationResolved?.targetId)
+  // The contact has no organization in HubSpot: a recheck offers it as a create (or a link) on its own.
+  const organizationNone = organizationOptions.length === 0 && !organizationGate && !organizationResolved && item?.organizationNone === true
   const chosenOrganization = organizationOptions.find(option => option.sourceId === organizationSourceId)
 
   // Diff rows. In field mode every field the resolution can write is choosable, even one the normalized diff hides.
@@ -283,6 +285,7 @@ export default function ReviewRecord({
             onClick={() => onChooseOrganization?.({ organizationSourceId, addHubSpotAssociation: !chosenOrganization.associated })}>Choose organization</button></>
           : organizationGate ? <div className="mt-3">{organizationFirstCard(organizationGate)}</div>
             : organizationResolved ? <p className="mt-2 text-xs text-gray-700">This contact’s organization is in Albi now. Recheck this record: it is then offered as a create, or as a link if Albi already has the contact.</p>
+            : organizationNone ? <p className="mt-2 text-xs text-gray-700">This contact has no organization in HubSpot, so there is none to choose. Recheck this record: it is then offered as a create on its own, or as a link if Albi already has the contact.</p>
             : <p className="mt-2 text-xs text-amber-800">Fresh server association evidence is unavailable. Recheck or reload this record before choosing an organization.</p>}
       </section>}
 

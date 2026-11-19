@@ -28,4 +28,10 @@ export function createWeeklyCopyScheduler(options = {}) {
   }
 }
 
-export const handler = createWeeklyCopyScheduler()
+// Netlify registers config.schedule only for the default-export (v2) style; with an exported `handler` the schedule
+// is ignored and the function never runs. Keep this a default export.
+const run = createWeeklyCopyScheduler()
+export default async () => {
+  const result = await run()
+  return new Response(result.body, { status: result.statusCode, headers: { 'Content-Type': 'application/json' } })
+}

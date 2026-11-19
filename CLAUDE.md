@@ -301,6 +301,7 @@ In the HubSpot-to-Albi review workspace, **every action that creates records in 
 - Do not add a new `grant-app-access` function if one already exists in the project
 - Do not conflate Master Admin (App 1 partner tier) with Super Admin — they are unrelated concepts
 - Do not create Albi records directly from the HubSpot Importer page (or in a page-driven batch) — queue them in the review Outbox
+- Do not give a scheduled Netlify function an `export const handler` — Netlify registers `config.schedule` only on a default export, and the H2A nightly sync silently never ran because of this (`tests/h2a/scheduler.test.mjs` guards it)
 
 ---
 

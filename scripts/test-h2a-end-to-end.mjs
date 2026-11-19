@@ -592,7 +592,8 @@ async function runLiveHoldCreateResumeSelfTest(log) {
   assert.equal(world.createContactCalls.length, 0, 'live sync never creates an Albi contact')
   assert.equal(world.createOrganizationCalls, 0)
   assert.equal(world.activitiesCreated.length, 0, 'the activity waits on its contact')
-  assert.equal(world.cursors.length, 0, 'the cursor does not move past a held activity')
+  assert.ok(world.cursors.length > 0, 'a held activity no longer stops the cursor')
+  const cursorsAfterLive = world.cursors.length
   const held = world.conflicts.find(conflict => conflict.object_type === 'contacts')
   assert.equal(held.reason, 'new_record_needs_review')
   assert.equal(world.liveReviews.length, 1)
@@ -671,7 +672,7 @@ async function runLiveHoldCreateResumeSelfTest(log) {
   assert.deepEqual(resumeRuns.map(run => run.status), ['completed'])
   assert.deepEqual(world.activitiesCreated, ['300'], 'the held activity is delivered once')
   assert.equal(world.items.filter(row => row.object_type === 'calls' && row.outcome === 'delivered').length, 1)
-  assert.equal(world.cursors.length, 0, 'a targeted resume does not move the cursor')
+  assert.equal(world.cursors.length, cursorsAfterLive, 'a targeted resume does not move the cursor')
   assert.equal(world.createContactCalls.length, 1)
 
   // 4. A replayed close neither closes again nor sends a second resume.

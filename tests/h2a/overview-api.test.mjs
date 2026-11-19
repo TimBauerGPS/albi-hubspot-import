@@ -444,3 +444,17 @@ test('overview errors are no-store and never expose raw database details', async
   assert.deepEqual(JSON.parse(response.body), { error: 'Unable to load HubSpot to Albi overview.' })
   assert.equal(response.body.includes('private'), false)
 })
+
+test('the summary says how far activities are synced and when the nightly sync last ran', async () => {
+  const repo = repository({
+    async getSyncedThrough() { return '2026-11-18T19:15:50.796+00:00' },
+    async getLastNightlyRun() { return run({ trigger: 'scheduled' }) },
+  })
+  const result = await getOverview({ repository: repo, companyId: 'company-1', limit: 25 })
+  assert.equal(result.summary.syncedThrough, '2026-11-18T19:15:50.796Z')
+  assert.equal(result.summary.lastNightlyRun.trigger, 'scheduled')
+  const empty = await getOverview({ repository: repository({ async getSyncedThrough() { return 'nonsense' }, async getLastNightlyRun() { return null } }),
+    companyId: 'company-1', limit: 25 })
+  assert.equal(empty.summary.syncedThrough, null)
+  assert.equal(empty.summary.lastNightlyRun, null)
+})

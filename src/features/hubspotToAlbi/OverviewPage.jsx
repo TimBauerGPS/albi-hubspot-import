@@ -28,6 +28,10 @@ function dateTime(value) {
   return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value))
 }
 
+function dateOnly(value) {
+  return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(new Date(value))
+}
+
 function StatusBadge({ status }) {
   return (
     <span className={`inline-flex rounded-md px-2 py-1 text-xs font-semibold capitalize ring-1 ring-inset ${statusTone[status] ?? statusTone.cancelled}`}>
@@ -275,6 +279,8 @@ export default function OverviewPage() {
   const activeRun = summary.activeRun
   const recentRun = summary.recentRun
   const lastSuccess = summary.lastSuccessfulRun
+  // More than two days behind means the nightly sync has not caught up yet.
+  const behind = Boolean(summary.syncedThrough) && Date.now() - Date.parse(summary.syncedThrough) > 2 * 86400000
   const completedSample = summary.completedSampleRun
   const newerSampleFailed = !syncLive && ['failed', 'partially_failed'].includes(summary.latestSampleRun?.status) &&
     summary.latestSampleRun.id !== completedSample?.id
@@ -347,17 +353,27 @@ export default function OverviewPage() {
       <section aria-labelledby="h2a-health-title">
         <h3 id="h2a-health-title" className="sr-only">Sync health</h3>
         <dl className="grid gap-px overflow-hidden rounded-xl border border-gray-200 bg-gray-200 sm:grid-cols-2 lg:grid-cols-4">
-          {[
+          {(syncLive ? [
+            ['Activities synced through', summary.syncedThrough ? dateOnly(summary.syncedThrough) : 'Not yet',
+              behind ? 'Behind: the nightly sync catches up on its own' : 'HubSpot activities up to this date are in Albi or waiting below', behind],
+            ['Last nightly sync', summary.lastNightlyRun ? dateTime(summary.lastNightlyRun.finished_at || summary.lastNightlyRun.started_at || summary.lastNightlyRun.created_at) : 'Not yet',
+              summary.lastNightlyRun ? words(summary.lastNightlyRun.status) : 'Runs every night after 2 AM Pacific'],
+            ['To resolve', summary.unresolvedConflictCount ?? 0,
+              summary.waitingActivityCount > 0 ? `${summary.waitingActivityCount} activities are sent once these are resolved` : 'Nothing is waiting on you', false, true],
+            ['Recent status', recentRun ? words(recentRun.status) : 'No runs yet', lastSuccess ? `Last finished ${dateTime(lastSuccess.finished_at)}` : null],
+          ] : [
             ['Recent status', recentRun ? words(recentRun.status) : 'No runs yet'],
             ['Last successful sync', lastSuccess ? dateTime(lastSuccess.finished_at) : 'Not yet'],
             ['Open conflicts', summary.unresolvedConflictCount ?? 0,
               summary.waitingActivityCount > 0 ? `${summary.waitingActivityCount} activities waiting on these` : null],
             ['Recent processed / proposed', recentRun ? recentTotal : 0],
-          ].map(([label, value, note]) => (
-            <div key={label} className="bg-white px-4 py-4">
+          ]).map(([label, value, note, warn, resolve]) => (
+            <div key={label} className={`px-4 py-4 ${warn ? 'bg-amber-50' : 'bg-white'}`}>
               <dt className="text-xs font-medium text-gray-500">{label}</dt>
-              <dd className="mt-1 text-lg font-semibold text-gray-900">{value}</dd>
-              {note && <dd className="mt-0.5 text-xs text-gray-500">{note}</dd>}
+              <dd className={`mt-1 text-lg font-semibold ${warn ? 'text-amber-900' : 'text-gray-900'}`}>{value}</dd>
+              {note && <dd className={`mt-0.5 text-xs ${warn ? 'text-amber-800' : 'text-gray-500'}`}>{note}</dd>}
+              {resolve && (summary.unresolvedConflictCount ?? 0) > 0 && <dd className="mt-2">
+                <Link to="/hubspot-to-albi/conflicts" className="inline-flex rounded-lg bg-brand-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-brand-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500">Resolve now</Link></dd>}
             </div>
           ))}
         </dl>
