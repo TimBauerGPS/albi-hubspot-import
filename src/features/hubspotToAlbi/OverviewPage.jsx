@@ -350,6 +350,16 @@ export default function OverviewPage() {
         </section>
       )}
 
+      {syncLive && (summary.refusedActivityCount ?? 0) > 0 && (
+        <section className="rounded-xl border border-amber-300 bg-amber-50 px-5 py-4" aria-label="Activities Albi refused">
+          <p className="text-sm font-semibold text-amber-950">Albi refused {summary.refusedActivityCount} {summary.refusedActivityCount === 1 ? 'activity' : 'activities'}</p>
+          <p className="mt-1 text-xs text-amber-900">These are set aside so the rest keep syncing. Albi said:</p>
+          <ul className="mt-1 list-disc pl-5 text-xs text-amber-900">
+            {(summary.refusedActivityReasons ?? []).map(row => <li key={row.reason}>{row.reason} ({row.count})</li>)}
+          </ul>
+        </section>
+      )}
+
       <section aria-labelledby="h2a-health-title">
         <h3 id="h2a-health-title" className="sr-only">Sync health</h3>
         <dl className="grid gap-px overflow-hidden rounded-xl border border-gray-200 bg-gray-200 sm:grid-cols-2 lg:grid-cols-4">

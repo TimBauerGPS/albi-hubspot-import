@@ -34,7 +34,9 @@ function safeSummary(error) {
   const category = clean(error?.category)
   // An unreadable reply also records its field names (never values), so it can be supported.
   const shape = asText(error?.providerShape).replace(/[^a-zA-Z0-9_,=;()]/g, '_').slice(0, 80)
-  return [category, code, shape].filter(Boolean).join(':').slice(0, 120) || 'provider_error'
+  // Albi's own (already redacted) reason says why it refused, which the field names alone cannot.
+  const reason = asText(error?.providerReason).replace(/[\u0000-\u001f]/g, ' ').slice(0, 160)
+  return [category, code, shape].filter(Boolean).join(':').slice(0, 120) + (reason ? ` | ${reason}` : '') || 'provider_error'
 }
 
 function matchingActivity(records, reservation, nativeExternalIdSupported) {

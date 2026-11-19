@@ -218,3 +218,12 @@ test('a failed delivery records an unreadable reply’s field names, never its v
     albi: { async listActivities() { return { records: [], cursor: null } } }, now: () => '2026-10-01T00:00:00Z' })
   assert.equal(store.current().last_error_summary, 'permanent:malformed_response:reply=status,data;data=object(created)')
 })
+
+test('a refused delivery keeps Albi’s redacted reason, so the cause can be read', async () => {
+  const store = storeHarness()
+  const reservation = await reserveDelivery({ identity, store })
+  await completeDelivery({ reservation, store, error: { category: 'validation', code: 'validation', providerShape: 'resp=message', providerReason: 'Date must be in the past' },
+    now: () => '2026-10-01T00:00:00Z' })
+  assert.equal(store.current().last_error_summary, 'validation:validation:resp=message | Date must be in the past')
+  assert.equal(store.current().next_attempt_at, null)
+})

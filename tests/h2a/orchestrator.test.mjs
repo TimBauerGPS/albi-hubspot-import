@@ -1706,3 +1706,28 @@ test('an activity that failed without a recorded conflict still stops the cursor
   assert.ok(!deps.items.some(item => item.object_type === 'calls' && item.outcome === 'delivered'))
   assert.equal(deps.cursors.filter(row => row.type === 'calls').length, 0)
 })
+
+test('an activity Albi refuses as invalid is set aside as a conflict with its reason and does not stop the cursor', async () => {
+  const deps = exactAssociations(liveFixture(existingAlbi()))
+  deps.albi.createActivity = async () => {
+    throw new ApiError('validation', { operation: 'createActivity', status: 400, providerReason: 'The activity type is not allowed' })
+  }
+  await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
+  const refused = deps.conflicts.find(row => row.reason === 'albi_rejected_activity')
+  assert.equal(refused?.conflict_type, 'activity_delivery')
+  assert.equal(refused?.proposed_changes?.albiReason, 'The activity type is not allowed')
+  assert.ok(deps.cursors.some(row => row.type === 'calls'))
+})
+
+test('an activity Albi already refused as invalid is set aside on later runs instead of stopping the cursor', async () => {
+  const deps = exactAssociations(liveFixture(existingAlbi()))
+  const store = deps.repository.deliveryStore('c1')
+  deps.repository.deliveryStore = () => ({ ...store,
+    reserve: async () => ({ acquired: false, row: { id: 'd1', state: 'failed', next_attempt_at: null, attempt_count: 1,
+      last_error_summary: 'validation:validation:sent=date | Notes are required' } }) })
+  deps.albi.createActivity = async () => { throw Error('must not resend a refused activity') }
+  await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
+  const refused = deps.conflicts.find(row => row.reason === 'albi_rejected_activity')
+  assert.equal(refused?.proposed_changes?.albiReason, 'Notes are required')
+  assert.ok(deps.cursors.some(row => row.type === 'calls'))
+})

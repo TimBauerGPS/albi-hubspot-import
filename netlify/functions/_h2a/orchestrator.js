@@ -397,6 +397,15 @@ async function processActivity(deps, ctx, activity, deadline) {
           sanitized_details: { reason: reservation.disposition === 'reconciled' ? 'delivery_reconciled' : 'already_delivered' } })
         continue
       }
+      // An earlier attempt Albi refused as invalid is never sent again on its own: set it aside, like a fresh refusal.
+      const summary = typeof reservation.delivery?.last_error_summary === 'string' ? reservation.delivery.last_error_summary : ''
+      if (reservation.disposition === 'failed' && summary.startsWith('validation')) {
+        allResolved = false
+        await conflict(deps, ctx, { objectType: activity.objectType, sourceId, type: 'activity_delivery', reason: 'albi_rejected_activity',
+          proposedChanges: { albiTargetType: target.type, albiTargetId: target.id,
+            ...(summary.includes(' | ') ? { albiReason: summary.slice(summary.indexOf(' | ') + 3, summary.indexOf(' | ') + 303) } : {}) } })
+        continue
+      }
       if (reservation.disposition !== 'reserved' || reservation.safeToCreate !== true) { allResolved = false; ctx.activityFailed = true; continue }
       const props = sourceFields(activity)
       const owner = ctx.owners.get(text(props.hubspot_owner_id))
@@ -410,13 +419,23 @@ async function processActivity(deps, ctx, activity, deadline) {
       let result, error
       try { result = await deps.albi.createActivity(payload) } catch (caught) { error = caught }
       const completed = await completeDelivery({ reservation, store, albi: deps.albi, result, error, now: nowIso(deps) })
-      if (!['delivered', 'reconciled'].includes(completed.disposition)) { allResolved = false; ctx.activityFailed = true }
+      if (!['delivered', 'reconciled'].includes(completed.disposition)) allResolved = false
+      // Only a validation refusal is about this activity; a permission or sign-in refusal is about the key, and
+      // still stops the cursor so nothing is set aside while the key is fixed.
+      if (completed.disposition === 'failed' && error?.category === 'validation') {
+        // Albi refused it outright (not busy, not uncertain): retrying will not help. It is recorded as a conflict
+        // with Albi's reason, so it is visible and does not stop every later activity behind it.
+        await conflict(deps, ctx, { objectType: activity.objectType, sourceId, type: 'activity_delivery', reason: 'albi_rejected_activity',
+          proposedChanges: { albiTargetType: target.type, albiTargetId: target.id,
+            ...(typeof error?.providerReason === 'string' ? { albiReason: error.providerReason.slice(0, 300) } : {}) } })
+      } else if (!['delivered', 'reconciled'].includes(completed.disposition)) ctx.activityFailed = true
       await recordOnce(deps.repository, companyId, runId, { portal_id: portalId, object_type: activity.objectType,
         source_id: sourceId, albi_target_type: target.type, albi_target_id: target.id,
         activity_delivery_id: completed.delivery?.id ?? null,
         outcome: completed.disposition === 'reconciled' ? 'reconciled' : completed.disposition === 'delivered' ? 'delivered' : 'failed',
         sanitized_details: { reason: completed.disposition,
-          ...(error && !['delivered', 'reconciled'].includes(completed.disposition) ? safeScope(error) : {}) } })
+          ...(error && !['delivered', 'reconciled'].includes(completed.disposition) ? safeScope(error) : {}),
+          ...(completed.disposition === 'failed' && typeof error?.providerReason === 'string' ? { albiReason: error.providerReason.slice(0, 300) } : {}) } })
     } catch (error) {
       allResolved = false
       ctx.activityFailed = true

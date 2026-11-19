@@ -170,7 +170,7 @@ export async function getOverview({ repository, companyId, cursor = null, limit 
   if (typeof companyId !== 'string' || !companyId.trim()) fail(400, 'A valid company is required.')
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) fail(400, 'Overview page size must be between 1 and 100.')
   const before = validateCursor(cursor)
-  const [page, activeRun, recentRun, lastSuccessfulRun, unresolvedConflictCount, sampleRuns, waitingActivityCount, syncedThrough, lastNightlyRun] = await Promise.all([
+  const [page, activeRun, recentRun, lastSuccessfulRun, unresolvedConflictCount, sampleRuns, waitingActivityCount, syncedThrough, lastNightlyRun, refused] = await Promise.all([
     repository.listRuns(companyId, { limit, before }),
     repository.getActiveRun(companyId),
     repository.getRecentRun(companyId),
@@ -180,6 +180,7 @@ export async function getOverview({ repository, companyId, cursor = null, limit 
     typeof repository.countWaitingActivities === 'function' ? repository.countWaitingActivities(companyId) : 0,
     typeof repository.getSyncedThrough === 'function' ? repository.getSyncedThrough(companyId) : null,
     typeof repository.getLastNightlyRun === 'function' ? repository.getLastNightlyRun(companyId) : null,
+    typeof repository.getRefusedActivities === 'function' ? repository.getRefusedActivities(companyId) : null,
   ])
   const rows = Array.isArray(page?.items) ? page.items : []
   const selected = rows.slice(0, limit)
@@ -203,6 +204,11 @@ export async function getOverview({ repository, companyId, cursor = null, limit 
       // How far every HubSpot activity type has been read: the oldest per-type live cursor.
       syncedThrough: typeof syncedThrough === 'string' && Number.isFinite(Date.parse(syncedThrough)) ? new Date(syncedThrough).toISOString() : null,
       lastNightlyRun: sanitizeOverviewRun(lastNightlyRun),
+      // Activities Albi refused outright, with its most common reasons (already redacted by the client).
+      refusedActivityCount: Number.isSafeInteger(refused?.count) && refused.count >= 0 ? refused.count : 0,
+      refusedActivityReasons: Array.isArray(refused?.reasons) ? refused.reasons
+        .filter(row => typeof row?.reason === 'string' && Number.isSafeInteger(row?.count))
+        .map(row => ({ reason: row.reason.slice(0, 200), count: row.count })).slice(0, 3) : [],
     },
     runs: selected.map(run => {
       const sanitized = sanitizeOverviewRun(run)
@@ -272,6 +278,17 @@ export function createOverviewRepository(supabase) {
       const row = checked(await supabase.from('h2a_cursors').select('cursor_timestamp').eq('company_id', companyId)
         .order('cursor_timestamp', { ascending: true }).limit(1).maybeSingle())
       return row?.cursor_timestamp ?? null
+    },
+    async getRefusedActivities(companyId) {
+      const rows = checked(await supabase.from('h2a_conflicts').select('proposed_changes')
+        .eq('company_id', companyId).eq('status', 'open').eq('reason', 'albi_rejected_activity').limit(1000)) ?? []
+      const counts = new Map()
+      for (const row of rows) {
+        const reason = typeof row?.proposed_changes?.albiReason === 'string' && row.proposed_changes.albiReason.trim()
+          ? row.proposed_changes.albiReason.trim() : 'Albi gave no reason'
+        counts.set(reason, (counts.get(reason) ?? 0) + 1)
+      }
+      return { count: rows.length, reasons: [...counts].sort((a, b) => b[1] - a[1]).map(([reason, count]) => ({ reason, count })) }
     },
     async getLastNightlyRun(companyId) {
       return maybeOne(scoped(supabase, companyId).eq('trigger', 'scheduled')

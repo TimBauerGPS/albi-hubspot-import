@@ -458,3 +458,11 @@ test('the summary says how far activities are synced and when the nightly sync l
   assert.equal(empty.summary.syncedThrough, null)
   assert.equal(empty.summary.lastNightlyRun, null)
 })
+
+test('the summary counts activities Albi refused, with its most common reasons', async () => {
+  const repo = repository({ async getRefusedActivities() { return { count: 5, reasons: [{ reason: 'Notes are required', count: 4 }, { reason: 'x'.repeat(400), count: 1 }] } } })
+  const result = await getOverview({ repository: repo, companyId: 'company-1', limit: 25 })
+  assert.equal(result.summary.refusedActivityCount, 5)
+  assert.equal(result.summary.refusedActivityReasons[0].reason, 'Notes are required')
+  assert.equal(result.summary.refusedActivityReasons[1].reason.length, 200)
+})
