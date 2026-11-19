@@ -72,9 +72,62 @@ export function createNightlyScheduler(options = {}) {
       return readiness.get(company.company_id)
     }
 
-    // Conflict resumes are urgent item-scoped work and do not wait for the daily tick.
+    // One company does one thing per tick, in priority order, so runs never race for the company lock:
+    // a run already working is left alone; a run that lost the lock is restarted; the nightly run goes before
+    // held-activity retries (a retry started alongside it took the lock and the nightly run never ran).
+    const handled = new Set()
+    const getLease = options.getActiveLease ?? (typeof repository.getActiveLease === 'function' ? id => repository.getActiveLease(id) : null)
+    const getStalled = options.getStalledRun ?? (typeof repository.getStalledRun === 'function' ? (id, window) => repository.getStalledRun(id, window) : null)
+    for (const company of companies.filter(row => row.state === 'live')) {
+      const companyId = company.company_id
+      try {
+        if (!await activationReady(company)) continue
+        if (getLease && await getLease(companyId)) { handled.add(companyId); results.push({ companyId, kind: 'gate', status: 'busy' }); continue }
+        const stalled = getStalled ? await getStalled(companyId, { idleBefore: new Date(instant.getTime() - 5 * 60000).toISOString(),
+          createdAfter: new Date(instant.getTime() - 2 * 86400000).toISOString() }) : null
+        if (stalled?.id) {
+          handled.add(companyId)
+          const payload = stalled.trigger === 'scheduled' && stalled.status === 'queued'
+            ? { companyId, mode: 'live', trigger: 'scheduled', runId: stalled.id, schedulerClaimId: stalled.id, businessDate: stalled.business_date }
+            : { companyId, mode: 'live', trigger: 'resume', runId: stalled.id }
+          let accepted = false
+          try { accepted = await (options.dispatchStalled ?? (body => dispatchBackground(body, options)))(payload) === true } catch { accepted = false }
+          results.push({ companyId, kind: 'restart', runId: stalled.id, status: accepted ? 'accepted' : 'retryable' })
+        }
+      } catch { /* Gate reads are advisory: the run's own lock still prevents two runs. */ }
+    }
+
+    if (due.due) for (const company of companies.filter(row => row.state === 'live' && !handled.has(row.company_id))) {
+      const companyId = company.company_id
+      try {
+        const ready = await activationReady(company)
+        if (!ready) { results.push({ companyId, kind: 'daily', status: 'ineligible' }); continue }
+        const ownerToken = randomUUID()
+        const claim = await (options.claimDailyRun ?? ((id, date, owner) => repository.claimDailyRun(id, date, owner, 180)))
+          (companyId, due.businessDate, ownerToken)
+        if (!claim?.id || claim.acquired !== true) { results.push({ companyId, kind: 'daily', status: 'already_claimed' }); continue }
+        handled.add(companyId)
+        let accepted = false
+        try {
+          const queued = await (options.queueScheduledRun ?? ((id, claimId, date) => repository.queueScheduledRun(id, claimId, date)))
+            (companyId, claim.id, due.businessDate)
+          if (queued?.id && queued.id !== claim.id) throw new Error('scheduled_run_identity_mismatch')
+          accepted = await (options.dispatchScheduled ?? (payload => dispatchBackground(payload, options)))
+            ({ companyId, mode: 'live', trigger: 'scheduled', runId: claim.id, schedulerClaimId: claim.id, businessDate: due.businessDate }) === true
+        } catch { accepted = false }
+        let finished = false
+        try { finished = await (options.finishDailyRun ?? ((id, claimId, owner, ok, code) => repository.finishDailyRun(id, claimId, owner, ok, code)))
+          (companyId, claim.id, ownerToken, accepted, accepted ? null : 'dispatch_failed') } catch { /* A repeated request is safe by stable runId. */ }
+        results.push({ companyId, kind: 'daily', status: accepted && finished ? 'accepted' : 'retryable' })
+      } catch {
+        results.push({ companyId, kind: 'daily', status: 'failed' })
+      }
+    }
+
+    // Held-activity retries, for companies with nothing else this tick.
     for (const company of companies) {
       const companyId = company.company_id
+      if (handled.has(companyId)) continue
       try {
         if (!await activationReady(company)) continue
       } catch {
@@ -107,31 +160,6 @@ export function createNightlyScheduler(options = {}) {
       }
     }
 
-    if (due.due) for (const company of companies.filter(row => row.state === 'live')) {
-      const companyId = company.company_id
-      try {
-        const ready = await activationReady(company)
-        if (!ready) { results.push({ companyId, kind: 'daily', status: 'ineligible' }); continue }
-        const ownerToken = randomUUID()
-        const claim = await (options.claimDailyRun ?? ((id, date, owner) => repository.claimDailyRun(id, date, owner, 180)))
-          (companyId, due.businessDate, ownerToken)
-        if (!claim?.id || claim.acquired !== true) { results.push({ companyId, kind: 'daily', status: 'already_claimed' }); continue }
-        let accepted = false
-        try {
-          const queued = await (options.queueScheduledRun ?? ((id, claimId, date) => repository.queueScheduledRun(id, claimId, date)))
-            (companyId, claim.id, due.businessDate)
-          if (queued?.id && queued.id !== claim.id) throw new Error('scheduled_run_identity_mismatch')
-          accepted = await (options.dispatchScheduled ?? (payload => dispatchBackground(payload, options)))
-            ({ companyId, mode: 'live', trigger: 'scheduled', runId: claim.id, schedulerClaimId: claim.id, businessDate: due.businessDate }) === true
-        } catch { accepted = false }
-        let finished = false
-        try { finished = await (options.finishDailyRun ?? ((id, claimId, owner, ok, code) => repository.finishDailyRun(id, claimId, owner, ok, code)))
-          (companyId, claim.id, ownerToken, accepted, accepted ? null : 'dispatch_failed') } catch { /* A repeated request is safe by stable runId. */ }
-        results.push({ companyId, kind: 'daily', status: accepted && finished ? 'accepted' : 'retryable' })
-      } catch {
-        results.push({ companyId, kind: 'daily', status: 'failed' })
-      }
-    }
     // An outbox left waiting (its worker stopped, or a pause outlasted it) gets a worker each hour.
     const listOutbox = options.listOutboxCompanies ?? (typeof repository.listCompaniesWithDueOutbox === 'function'
       ? () => repository.listCompaniesWithDueOutbox(instant.toISOString()) : null)

@@ -147,3 +147,56 @@ test('every scheduled function uses the default export Netlify schedules', async
     assert.equal(mod.handler, undefined, `${name} must not export a v1 handler`)
   }
 })
+
+function orderFixture({ lease = null, stalled = null, now = '2026-11-19T18:17:00.000Z' } = {}) {
+  const events = []
+  const handler = createNightlyScheduler({ supabase: {}, now: () => new Date(now), repository: {},
+    loadCompanies: async () => [ready('c1')], isActivationReady: async () => true,
+    getActiveLease: async () => lease, getStalledRun: async () => stalled,
+    listPendingResumes: async () => [{ id: 'r1', company_id: 'c1' }],
+    claimResume: async () => ({ id: 'r1', company_id: 'c1', activity_object_type: 'calls', activity_id: '5', resolution_action: 'create_new' }),
+    finishResume: async () => true, dispatchResume: async payload => { events.push(['resume', payload]); return true },
+    claimDailyRun: async () => ({ id: 'claim-1', acquired: true }), queueScheduledRun: async () => ({ id: 'claim-1' }),
+    dispatchScheduled: async payload => { events.push(['daily', payload]); return true }, finishDailyRun: async () => true,
+    dispatchStalled: async payload => { events.push(['restart', payload]); return true }, listOutboxCompanies: async () => [] })
+  return { handler, events }
+}
+
+test('the nightly run is dispatched before held-activity retries, which wait for a later tick', async () => {
+  const { handler, events } = orderFixture()
+  await handler()
+  assert.deepEqual(events.map(([kind]) => kind), ['daily'])
+})
+
+test('a company whose run holds the lock gets nothing else that tick', async () => {
+  const { handler, events } = orderFixture({ lease: { expires_at: '2026-11-19T18:30:00.000Z' } })
+  const body = JSON.parse((await handler()).body)
+  assert.deepEqual(events, [])
+  assert.ok(body.results.some(row => row.kind === 'gate' && row.status === 'busy'))
+})
+
+test('a nightly run that lost the lock is restarted with its stable identity, before anything else', async () => {
+  const { handler, events } = orderFixture({ stalled: { id: 'run-9', trigger: 'scheduled', status: 'queued', business_date: '2026-11-19' } })
+  await handler()
+  assert.deepEqual(events, [['restart', { companyId: 'c1', mode: 'live', trigger: 'scheduled', runId: 'run-9', schedulerClaimId: 'run-9', businessDate: '2026-11-19' }]])
+})
+
+test('a paused live run whose continuation was refused is resumed', async () => {
+  const { handler, events } = orderFixture({ stalled: { id: 'run-7', trigger: 'scheduled', status: 'paused' } })
+  await handler()
+  assert.deepEqual(events, [['restart', { companyId: 'c1', mode: 'live', trigger: 'resume', runId: 'run-7' }]])
+})
+
+test('with the nightly run already claimed today, held-activity retries go out', async () => {
+  const { handler, events } = orderFixture()
+  await handler()
+  const second = orderFixture()
+  const claimed = createNightlyScheduler({ supabase: {}, now: () => new Date('2026-11-19T19:17:00.000Z'), repository: {},
+    loadCompanies: async () => [ready('c1')], isActivationReady: async () => true, getActiveLease: async () => null, getStalledRun: async () => null,
+    listPendingResumes: async () => [{ id: 'r1', company_id: 'c1' }], claimResume: async () => ({ id: 'r1', company_id: 'c1', activity_object_type: 'calls', activity_id: '5', resolution_action: 'create_new' }),
+    finishResume: async () => true, dispatchResume: async payload => { second.events.push(['resume', payload]); return true },
+    claimDailyRun: async () => ({ id: 'claim-1', acquired: false }), listOutboxCompanies: async () => [] })
+  await claimed()
+  assert.deepEqual(second.events.map(([kind]) => kind), ['resume'])
+  assert.deepEqual(events.map(([kind]) => kind), ['daily'])
+})

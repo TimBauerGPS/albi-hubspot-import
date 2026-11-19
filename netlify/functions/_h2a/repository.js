@@ -979,6 +979,13 @@ export function createH2ARepository(supabase) {
     async getCredentials(companyId) {
       return checked(await supabase.rpc('h2a_get_credentials', { p_company_id: companyId }))
     },
+    // A live run left queued or paused (its dispatch lost the company lock, or a continuation was refused) that no
+    // invocation is working on. Only recent ones: an old leftover is not restarted on its own.
+    async getStalledRun(companyId, { idleBefore, createdAfter }) {
+      return checked(await scoped(supabase, 'h2a_sync_runs', companyId).eq('mode', 'live').in('status', ['queued', 'paused'])
+        .lt('updated_at', idleBefore).gt('created_at', createdAfter)
+        .order('created_at', { ascending: false }).limit(1).maybeSingle())
+    },
     async getActiveLease(companyId) {
       const lease = checked(await scoped(supabase, 'h2a_execution_leases', companyId).maybeSingle())
       return lease && Date.parse(lease.expires_at) > Date.now() ? lease : null
