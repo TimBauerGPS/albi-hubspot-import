@@ -633,10 +633,16 @@ test('a single recheck drops an offered Albi match that Albi no longer has (merg
   await recheckDryRunReview(before.deps, input)
   assert.notEqual(before.applied[0][1].outcome, 'safe_to_link')
 
-  // A batch recheck uses its snapshot and asks Albi nothing per record.
+  // A batch recheck asks Albi per record only for possible duplicates (the merge case).
   const batch = fixture({ contacts: twins })
   batch.row.candidate_snapshots = twins
   batch.deps.albiSnapshot = { contacts: twins }
-  batch.deps.albiRead.getContact = async () => { throw new Error('batch rechecks must not read by id') }
+  batch.deps.albiRead.getContact = async () => { throw new Error('batch rechecks must not read by id here') }
   await recheckDryRunReview(batch.deps, input)
+  const duplicates = fixture({ contacts: twins })
+  Object.assign(duplicates.row, { candidate_snapshots: twins, reason: 'duplicate_candidates' })
+  duplicates.deps.albiSnapshot = { contacts: twins }
+  duplicates.deps.albiRead.getContact = async id => id === '21' ? null : twins[0]
+  await recheckDryRunReview(duplicates.deps, input)
+  assert.equal(duplicates.applied[0][1].outcome, 'safe_to_link', 'a batch recheck drops the merged-away duplicate too')
 })

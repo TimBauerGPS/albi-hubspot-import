@@ -125,11 +125,13 @@ function albiRecords(deps, albi, kind, deadline) {
 
 // A single recheck asks Albi for each record it last offered as a match. One Albi no longer has (a merge in Albi
 // deletes the record merged away, which the copy may not know yet) is dropped, and the by-id read removes it from
-// the copy. Batch rechecks skip this: their Albi snapshot already drops deleted records.
+// the copy. Batch rechecks do this only for possible duplicates (the merge case), to spare Albi requests; their
+// snapshot already drops records deleted since the copy began reading deletions.
 export const RECHECK_VERIFY_MAX = 5
 async function withoutGoneCandidates(deps, albi, row, records, deadline) {
   const get = row.object_type === 'contacts' ? albi?.getContact : albi?.getOrganization
-  if (deps.albiSnapshot || typeof get !== 'function' || !Array.isArray(records)) return records
+  if (deps.albiSnapshot && row.reason !== 'duplicate_candidates') return records
+  if (typeof get !== 'function' || !Array.isArray(records)) return records
   const offered = new Set((Array.isArray(row.candidate_snapshots) ? row.candidate_snapshots : []).map(item => item?.id).filter(id => typeof id === 'string'))
   const ids = records.map(record => record?.id).filter(id => offered.has(id)).slice(0, RECHECK_VERIFY_MAX)
   const gone = new Set()
