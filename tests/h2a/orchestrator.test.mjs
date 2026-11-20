@@ -1731,3 +1731,24 @@ test('an activity Albi already refused as invalid is set aside on later runs ins
   assert.equal(refused?.proposed_changes?.albiReason, 'Notes are required')
   assert.ok(deps.cursors.some(row => row.type === 'calls'))
 })
+
+test('a record a reviewer links while a run is working is seen as linked, not re-opened as a new record', async () => {
+  const deps = exactAssociations(liveFixture({ albiOrganizations: [{ id: '100', name: 'Other name', organizationTypeIds: ['2'] }],
+    albiContacts: [{ id: '200', firstName: 'Someone', lastName: 'Else', organizationId: '100' }] }))
+  const options = (await deps.repository.getMappings('c1')).options
+  let calls = 0, now = 1_000_000
+  deps.clockMs = () => now
+  deps.repository.getMappings = async () => {
+    calls += 1
+    if (calls === 1) return { contacts: [], organizations: [], options }
+    // Linked by a reviewer after the run read its first copy.
+    return { options, contacts: [{ portal_id: '123', hubspot_id: '10', albi_contact_id: '200' }],
+      organizations: [{ portal_id: '123', hubspot_id: '20', albi_organization_id: '100' }] }
+  }
+  const listActivities = deps.hubspot.listActivities
+  deps.hubspot.listActivities = async input => { now += 31_000; return listActivities(input) }
+  await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual', timeBudgetMs: 13 * 60_000 })
+  assert.ok(calls >= 2)
+  assert.ok(!deps.conflicts.some(row => row.reason === 'new_record_needs_review'))
+  assert.equal(deps.liveReviews.length, 0)
+})

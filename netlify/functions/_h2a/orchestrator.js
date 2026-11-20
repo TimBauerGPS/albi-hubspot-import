@@ -273,7 +273,21 @@ async function resolveContact(deps, ctx, source, organization, associatedCompany
   return { id: sourceId, action: 'conflict', reason: 'new_record_needs_review' }
 }
 
+// A run can last 13 minutes while a reviewer keeps linking records. Its copy of the links is re-read at most this
+// often, so a record linked meanwhile is seen as linked instead of being re-opened as a new record to review.
+export const MAPPINGS_REFRESH_MS = 30000
+async function refreshMappings(deps, ctx) {
+  if (ctx.mode === 'dry_run' || typeof deps.repository.getMappings !== 'function') return
+  if (clockMs(deps) - (ctx.mappingsLoadedAt ?? 0) < MAPPINGS_REFRESH_MS) return
+  try {
+    const fresh = await deps.repository.getMappings(ctx.companyId)
+    if (fresh && ['contacts', 'organizations', 'options'].every(key => Array.isArray(fresh[key]))) ctx.mappings = fresh
+  } catch { /* The copy in hand is still a valid (if older) view; the next activity tries again. */ }
+  ctx.mappingsLoadedAt = clockMs(deps)
+}
+
 async function processActivity(deps, ctx, activity, deadline) {
+  await refreshMappings(deps, ctx)
   const { companyId, runId, portalId, mappings } = ctx
   const sourceId = idOf(activity)
   if (await deps.repository.isSkippedItem?.(companyId, portalId, activity.objectType, sourceId)) {
@@ -524,7 +538,7 @@ export async function runCompanySync(deps, input = {}) {
     let owners = []
     try { owners = deps.hubspot.listOwners ? await retryRead(deps, () => deps.hubspot.listOwners(), deadline) : [] }
     catch { /* Owner names are optional metadata; activity sync remains eligible. */ }
-    ctx = { companyId, runId: run.id, portalId: config.portal_id, mode, mappings, indexes, sampleLimitPerType,
+    ctx = { companyId, runId: run.id, portalId: config.portal_id, mode, mappings, mappingsLoadedAt: clockMs(deps), indexes, sampleLimitPerType,
       reviewCaptureVersion: run.mode === 'dry_run' ? run.review_capture_version : null,
       capturedReviewIdentities: new Set(),
       organizationChoices: new Map(),
