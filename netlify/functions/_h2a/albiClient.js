@@ -396,6 +396,13 @@ export class AlbiClient {
       throw error
     }
     const record = isRecord(data) && isRecord(data.data) ? data.data : data
+    // TEMPORARY diagnostic (merged contacts still read as live): field names, and the values of status-like fields only.
+    try {
+      const flags = isRecord(record) ? Object.fromEntries(Object.entries(record).filter(([key, value]) => /delet|merg|activ|archiv|status|state|hidden|enabled|removed/i.test(key) &&
+        (value === null || ['boolean', 'number'].includes(typeof value) || typeof value === 'string' && value.length <= 40))) : {}
+      console.info('[albi-get-diagnostic]', JSON.stringify({ operation, id: recordId, envelopeStatus: isRecord(data) ? data.status ?? null : null,
+        keys: isRecord(record) ? Object.keys(record).sort() : typeof record, flags }))
+    } catch { /* diagnostic only */ }
     return deletedRecord(record) ? null : normalizeRecord(record, fields, operation)
   }
   async listOrganizations(args = {}) {
