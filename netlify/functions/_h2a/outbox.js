@@ -167,8 +167,19 @@ export async function runOutboxItem(deps, row) {
     if (status === 'failed') return classify(await failureOf(deps, companyId, result.resolution))
     return { outcome: 'failed', errorCode: 'error', detail: {} }
   } catch (error) {
-    return classifyError(error)
+    return await alreadyClosed(deps, row, action, error) ?? classifyError(error)
   }
+}
+
+// A record closed after its action was queued (a Recheck, or the sync, settled it) has nothing left to send.
+// A queued Skip of a closed record has done its job; any other action fails as already closed, not "changed".
+async function alreadyClosed(deps, row, action, error) {
+  if (!(error instanceof H2AReviewError) || error.statusCode !== 409 || error.staleCheck === 'candidates' ||
+    typeof deps.repository?.getReview !== 'function') return null
+  const review = await deps.repository.getReview(row.company_id, row.review_id).catch(() => null)
+  if (!review || review.status === 'needs_review') return null
+  if (action.kind === 'resolution' && action.decision?.action === 'skip_live') return { outcome: 'sent' }
+  return { outcome: 'failed', errorCode: 'already_closed', detail: {} }
 }
 
 async function moveTriage(deps, companyId, reviewId, outcome) {

@@ -16,6 +16,7 @@ const ACTION_LABELS = {
 const REASONS = {
   albi_busy: 'Albi was busy (too many requests) and kept refusing. Retry when it is quieter.',
   changed: 'The record changed after this was queued. Back to review to decide again.',
+  already_closed: 'This record was already closed (a Recheck or the sync settled it), so there is nothing to send. Back to review clears it.',
   record_changed: 'The record changed after this was queued. Back to review to decide again.',
   possible_match: 'A possible match appeared in Albi. Back to review to choose link or create.',
   reply_unreadable: 'Albi’s reply couldn’t be read, so it may have gone through. Retry checks Albi first, so nothing is duplicated.',

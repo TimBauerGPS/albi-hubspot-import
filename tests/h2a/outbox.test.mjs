@@ -194,3 +194,13 @@ test('a send refused by the create builder fails with the named reason, not a ge
   await runReviewOutbox(f.deps, { companyId: 'c1' })
   assert.deepEqual([f.rows[0].status, f.rows[0].error_code], ['failed', 'phone_unusable'])
 })
+
+test('a queued action on a record a Recheck already closed is not reported as changed', async () => {
+  const refusal = () => new H2AReviewError(409, 'This record changed. Refresh and confirm the resolution again.')
+  const skip = { kind: 'resolution', decision: { action: 'skip_live' } }
+  const f = fixture([item(1, skip), item(2), item(3, skip)], { [UUID(101)]: [refusal()], [UUID(102)]: [refusal()], [UUID(103)]: [refusal()] })
+  const open = f.deps.repository.getReview
+  f.deps.repository.getReview = async (company, id) => ({ ...await open(company, id), status: id === UUID(103) ? 'needs_review' : 'no_longer_in_scope' })
+  await runReviewOutbox({ ...f.deps, paceMs: 0 }, { companyId: 'c1' })
+  assert.deepEqual(f.rows.map(row => [row.status, row.error_code]), [['sent', null], ['failed', 'already_closed'], ['failed', 'changed']])
+})
