@@ -842,3 +842,27 @@ test('a wrapper key that cannot be stored yet says what to apply, and a blank on
   assert.equal((await fixture().request('PUT', { action: 'replace_albi_wrapper_key', albiWrapperKey: '  ' })).statusCode, 400)
   assert.equal((await fixture().request('GET')).json.albiWrapperKeyMask, null)
 })
+
+test('a company that has synced live resumes after re-confirming mappings without a new dry run', async () => {
+  const f = fixture({ config: { state: 'ready', initial_start_locked_at: now, preflight_status: 'valid', option_confirmation_status: 'confirmed' },
+    mappings: optionMappings, runs: [
+      { id: 'full', created_at: '2026-10-02T10:00:01.000Z' },
+      { id: 'live-before', mode: 'live', status: 'partially_failed', created_at: '2026-10-03T10:00:00.000Z' },
+    ] })
+  const read = await f.request()
+  assert.equal(read.json.canResumeLive, true)
+  assert.equal((await f.request('PUT', { action: 'resume_live' })).statusCode, 200)
+  assert.equal(f.tables.h2a_company_config[0].state, 'live')
+})
+
+test('resume_live is refused for a company that has never synced live or is not ready', async () => {
+  const never = fixture({ config: { state: 'ready', initial_start_locked_at: now, preflight_status: 'valid', option_confirmation_status: 'confirmed' },
+    mappings: optionMappings, runs: [{ id: 'full', created_at: '2026-10-02T10:00:01.000Z' }] })
+  assert.equal((await never.request()).json.canResumeLive, false)
+  assert.equal((await never.request('PUT', { action: 'resume_live' })).statusCode, 409)
+  assert.equal(never.tables.h2a_company_config[0].state, 'ready')
+  const unconfirmed = fixture({ config: { state: 'disabled', initial_start_locked_at: now, preflight_status: 'valid', option_confirmation_status: 'unconfirmed' },
+    mappings: optionMappings, runs: [{ id: 'full', created_at: '2026-10-02T10:00:01.000Z' }, { id: 'live-before', mode: 'live', created_at: '2026-10-03T10:00:00.000Z' }] })
+  assert.equal((await unconfirmed.request('PUT', { action: 'resume_live' })).statusCode, 409)
+  assert.equal(unconfirmed.tables.h2a_company_config[0].state, 'disabled')
+})

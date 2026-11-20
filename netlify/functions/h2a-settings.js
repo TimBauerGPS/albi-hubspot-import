@@ -19,7 +19,7 @@ const ACTION_FIELDS = {
   save_notification_recipients: ['notificationRecipients'],
   save_start_date: ['startDate'],
   confirm_option_mappings: ['optionMappings'],
-  enter_dry_run: [], activate_live: [], disable: [], request_earlier_backfill: ['startDate'],
+  enter_dry_run: [], activate_live: [], resume_live: [], disable: [], request_earlier_backfill: ['startDate'],
 }
 const MAPPING_KINDS = ['activity_type', 'default_contact_type', 'default_organization_type', 'organization_to_contact_type']
 
@@ -166,6 +166,13 @@ export function createSettingsHandler(options = {}) {
         hubspotToken: decryptSecret(fromRpc(credentials.hubspot_envelope), getKeyring()),
         albiApiKey: decryptSecret(fromRpc(credentials.albi_envelope), getKeyring()),
       } : { hubspotToken: null, albiApiKey: null }
+
+      // A company that has already synced live (a live run exists) does not repeat first-time onboarding.
+      async function hasLiveHistory() {
+        const row = await checked(supabase.from('h2a_sync_runs').select('id').eq('company_id', companyId)
+          .eq('mode', 'live').limit(1).maybeSingle())
+        return Boolean(row)
+      }
 
       async function getCompletedDryRun({ sample = false } = {}) {
         if (!config.initial_start_locked_at) return null
@@ -329,6 +336,15 @@ export function createSettingsHandler(options = {}) {
             if (!await getCompletedDryRun()) fail(409, 'A completed dry run is required before live activation.')
             await saveConfig({ state: 'live' })
             break
+          case 'resume_live':
+            // Back on after a pause or a mapping change (a connection check that found a removed Albi option turns
+            // sync off): the readiness checks still apply, but not the first-time dry run, which this company passed.
+            requireReady()
+            if (!config.initial_start_locked_at || !await getCompletedDryRun() || !await hasLiveHistory()) {
+              fail(409, 'Resuming is for a company that has already synced live. Complete a dry run and activate instead.')
+            }
+            await saveConfig({ state: 'live' })
+            break
           case 'disable':
             await saveConfig({ state: 'disabled' })
             break
@@ -368,6 +384,7 @@ export function createSettingsHandler(options = {}) {
         hubspotTokenMask: maskSecret(secrets.hubspotToken), albiApiKeyMask: maskSecret(secrets.albiApiKey),
         albiWrapperKeyMask: maskSecret(wrapperKey),
         dryRunReviewReady: Boolean(completedDryRun), lastCompletedDryRun: toCompletedDryRun(completedDryRun),
+        canResumeLive: config.state !== 'live' && Boolean(completedDryRun) && Boolean(config.initial_start_locked_at) && await hasLiveHistory(),
         lastCompletedSampleDryRun: toCompletedDryRun(completedSampleDryRun),
         sampleReview, lastSampleDryRun: toSampleAttempt(latestSampleDryRun),
         ...(backfillRequestId ? { backfillRequestId } : {}),

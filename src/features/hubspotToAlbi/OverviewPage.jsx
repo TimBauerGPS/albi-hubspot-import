@@ -32,10 +32,19 @@ function dateOnly(value) {
   return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(new Date(value))
 }
 
-function StatusBadge({ status }) {
+// A live run that failed nothing but left activities waiting on records to resolve finished normally.
+function waitingOnly(run) {
+  return run?.status === 'partially_failed' && run?.mode !== 'dry_run' && !(Number(run?.totals?.failed) > 0)
+}
+function runStatusLabel(run) {
+  return waitingOnly(run) ? 'Finished, some waiting' : words(run?.status)
+}
+
+function StatusBadge({ status, run }) {
+  const waiting = waitingOnly(run)
   return (
-    <span className={`inline-flex rounded-md px-2 py-1 text-xs font-semibold capitalize ring-1 ring-inset ${statusTone[status] ?? statusTone.cancelled}`}>
-      {words(status)}
+    <span className={`inline-flex rounded-md px-2 py-1 text-xs font-semibold ring-1 ring-inset ${waiting ? statusTone.completed : `capitalize ${statusTone[status] ?? statusTone.cancelled}`}`}>
+      {waiting ? 'Finished, some waiting' : words(status)}
     </span>
   )
 }
@@ -367,10 +376,10 @@ export default function OverviewPage() {
             ['Activities synced through', summary.syncedThrough ? dateOnly(summary.syncedThrough) : 'Not yet',
               behind ? 'Behind: the nightly sync catches up on its own' : 'HubSpot activities up to this date are in Albi or waiting below', behind],
             ['Last nightly sync', summary.lastNightlyRun ? dateTime(summary.lastNightlyRun.finished_at || summary.lastNightlyRun.started_at || summary.lastNightlyRun.created_at) : 'Not yet',
-              summary.lastNightlyRun ? words(summary.lastNightlyRun.status) : 'Runs every night after 2 AM Pacific'],
+              summary.lastNightlyRun ? runStatusLabel(summary.lastNightlyRun) : 'Runs every night after 2 AM Pacific'],
             ['To resolve', summary.unresolvedConflictCount ?? 0,
               summary.waitingActivityCount > 0 ? `${summary.waitingActivityCount} activities are sent once these are resolved` : 'Nothing is waiting on you', false, true],
-            ['Recent status', recentRun ? words(recentRun.status) : 'No runs yet', lastSuccess ? `Last finished ${dateTime(lastSuccess.finished_at)}` : null],
+            ['Recent status', recentRun ? runStatusLabel(recentRun) : 'No runs yet', lastSuccess ? `Last finished ${dateTime(lastSuccess.finished_at)}` : null],
           ] : [
             ['Recent status', recentRun ? words(recentRun.status) : 'No runs yet'],
             ['Last successful sync', lastSuccess ? dateTime(lastSuccess.finished_at) : 'Not yet'],
@@ -407,7 +416,7 @@ export default function OverviewPage() {
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                   <div>
                     <div className="flex flex-wrap items-center gap-2">
-                      <StatusBadge status={item.status} />
+                      <StatusBadge status={item.status} run={item} />
                       <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">{item.sampleLimitPerType ? 'Sample dry run' : item.mode === 'dry_run' ? 'Full dry run' : 'Live'} · {words(item.trigger)}</span>
                     </div>
                     <p className="mt-2 text-sm font-medium text-gray-900">{dateTime(item.started_at || item.created_at)}</p>

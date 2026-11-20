@@ -201,6 +201,7 @@ export default function SettingsPage() {
       : !connectionReady ? 'Run the connection check.'
         : !dateReady ? 'Save the Pacific start date.'
           : !mappingsReady ? 'Confirm all seven required mappings.'
+            : settings?.canResumeLive ? 'Resume live sync.'
             : dryRunReady ? !live ? 'Confirm live activation.' : 'Monitor sync operations on Overview.'
               : !sample ? 'Queue and review a sample dry run.'
                 : sample.reviewCapable && sample.needsReview > 0 ? 'Open Sample Review, correct records in HubSpot or Albi, and individually recheck them.'
@@ -276,6 +277,11 @@ export default function SettingsPage() {
   async function activateLive() {
     await perform('activate', signal => saveH2ASettings(session, companyId, { action: 'activate_live' }, { signal }),
       'Live sync activated. The selected initial date remains fixed.')
+  }
+
+  async function resumeLive() {
+    await perform('resume', signal => saveH2ASettings(session, companyId, { action: 'resume_live' }, { signal }),
+      'Live sync is back on. The next sync runs tonight after 2 AM Pacific, or use Run now on Overview.')
   }
 
   async function disableLive() {
@@ -488,6 +494,16 @@ export default function SettingsPage() {
               <button type="button" onClick={disableLive} disabled={!isAdmin || busy} className={buttonSecondary}>
                 {busyAction === 'disable' ? 'Disabling…' : 'Disable live sync'}
               </button>
+            </div>
+            {!isAdmin && <p className="mt-2 text-xs text-gray-500">{disabledReason}</p>}
+          </SetupCard>
+        ) : settings?.canResumeLive ? (
+          <SetupCard number="05" title="Live sync is off" description="This company has already synced live. Once the connection check and mappings above are green, turn it back on. No new dry run is needed.">
+            <div className="mt-5 flex flex-wrap items-center gap-3">
+              <button type="button" onClick={resumeLive} disabled={!isAdmin || busy || !connectionReady || !mappingsReady} className={buttonPrimary}>
+                {busyAction === 'resume' ? 'Turning on…' : 'Resume live sync'}
+              </button>
+              {(!connectionReady || !mappingsReady) && <p className="text-xs text-amber-800">{!connectionReady ? 'Run the connection check first.' : 'Choose and confirm all required mappings first.'}</p>}
             </div>
             {!isAdmin && <p className="mt-2 text-xs text-gray-500">{disabledReason}</p>}
           </SetupCard>
