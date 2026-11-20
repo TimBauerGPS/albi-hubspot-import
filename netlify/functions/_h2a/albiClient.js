@@ -400,8 +400,11 @@ export class AlbiClient {
     try {
       const flags = isRecord(record) ? Object.fromEntries(Object.entries(record).filter(([key, value]) => /delet|merg|activ|archiv|status|state|hidden|enabled|removed/i.test(key) &&
         (value === null || ['boolean', 'number'].includes(typeof value) || typeof value === 'string' && value.length <= 40))) : {}
-      console.info('[albi-get-diagnostic]', JSON.stringify({ operation, id: recordId, envelopeStatus: isRecord(data) ? data.status ?? null : null,
-        keys: isRecord(record) ? Object.keys(record).sort() : typeof record, flags }))
+      const diagnostic = { operation, id: recordId, envelopeStatus: isRecord(data) ? data.status ?? null : null,
+        keys: isRecord(record) ? Object.keys(record).sort() : typeof record, flags }
+      console.info('[albi-get-diagnostic]', JSON.stringify(diagnostic))
+      // Saved for a day where it can be read back (the function logs are not readable from the CLI).
+      await this.#cache?.set(`diag:${operation}:${recordId}`, diagnostic, 24 * 60 * 60000)
     } catch { /* diagnostic only */ }
     return deletedRecord(record) ? null : normalizeRecord(record, fields, operation)
   }
