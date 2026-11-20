@@ -231,6 +231,28 @@ test('refresh keeps stored merge and blocked knowledge the capture lacks', async
   assert.deepEqual(db.tables.h2a_dry_run_reviews[0].triage_details, { quickKind: 'create' })
 })
 
+test('a sync pass leaves a queued record in the Outbox with its version unchanged', async () => {
+  const { db, deps } = fixture()
+  await captureLiveReview(deps, { ...base, conflictId: 'conflict-a', createReadiness: { ready: true } })
+  const row = db.tables.h2a_dry_run_reviews[0]
+  await deps.repository.setReviewTriage('company-1', row.id, { bucket: 'outbox', details: { outbox: 'queued' } })
+  const version = row.updated_at
+  // Same evidence, recomputed triage would say "quick": the Outbox keeps the row and its version.
+  await captureLiveReview(deps, { ...base, runId: 'run-2', conflictId: 'conflict-b', createReadiness: { ready: true } })
+  assert.equal(db.tables.h2a_dry_run_reviews[0].triage_bucket, 'outbox')
+  assert.deepEqual(db.tables.h2a_dry_run_reviews[0].triage_details, { outbox: 'queued' })
+  assert.equal(db.tables.h2a_dry_run_reviews[0].updated_at, version, 'a queued send is not refused as changed')
+})
+
+test('a triage-only refresh does not move the row version', async () => {
+  const { db, deps } = fixture()
+  await captureLiveReview(deps, { ...base, conflictId: 'conflict-a' })
+  const version = db.tables.h2a_dry_run_reviews[0].updated_at
+  await captureLiveReview(deps, { ...base, runId: 'run-2', conflictId: 'conflict-b', createReadiness: { ready: true } })
+  assert.equal(db.tables.h2a_dry_run_reviews[0].triage_bucket, 'quick')
+  assert.equal(db.tables.h2a_dry_run_reviews[0].updated_at, version)
+})
+
 const liveReviewId = '00000000-0000-4000-8000-0000000000aa'
 const closeActor = '00000000-0000-4000-8000-0000000000bb'
 

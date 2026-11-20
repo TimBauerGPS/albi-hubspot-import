@@ -520,17 +520,23 @@ export function createH2ARepository(supabase) {
           if (input.source_known === false && Object.keys(existing.source_snapshot ?? {}).some(key => key !== 'id')) {
             next.source_snapshot = existing.source_snapshot
           }
-          if (typeof input.triage_for === 'function') {
+          if (existing.triage_bucket === 'outbox') {
+            // The Outbox owns a queued record's triage until it finishes; a sync pass does not take it back.
+            next.triage_bucket = existing.triage_bucket
+            next.triage_details = existing.triage_details
+          } else if (typeof input.triage_for === 'function') {
             const triage = input.triage_for(existing)
             requireReviewValue(triage?.bucket, new Set(TRIAGE_BUCKETS), 'bucket')
             next.triage_bucket = triage.bucket
             next.triage_details = safeTriageDetails(triage.details ?? {})
           }
-          if (Object.keys(next).every(key => stableJson(existing[key]) === stableJson(next[key]))) {
-            return { id: existing.id, inserted: false }
-          }
+          const differs = key => stableJson(existing[key]) !== stableJson(next[key])
+          if (!Object.keys(next).some(differs)) return { id: existing.id, inserted: false }
+          // updated_at is the version queued actions and the page check against: only a change to the record's
+          // evidence moves it. A triage-only refresh would refuse every queued send as "changed".
+          const evidenceChanged = Object.keys(next).some(key => !['triage_bucket', 'triage_details'].includes(key) && differs(key))
           const refreshed = checked(await supabase.from('h2a_dry_run_reviews')
-            .update({ ...next, updated_at: new Date().toISOString() })
+            .update(evidenceChanged ? { ...next, updated_at: new Date().toISOString() } : next)
             .eq('company_id', companyId).eq('id', existing.id).eq('review_kind', 'live').eq('status', 'needs_review')
             .select(REVIEW_COLUMNS).maybeSingle())
           if (refreshed?.id) return { id: refreshed.id, inserted: false }
