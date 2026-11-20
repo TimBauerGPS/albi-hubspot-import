@@ -523,6 +523,22 @@ test('a record whose send was refused because HubSpot changed is rechecked once 
   ui.unmount()
 })
 
+test('a record already linked to Albi is rechecked once on opening, which closes it', async () => {
+  const linked = { forceCreateReadiness: { eligible: false, ready: false, blockedReason: 'source_already_mapped' } }
+  const ui = await mountWorkspace({
+    getH2ADryRunReview: (_s, _c, id) => Promise.resolve({ item: detailOf(id, id === 'review-1' ? linked : {}) }),
+    recheckH2ADryRunReview: (_s, _c, { reviewId }) => Promise.resolve({ item: detailOf(reviewId, { status: 'cleared', updatedAt: '2026-10-30T18:10:00.000Z' }) }),
+  })
+  await ui.flush()
+  const rechecks = () => ui.calls.filter(call => call.name === 'recheckH2ADryRunReview')
+  assert.equal(rechecks().length, 1)
+  assert.equal(rechecks()[0].args[2].reviewId, 'review-1')
+  assert.match(ui.text(), /already linked to Albi, so it was rechecked and closed/)
+  ui.queue().props.onSelect('review-2'); await ui.flush()
+  assert.equal(rechecks().length, 1, 'a record not linked is not rechecked')
+  ui.unmount()
+})
+
 test('undo cancels a deferred action before anything is written; unmount flushes the rest', async () => {
   const ui = await mountWorkspace()
   ui.record().props.onAccept(candidate, { emailMatch: false }); await ui.flush()

@@ -318,15 +318,17 @@ export default function ReviewWorkspace({
   const detail = selectedId && details[selectedId]?.id === selectedId ? details[selectedId] : null
 
   // A record whose last send was refused because it changed is rechecked once on opening, so its new values (and what
-  // changed) are shown instead of an error asking for a recheck.
+  // changed) are shown instead of an error asking for a recheck. A record already linked to Albi is rechecked once on
+  // opening too, which closes it, instead of asking the reviewer to recheck it.
   useEffect(() => {
     if (readOnly || !detail || busyId || bulk || recheckLock.current) return
     const refusal = staleRefusalToRecheck(detail)
-    if (!refusal) return
-    const key = `${tenantKey}:${detail.id}:${refusal.eventId}`
+    const linked = !refusal && [detail.createReadiness, detail.forceCreateReadiness].some(readiness => readiness?.blockedReason === 'source_already_mapped')
+    if (!refusal && !linked) return
+    const key = `${tenantKey}:${detail.id}:${refusal ? refusal.eventId : `linked:${detail.updatedAt}`}`
     if (autoRechecked.current.has(key)) return
     autoRechecked.current.add(key)
-    handleRecheck({ refusal })
+    handleRecheck(refusal ? { refusal } : { alreadyLinked: true })
   }, [detail?.id, detail?.updatedAt, busyId, Boolean(bulk), readOnly, tenantKey]) // eslint-disable-line react-hooks/exhaustive-deps
   const pendingSet = new Set(pending.map(entry => entry.id))
   const sendingSet = new Set(pending.filter(entry => entry.sending).map(entry => entry.id))
@@ -576,7 +578,7 @@ export default function ReviewWorkspace({
   }
 
   // `refusal` is set when this recheck follows a send refused because the record changed (see the effect below).
-  async function handleRecheck({ refusal = null } = {}) {
+  async function handleRecheck({ refusal = null, alreadyLinked = false } = {}) {
     if (readOnly) return
     if (!detail?.updatedAt || detail.id !== selectedId || recheckLock.current) return
     // Recheck owns a new generation so prior pages cannot restore stale progress. Keep the queue and cursor for a later pagination retry.
@@ -603,6 +605,10 @@ export default function ReviewWorkspace({
       if (refusal) {
         setChangedFields(all => ({ ...all, [reviewId]: refusal }))
         setNotice(`${refusal.check === 'target' ? 'Albi' : 'HubSpot'} changed after you reviewed this record, so it was rechecked with the new values. Review them and confirm again.`)
+      } else if (alreadyLinked) {
+        setNotice(result?.item?.status === 'needs_review'
+          ? 'This record is already linked to Albi. It was rechecked and still needs a look at the details below.'
+          : 'This record was already linked to Albi, so it was rechecked and closed.')
       } else setNotice('Recheck complete. The record and review progress are up to date.')
     } catch (cause) {
       if (!current() || cause?.name === 'AbortError') return
