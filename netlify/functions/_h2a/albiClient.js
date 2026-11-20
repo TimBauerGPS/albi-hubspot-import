@@ -106,11 +106,36 @@ const CONTACT_FIELDS = ['firstName', 'lastName', 'email', 'phoneNumber', 'mobile
 const ORGANIZATION_FIELDS = ['name', 'email', 'phoneNumber', 'organizationTypeIds', 'parentOrganizationId', 'address1', 'address2', 'city', 'state', 'zipcode', 'country', 'referralSourceID', 'relationshipStatusID']
 const ACTIVITY_FIELDS = ['contactId', 'organizationId', 'relationshipName', 'date', 'type', 'notes', 'source', 'sourceId']
 // Albi's record names mapped onto the domain names the sync logic compares (zipCode -> zipcode, and so on).
-// Nested shapes (address, organization, referralSource) are ignored: every value is also sent flat.
 const RECORD_ALIASES = { zipcode: 'zipCode', referralSourceID: 'referralSourceId', relationshipStatusID: 'relationshipStatusId', type: 'activityTypeName' }
+// The Public API returns these nested (a {id, name} reference, a list of them, or an address object), not flat.
+// Reading only flat names left every contact's organization and every address looking blank, so contacts were
+// reported under "a different organization" and the sync kept re-sending HubSpot addresses over Albi's.
+const REFERENCES = { organization: ['organizationId', 'organizationName'], parentOrganization: ['parentOrganizationId'],
+  referralSource: ['referralSourceID'], relationshipStatus: ['relationshipStatusID'] }
+const REFERENCE_LISTS = { contactTypes: 'contactTypeIds', organizationTypes: 'organizationTypeIds' }
+const NESTED_ADDRESS = { address1: 'address1', address2: 'address2', city: 'city', state: 'state', zipCode: 'zipcode', country: 'country' }
+const refId = ref => isRecord(ref) && (typeof ref.id === 'string' || Number.isSafeInteger(ref.id)) ? String(ref.id) : undefined
 function domainRecord(value) {
   if (!isRecord(value)) return value
   const result = { ...value }
+  for (const [nested, [idField, nameField]] of Object.entries(REFERENCES)) {
+    if (!(nested in value) || result[idField] !== undefined) continue
+    const ref = value[nested]
+    result[idField] = ref === null ? null : refId(ref)
+    if (nameField && result[nameField] === undefined) result[nameField] = ref === null ? null : typeof ref?.name === 'string' ? ref.name : undefined
+  }
+  for (const [nested, idsField] of Object.entries(REFERENCE_LISTS)) {
+    if (result[idsField] === undefined && Array.isArray(value[nested])) result[idsField] = value[nested].map(refId).filter(Boolean)
+  }
+  if ('address' in value) {
+    const address = isRecord(value.address) ? value.address : {}
+    for (const [provider, domain] of Object.entries(NESTED_ADDRESS)) {
+      if (result[domain] === undefined && result[provider] === undefined) {
+        const item = address[provider]
+        result[domain] = typeof item === 'string' ? item : null
+      }
+    }
+  }
   for (const [domain, provider] of Object.entries(RECORD_ALIASES)) if (result[domain] === undefined && value[provider] !== undefined) result[domain] = value[provider]
   return result
 }

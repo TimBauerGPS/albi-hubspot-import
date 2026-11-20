@@ -633,3 +633,29 @@ test('an Albi create refused as too busy is retried and succeeds', async () => {
   const c = new AlbiClient({ apiKey: 'k', fetch: f.fetch, sleep: async () => {} })
   assert.deepEqual(await c.createContact({ firstName: 'Costa', lastName: 'Costa', contactTypeIds: [12] }), { id: '55' })
 })
+
+test('Albi contacts and organizations keep their nested organization, types, referral source, status and address', async () => {
+  const contact = { id: '2877276', companyId: '1319', firstName: 'Rafael', lastName: 'Maciel', email: 'r@example.com', phoneNumber: '909-994-5686',
+    organization: { id: '711020', name: 'Western Rooter' }, parentOrganization: null, referralSource: { id: '29518', name: 'Contractor' },
+    relationshipStatus: { id: '3507', name: 'Active' }, contactTypes: [{ id: '38736', name: 'Unknown' }], jobTitle: null,
+    address: { address1: '1 Main St', address2: null, city: 'Ontario', state: 'CA', zipCode: '91761', country: null, latitude: null, longitude: null },
+    createdAt: '2026-10-01T00:00:00Z', updatedAt: null, isDeleted: false }
+  const organization = { id: '711020', companyId: '1319', name: 'Western Rooter', email: null, phoneNumber: '626-448-6455',
+    organizationTypes: [{ id: '38730', name: 'Contractor' }], parentOrganization: null, referralSource: null, relationshipStatus: null,
+    address: null, createdAt: '2026-10-01T00:00:00Z', isDeleted: false }
+  const f = transport([...discovery, { data: [contact], continuationToken: null, status: 1 }, { data: [organization], continuationToken: null, status: 1 }])
+  const c = new AlbiClient({ apiKey: 'k', fetch: f.fetch })
+  const [readContact] = (await c.listContacts({ pageSize: 1 })).records
+  assert.equal(readContact.organizationId, '711020')
+  assert.equal(readContact.organizationName, 'Western Rooter')
+  assert.equal(readContact.parentOrganizationId, null)
+  assert.deepEqual(readContact.contactTypeIds, ['38736'])
+  assert.equal(readContact.referralSourceID, '29518')
+  assert.equal(readContact.relationshipStatusID, '3507')
+  assert.deepEqual([readContact.address1, readContact.address2, readContact.city, readContact.state, readContact.zipcode, readContact.country],
+    ['1 Main St', null, 'Ontario', 'CA', '91761', null])
+  const [readOrganization] = (await c.listOrganizations({ pageSize: 1 })).records
+  assert.deepEqual(readOrganization.organizationTypeIds, ['38730'])
+  // No address object means every address field is known to be blank (not unknown).
+  assert.deepEqual([readOrganization.address1, readOrganization.city, readOrganization.zipcode], [null, null, null])
+})
