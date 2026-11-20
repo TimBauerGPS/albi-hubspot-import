@@ -1243,13 +1243,35 @@ export function createH2ARepository(supabase) {
       return { ...checked(await supabase.from('h2a_conflicts').insert({ ...conflict, company_id: companyId }).select('*').single()), inserted: true }
     },
     // Closes an activity's open activity_target conflicts once the activity is delivered to Albi.
+    // Activities Albi refused, queued to be sent again (after their cause is fixed in Albi or in the mappings): each
+    // refused delivery is made due now and its refusal gets a pending retry, which the hourly scheduler sends.
+    async retryRefusedActivities(companyId) {
+      if (typeof companyId !== 'string' || !companyId.trim()) throw new TypeError('Company ID is required')
+      const refused = checked(await supabase.from('h2a_conflicts').select('id, object_type, source_id')
+        .eq('company_id', companyId).eq('status', 'open').eq('reason', 'albi_rejected_activity').limit(1000)) ?? []
+      if (!refused.length) return { queued: 0 }
+      const now = new Date().toISOString()
+      for (const objectType of [...new Set(refused.map(row => row.object_type))]) {
+        const ids = refused.filter(row => row.object_type === objectType).map(row => row.source_id)
+        for (let start = 0; start < ids.length; start += 200) {
+          checked(await supabase.from('h2a_activity_deliveries').update({ next_attempt_at: now, updated_at: now })
+            .eq('company_id', companyId).eq('object_type', objectType).eq('state', 'failed').in('activity_id', ids.slice(start, start + 200)).select('id'))
+        }
+      }
+      checked(await supabase.from('h2a_conflict_resumes').upsert(refused.map(row => ({ company_id: companyId, conflict_id: row.id,
+        resolution_action: 'create_new', source_object_type: row.object_type, source_id: row.source_id,
+        activity_object_type: row.object_type, activity_id: row.source_id, status: 'pending', dispatched_at: null,
+        dispatch_owner_token: null, dispatch_lease_expires_at: null, worker_failed: false, last_dispatch_error_code: null,
+        updated_at: now })), { onConflict: 'company_id,conflict_id' }).select('id'))
+      return { queued: refused.length }
+    },
     async resolveActivityConflicts(companyId, { portalId, objectType, activityId, runId = null } = {}) {
       if (typeof companyId !== 'string' || !companyId.trim()) throw new TypeError('Company ID is required')
       const now = new Date().toISOString()
       const closed = checked(await supabase.from('h2a_conflicts')
         .update({ status: 'resolved', resolved_at: now, updated_at: now })
         .eq('company_id', companyId).eq('portal_id', portalId).eq('object_type', objectType).eq('source_id', activityId)
-        .eq('conflict_type', 'activity_target').eq('status', 'open').select('id')) ?? []
+        .in('conflict_type', ['activity_target', 'activity_delivery']).eq('status', 'open').select('id')) ?? []
       if (closed.length) {
         checked(await supabase.from('h2a_conflict_events').insert(closed.map(row => ({ company_id: companyId, conflict_id: row.id,
           event_type: 'resolved', sanitized_details: { resolvedBy: 'activity_delivered', runId }, created_at: now }))))

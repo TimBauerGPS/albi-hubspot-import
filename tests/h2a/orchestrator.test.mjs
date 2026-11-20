@@ -1752,3 +1752,21 @@ test('a record a reviewer links while a run is working is seen as linked, not re
   assert.ok(!deps.conflicts.some(row => row.reason === 'new_record_needs_review'))
   assert.equal(deps.liveReviews.length, 0)
 })
+
+test('a retried refusal that Albi refuses again is set aside again and its retry is not requeued', async () => {
+  const deps = exactAssociations(liveFixture(existingAlbi()))
+  const requeued = []
+  const intent = { id: 'resume-r', company_id: 'c1', status: 'pending', resolution_action: 'create_new',
+    source_object_type: 'calls', source_id: '50', activity_object_type: 'calls', activity_id: '50' }
+  deps.repository.getConflictResume = async () => intent
+  deps.repository.getResumeRun = async () => null
+  deps.repository.startRun = async () => ({ id: 'run-resume', status: 'running' })
+  deps.repository.totals = async () => ({ conflict: 1 })
+  deps.repository.isSkippedItem = async () => false
+  deps.repository.requeueConflictResume = async (_company, id) => { requeued.push(id); return true }
+  deps.hubspot.getActivity = async (type, id) => ({ id, objectType: type, occurredAt: '2026-10-02T12:00:00Z', properties: { hs_timestamp: '2026-10-02T12:00:00Z' } })
+  deps.albi.createActivity = async () => { throw new ApiError('validation', { operation: 'createActivity', status: 400, providerReason: 'The activity type couldn’t be found' }) }
+  await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'conflict_resolution', resumeId: 'resume-r' })
+  assert.ok(deps.conflicts.some(row => row.reason === 'albi_rejected_activity'))
+  assert.deepEqual(requeued, [])
+})

@@ -218,6 +218,11 @@ export function runH2ASync(session, companyId, mode, { signal, dryRunScope } = {
     body: { mode, ...(dryRunScope ? { dryRunScope } : {}) }, signal })
 }
 
+// Queues every activity Albi refused to be sent again (after its cause is fixed). Sent by the hourly scheduler.
+export function retryH2ARefusedActivities(session, companyId, { signal } = {}) {
+  return request(session, 'h2a-retry-refused', { method: 'POST', companyId, body: {}, signal })
+}
+
 export function getH2AOverview(session, companyId, { cursor, limit, signal } = {}) {
   return request(session, 'h2a-overview', { companyId, query: { cursor, limit }, signal })
 }

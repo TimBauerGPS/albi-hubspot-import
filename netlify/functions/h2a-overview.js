@@ -285,7 +285,7 @@ export function createOverviewRepository(supabase) {
       const counts = new Map()
       for (const row of rows) {
         const reason = typeof row?.proposed_changes?.albiReason === 'string' && row.proposed_changes.albiReason.trim()
-          ? row.proposed_changes.albiReason.trim() : 'Albi gave no reason'
+          ? row.proposed_changes.albiReason.trim() : 'Refused before reasons were recorded (retry to see the reason)'
         counts.set(reason, (counts.get(reason) ?? 0) + 1)
       }
       return { count: rows.length, reasons: [...counts].sort((a, b) => b[1] - a[1]).map(([reason, count]) => ({ reason, count })) }

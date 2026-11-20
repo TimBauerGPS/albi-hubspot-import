@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useOutletContext } from 'react-router-dom'
-import { getH2AOverview, runH2ASync } from '../../lib/hubspotToAlbi'
+import { getH2AOverview, retryH2ARefusedActivities, runH2ASync } from '../../lib/hubspotToAlbi'
 import { mergeOverviewRefresh, overviewPollingPauseNotice, presentRunTotals } from './operations.js'
 import { presentReviewBreakdown } from './reviewBreakdown.js'
 
@@ -227,6 +227,26 @@ export default function OverviewPage() {
     }
   }
 
+  const [retryingRefused, setRetryingRefused] = useState(false)
+  async function retryRefused() {
+    const controller = new AbortController()
+    mutationControllers.current.add(controller)
+    const startedFor = tenantKey
+    setRetryingRefused(true)
+    setActionError('')
+    setNotice('')
+    try {
+      const result = await retryH2ARefusedActivities(session, companyId, { signal: controller.signal })
+      if (tenantKeyRef.current !== startedFor) return
+      setNotice(`${result?.queued ?? 0} refused ${result?.queued === 1 ? 'activity is' : 'activities are'} queued to send again. They go out within the hour; any Albi refuses again come back here with its reason.`)
+    } catch (cause) {
+      if (cause?.name !== 'AbortError' && tenantKeyRef.current === startedFor) setActionError(cause.message)
+    } finally {
+      mutationControllers.current.delete(controller)
+      if (tenantKeyRef.current === startedFor) setRetryingRefused(false)
+    }
+  }
+
   async function refreshOverview() {
     const controller = new AbortController()
     mutationControllers.current.add(controller)
@@ -366,6 +386,9 @@ export default function OverviewPage() {
           <ul className="mt-1 list-disc pl-5 text-xs text-amber-900">
             {(summary.refusedActivityReasons ?? []).map(row => <li key={row.reason}>{row.reason} ({row.count})</li>)}
           </ul>
+          <p className="mt-2 text-xs text-amber-900">Fix the cause first (for a missing activity type, choose a new one in Settings), then send them again.</p>
+          {isAdmin && <button type="button" onClick={retryRefused} disabled={retryingRefused} className={`${buttonSecondary} mt-2`}>
+            {retryingRefused ? 'Queueing…' : 'Retry refused activities'}</button>}
         </section>
       )}
 

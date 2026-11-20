@@ -288,6 +288,7 @@ async function refreshMappings(deps, ctx) {
 
 async function processActivity(deps, ctx, activity, deadline) {
   await refreshMappings(deps, ctx)
+  ctx.activityRefused = false
   const { companyId, runId, portalId, mappings } = ctx
   const sourceId = idOf(activity)
   if (await deps.repository.isSkippedItem?.(companyId, portalId, activity.objectType, sourceId)) {
@@ -418,6 +419,7 @@ async function processActivity(deps, ctx, activity, deadline) {
         await conflict(deps, ctx, { objectType: activity.objectType, sourceId, type: 'activity_delivery', reason: 'albi_rejected_activity',
           proposedChanges: { albiTargetType: target.type, albiTargetId: target.id,
             ...(summary.includes(' | ') ? { albiReason: summary.slice(summary.indexOf(' | ') + 3, summary.indexOf(' | ') + 303) } : {}) } })
+        ctx.activityRefused = true
         continue
       }
       if (reservation.disposition !== 'reserved' || reservation.safeToCreate !== true) { allResolved = false; ctx.activityFailed = true; continue }
@@ -442,6 +444,7 @@ async function processActivity(deps, ctx, activity, deadline) {
         await conflict(deps, ctx, { objectType: activity.objectType, sourceId, type: 'activity_delivery', reason: 'albi_rejected_activity',
           proposedChanges: { albiTargetType: target.type, albiTargetId: target.id,
             ...(typeof error?.providerReason === 'string' ? { albiReason: error.providerReason.slice(0, 300) } : {}) } })
+        ctx.activityRefused = true
       } else if (!['delivered', 'reconciled'].includes(completed.disposition)) ctx.activityFailed = true
       await recordOnce(deps.repository, companyId, runId, { portal_id: portalId, object_type: activity.objectType,
         source_id: sourceId, albi_target_type: target.type, albi_target_id: target.id,
@@ -492,7 +495,13 @@ async function drainConflictResumes(deps, ctx, { exclude = null, deadline }) {
       else {
         const activity = await deps.hubspot.getActivity(claimed.activity_object_type, claimed.activity_id)
         if (!activity || String(activity.id) !== claimed.activity_id) done = true
-        else { ctx.activity = activity; done = await processActivity(deps, ctx, activity, deadline) }
+        else {
+          ctx.activity = activity
+          ctx.activityFailed = false
+          done = await processActivity(deps, ctx, activity, deadline)
+          // A retried refusal that Albi refused again is set aside again: retrying it every hour would not help.
+          if (!done && ctx.activityRefused === true && ctx.activityFailed !== true) done = true
+        }
       }
     } catch { done = false }
     try { await repo.finishConflictResume(ctx.companyId, next.id, owner, done, done ? null : 'dispatch_not_accepted') } catch { /* The lease expires for a retry. */ }
@@ -551,10 +560,12 @@ export async function runCompanySync(deps, input = {}) {
         const activity = await deps.hubspot.getActivity(intent.activity_object_type, intent.activity_id)
         if (!activity || String(activity.id) !== intent.activity_id) throw new Error('Targeted HubSpot activity is unavailable')
         ctx.activity = activity
+        ctx.activityFailed = false
         await processActivity(deps, ctx, activity, deadline)
       }
       const targeted = await repo.totals(companyId, run.id, mode)
-      if (targeted.failed || targeted.conflict) await repo.requeueConflictResume?.(companyId, input.resumeId)
+      const refusedAgain = ctx.activityRefused === true && ctx.activityFailed !== true
+      if ((targeted.failed || targeted.conflict) && !refusedAgain) await repo.requeueConflictResume?.(companyId, input.resumeId)
       // Only one run holds the company, so other releases dispatched alongside this one were refused as already
       // running. Deliver them here, with the Albi read already made, rather than one per hourly attempt.
       await drainConflictResumes(deps, ctx, { exclude: input.resumeId, deadline })
