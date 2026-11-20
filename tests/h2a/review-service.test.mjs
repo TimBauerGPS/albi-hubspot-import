@@ -615,3 +615,28 @@ test('a merged-away row waits for a survivor with an open review, and closes as 
   assert.deepEqual(alone.store.state.closeCalls.map(call => [call.outcome, call.resolutionAction]), [['source_missing', 'skip']])
   assert.equal(result.review.status, 'no_longer_in_scope')
 })
+
+test('a single recheck drops an offered Albi match that Albi no longer has (merged away)', async () => {
+  // Two Albi contacts with the same email: the copy still lists 21, which was merged into 20 in Albi.
+  const twins = [{ id: '20', firstName: 'A', lastName: 'Person', email: 'a@example.com' }, { id: '21', firstName: 'A', lastName: 'Person', email: 'a@example.com' }]
+  const f = fixture({ contacts: twins })
+  f.row.candidate_snapshots = twins
+  const asked = []
+  f.deps.albiRead.getContact = async id => { asked.push(id); return id === '21' ? null : twins[0] }
+  await recheckDryRunReview(f.deps, input)
+  assert.deepEqual(asked, ['20', '21'])
+  assert.equal(f.applied[0][1].outcome, 'safe_to_link', 'one match left: it links')
+
+  // Without the check both twins stay, and the record still needs a choice.
+  const before = fixture({ contacts: twins })
+  before.row.candidate_snapshots = twins
+  await recheckDryRunReview(before.deps, input)
+  assert.notEqual(before.applied[0][1].outcome, 'safe_to_link')
+
+  // A batch recheck uses its snapshot and asks Albi nothing per record.
+  const batch = fixture({ contacts: twins })
+  batch.row.candidate_snapshots = twins
+  batch.deps.albiSnapshot = { contacts: twins }
+  batch.deps.albiRead.getContact = async () => { throw new Error('batch rechecks must not read by id') }
+  await recheckDryRunReview(batch.deps, input)
+})

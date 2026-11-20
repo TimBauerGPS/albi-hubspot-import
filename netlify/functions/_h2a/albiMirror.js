@@ -1,8 +1,8 @@
 // Albi contacts and organizations served from a per-company copy (supabase/h2a-albi-mirror.sql) instead of a walk
 // of Albi's whole list. A read first asks Albi for what changed since the last read (changedSince, with a few
-// minutes' overlap), and Albi's own reply to a create or update goes straight into the copy. Albi reports no deletes,
-// so a weekly job (h2a-albi-copy-weekly) rebuilds the copy from a full walk; an update refused as not found also
-// removes that record. Callers keep paging with numbered cursors; pages come from the copy.
+// minutes' overlap, deletions included), and Albi's own reply to a create or update goes straight into the copy.
+// A deleted record (a merge in Albi deletes the record merged away) leaves the copy on the next read, as does one
+// a by-id read or an update finds gone. A weekly job (h2a-albi-copy-weekly) still rebuilds the copy from a full walk. Callers keep paging with numbered cursors; pages come from the copy.
 // If the copy cannot be read or written (for example before the SQL is applied), reads go straight to Albi.
 // A read only does the full walk itself when there is no copy, or the weekly job has been missing for this long.
 export const MIRROR_FULL_MS = 10 * 24 * 60 * 60000
@@ -14,6 +14,7 @@ export const MIRROR_MEMO_MS = 15000
 const PAGE = 100
 const KINDS = Object.freeze({ contacts: 'listContacts', organizations: 'listOrganizations' })
 const UPDATES = Object.freeze({ updateContact: 'contacts', updateOrganization: 'organizations', associateContact: 'contacts' })
+const GETS = Object.freeze({ getContact: 'contacts', getOrganization: 'organizations' })
 const merged = (records, record) => [...records.filter(item => item.id !== record.id), record]
 
 async function walk(read, filters = {}) {
@@ -67,8 +68,10 @@ export function withAlbiMirror(albi, { store, companyId, now = Date.now } = {}) 
       return records
     }
     const changedSince = new Date(syncedAt - MIRROR_OVERLAP_MS).toISOString()
-    const changed = await walk(read, { changedSince })
-    await store.upsertAlbiMirror(companyId, kind, changed, startedAt)
+    const changed = await walk(read, { changedSince, includeDeleted: true })
+    const deletedIds = changed.filter(record => record.deleted === true).map(record => String(record.id))
+    if (deletedIds.length) await store.deleteAlbiMirrorRecords(companyId, kind, deletedIds)
+    await store.upsertAlbiMirror(companyId, kind, changed.filter(record => record.deleted !== true), startedAt)
     return store.readAlbiMirror(companyId, kind)
   }
   const snapshot = async kind => {
@@ -107,6 +110,17 @@ export function withAlbiMirror(albi, { store, companyId, now = Date.now } = {}) 
       if (property === 'rebuildAlbiCopy') return async () => ({ contacts: await rebuild('contacts'), organizations: await rebuild('organizations') })
       const value = Reflect.get(target, property, target)
       if (typeof value !== 'function') return value
+      if (GETS[property]) {
+        // Albi answering that a record is gone (or deleted) removes it from the copy at once.
+        return async (...args) => {
+          const record = await value.apply(target, args)
+          if (record === null && args[0] != null) {
+            const removed = await store.deleteAlbiMirrorRecords?.(companyId, GETS[property], [String(args[0])]).then(() => true, () => false)
+            if (removed) memo.clear()
+          }
+          return record
+        }
+      }
       if (typeof property === 'string' && /^(create|update|associate)/.test(property)) {
         return async (...args) => {
           const before = stored

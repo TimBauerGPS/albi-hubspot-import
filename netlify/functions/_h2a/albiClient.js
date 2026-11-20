@@ -15,7 +15,7 @@ const CAPABILITIES = Object.freeze({
 })
 // Reference lookups accept Contacts.View or Organizations.View; Contacts.View is the one named on a refusal.
 const SCOPES = Object.freeze({
-  listContacts: ALBI_SCOPES.contactsView, createContact: ALBI_SCOPES.contactsCreate,
+  listContacts: ALBI_SCOPES.contactsView, getContact: ALBI_SCOPES.contactsView, createContact: ALBI_SCOPES.contactsCreate,
   listOrganizations: ALBI_SCOPES.organizationsView, createOrganization: ALBI_SCOPES.organizationsCreate, getOrganization: ALBI_SCOPES.organizationsView,
   listActivities: ALBI_SCOPES.activitiesView, createActivity: ALBI_SCOPES.activitiesEdit,
   updateContact: ALBI_SCOPES.contactsEdit, updateOrganization: ALBI_SCOPES.organizationsEdit,
@@ -161,6 +161,8 @@ function normalizeRecord(raw, fields, operation) {
   }
   return result
 }
+// Albi keeps a deleted record (a merge deletes the record merged away) and marks it isDeleted.
+const deletedRecord = value => isRecord(value) && value.isDeleted === true
 function optionList(data) {
   if (!Array.isArray(data)) malformed('listOptions')
   const seen = new Set()
@@ -181,7 +183,8 @@ function listEnvelope(value, expectedPageSize, operation) {
   return { records: value.data, token: token || null }
 }
 function listArgs(args, operation) {
-  if (!isRecord(args) || Object.keys(args).some(key => !['cursor', 'pageSize', 'changedSince'].includes(key))) invalid(operation)
+  if (!isRecord(args) || Object.keys(args).some(key => !['cursor', 'pageSize', 'changedSince', 'includeDeleted'].includes(key))) invalid(operation)
+  if (args.includeDeleted !== undefined && args.includeDeleted !== true) invalid(operation)
   if (args.changedSince === undefined) return args
   if (typeof args.changedSince !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/.test(args.changedSince) ||
     !Number.isFinite(Date.parse(args.changedSince))) invalid(operation)
@@ -368,23 +371,32 @@ export class AlbiClient {
     if (!/^\d+$/.test(String(cursor)) || !Number.isSafeInteger(Number(cursor)) || Number(cursor) < 1 ||
       !Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) invalid('list')
     const page = await this.#page(resource, operation, filters, pageSize, Number(cursor))
-    return { records: page.records.map(value => normalizeRecord(value, fields, operation)), cursor: page.cursor }
+    // Only a read that asked for deletions (includeDeleted) returns them, each marked deleted: true.
+    const records = page.records.filter(value => filters.includeDeleted === true || !deletedRecord(value))
+    return { records: records.map(value => ({ ...normalizeRecord(value, fields, operation), ...(deletedRecord(value) ? { deleted: true } : {}) })), cursor: page.cursor }
   }
   // changedSince (a UTC timestamp) narrows a read to records created or updated since then.
   async listContacts(args = {}) {
     return this.#list('contacts', CONTACT_FIELDS, 'listContacts', listArgs(args, 'listContacts'))
   }
+  // One contact by id, or null when Albi has none with that id (or it was deleted, as a merge does).
+  async getContact(contactId) {
+    return this.#getOne('contacts', id(contactId, 'getContact'), 'getContact', CONTACT_FIELDS)
+  }
   // One organization by id (with its referral source), or null when Albi has none with that id.
   async getOrganization(organizationId) {
-    const organization = id(organizationId, 'getOrganization')
+    return this.#getOne('organizations', id(organizationId, 'getOrganization'), 'getOrganization', ORGANIZATION_FIELDS)
+  }
+  async #getOne(resource, recordId, operation, fields) {
     let data
     try {
-      data = await this.#scopedRequest(`${API_ROOT}/organizations/${encodeURIComponent(organization)}`, { operation: 'getOrganization' }, SCOPES.getOrganization)
+      data = await this.#scopedRequest(`${API_ROOT}/${resource}/${encodeURIComponent(recordId)}`, { operation }, SCOPES[operation])
     } catch (error) {
       if (error instanceof ApiError && error.status === 404) return null
       throw error
     }
-    return normalizeRecord(isRecord(data) && isRecord(data.data) ? data.data : data, ORGANIZATION_FIELDS, 'getOrganization')
+    const record = isRecord(data) && isRecord(data.data) ? data.data : data
+    return deletedRecord(record) ? null : normalizeRecord(record, fields, operation)
   }
   async listOrganizations(args = {}) {
     return this.#list('organizations', ORGANIZATION_FIELDS, 'listOrganizations', listArgs(args, 'listOrganizations'))

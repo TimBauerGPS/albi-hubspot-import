@@ -43,7 +43,8 @@ export function readOnlyH2ACapabilities({ hubspot, albi }) {
     albiRead: Object.freeze({ listContacts: albi.listContacts.bind(albi), listOrganizations: albi.listOrganizations.bind(albi),
       ...(typeof albi.listReferralSources === 'function' ? { listReferralSources: albi.listReferralSources.bind(albi) } : {}),
       ...(typeof albi.listCreateOptions === 'function' ? { listCreateOptions: albi.listCreateOptions.bind(albi) } : {}),
-      ...(typeof albi.getOrganization === 'function' ? { getOrganization: albi.getOrganization.bind(albi) } : {}) }),
+      ...(typeof albi.getOrganization === 'function' ? { getOrganization: albi.getOrganization.bind(albi) } : {}),
+      ...(typeof albi.getContact === 'function' ? { getContact: albi.getContact.bind(albi) } : {}) }),
   }
 }
 

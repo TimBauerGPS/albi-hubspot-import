@@ -123,6 +123,20 @@ function albiRecords(deps, albi, kind, deadline) {
   return listAll(deps, kind === 'contacts' ? args => albi.listContacts(args) : args => albi.listOrganizations(args), deadline)
 }
 
+// A single recheck asks Albi for each record it last offered as a match. One Albi no longer has (a merge in Albi
+// deletes the record merged away, which the copy may not know yet) is dropped, and the by-id read removes it from
+// the copy. Batch rechecks skip this: their Albi snapshot already drops deleted records.
+export const RECHECK_VERIFY_MAX = 5
+async function withoutGoneCandidates(deps, albi, row, records, deadline) {
+  const get = row.object_type === 'contacts' ? albi?.getContact : albi?.getOrganization
+  if (deps.albiSnapshot || typeof get !== 'function' || !Array.isArray(records)) return records
+  const offered = new Set((Array.isArray(row.candidate_snapshots) ? row.candidate_snapshots : []).map(item => item?.id).filter(id => typeof id === 'string'))
+  const ids = records.map(record => record?.id).filter(id => offered.has(id)).slice(0, RECHECK_VERIFY_MAX)
+  const gone = new Set()
+  for (const id of ids) if (await read(deps, () => get.call(albi, id), deadline) === null) gone.add(id)
+  return gone.size ? records.filter(record => !gone.has(record?.id)) : records
+}
+
 function exactSource(records, sourceId) {
   if (!Array.isArray(records)) malformed('review')
   if (records.length === 0) return null
@@ -224,7 +238,8 @@ async function evaluateReviewRow(deps, { companyId, reviewId, actorId, row, conf
       if (row.object_type === 'contacts' && typeof resolutionRepository.getContactOrganizationChoice === 'function') {
         organizationChoice = await bounded(deps, () => resolutionRepository.getContactOrganizationChoice(companyId, row.portal_id, row.source_id), deadline)
       }
-      const candidates = await albiRecords(deps, albi, row.object_type === 'contacts' ? 'contacts' : 'organizations', deadline)
+      const candidates = await withoutGoneCandidates(deps, albi, row,
+        await albiRecords(deps, albi, row.object_type === 'contacts' ? 'contacts' : 'organizations', deadline), deadline)
       const mappings = await bounded(deps, () => repository.getMappings(companyId), deadline)
       if (!mappings || !['contacts', 'organizations', 'options'].every(key => Array.isArray(mappings[key]))) malformed('review')
       if (row.object_type === 'companies') {

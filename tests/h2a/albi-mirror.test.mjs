@@ -105,3 +105,32 @@ test('the Albi client sends changedSince on every page of a walk and refuses a m
     [['2026-11-03T09:55:00.000Z', null], ['2026-11-03T09:55:00.000Z', 'next']])
   await assert.rejects(client.listContacts({ changedSince: 'yesterday' }), { category: 'validation' })
 })
+
+test('a changed-since read asks for deletions and drops records Albi deleted (a merge)', async () => {
+  let clock = Date.parse('2026-11-03T10:00:00Z')
+  const store = memoryStore()
+  store.deleteAlbiMirrorRecords = async (company, kind, ids) => {
+    store.calls.push(['delete', ids])
+    for (const id of ids) store.rows.get(`${company}:${kind}`)?.delete(id)
+  }
+  const albi = fakeAlbi(args => args.changedSince ? [contact('2', { deleted: true }), contact('3')] : [contact('1'), contact('2')])
+  const mirrored = withAlbiMirror(albi, { store, companyId: 'c1', now: () => clock })
+  await mirrored.listContacts({ pageSize: 100 })
+  clock += MIRROR_MEMO_MS + 60000
+  const next = await mirrored.listContacts({ pageSize: 100 })
+  assert.equal(albi.reads.at(-1).includeDeleted, true)
+  assert.deepEqual(next.records.map(record => record.id), ['1', '3'])
+  assert.deepEqual(store.calls.find(call => call[0] === 'delete'), ['delete', ['2']])
+})
+
+test('a by-id read that finds the record gone removes it from the copy', async () => {
+  const clock = Date.parse('2026-11-03T10:00:00Z')
+  const store = memoryStore()
+  store.deleteAlbiMirrorRecords = async (company, kind, ids) => { for (const id of ids) store.rows.get(`${company}:${kind}`)?.delete(id) }
+  const albi = { ...fakeAlbi([contact('1'), contact('2')]), getContact: async id => id === '2' ? null : contact(id) }
+  const mirrored = withAlbiMirror(albi, { store, companyId: 'c1', now: () => clock })
+  await mirrored.listContacts({ pageSize: 100 })
+  assert.equal(await mirrored.getContact('2'), null)
+  assert.deepEqual(await mirrored.getContact('1'), contact('1'))
+  assert.deepEqual([...store.rows.get('c1:contacts').keys()], ['1'])
+})

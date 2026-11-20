@@ -1181,6 +1181,12 @@ export function createH2ARepository(supabase) {
       checked(await supabase.from('h2a_albi_mirror').upsert({ company_id: companyId, object_type: objectType, albi_id: String(record.id), record, seen_at: seenAt },
         { onConflict: 'company_id,object_type,albi_id' }))
     },
+    async deleteAlbiMirrorRecords(companyId, objectType, albiIds) {
+      requireReviewIdentity(companyId)
+      for (let start = 0; start < albiIds.length; start += 200) {
+        checked(await supabase.from('h2a_albi_mirror').delete().eq('company_id', companyId).eq('object_type', objectType).in('albi_id', albiIds.slice(start, start + 200)))
+      }
+    },
     async deleteAlbiMirrorRecord(companyId, objectType, albiId) {
       requireReviewIdentity(companyId)
       checked(await supabase.from('h2a_albi_mirror').delete().eq('company_id', companyId).eq('object_type', objectType).eq('albi_id', albiId))

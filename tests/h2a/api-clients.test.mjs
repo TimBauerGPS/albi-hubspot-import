@@ -609,6 +609,31 @@ test('one Albi organization is read by id (no company lookup) with its referral 
   assert.equal(await new AlbiClient({ apiKey: 'k', fetch: missing.fetch }).getOrganization('1'), null)
 })
 
+test('Albi contacts read by id; a missing or deleted (merged-away) record reads as null', async () => {
+  const f = transport([{ status: 1, data: { id: 2404837, firstName: 'Dennis', lastName: 'Alvarez' } }])
+  const contact = await new AlbiClient({ apiKey: 'k', fetch: f.fetch }).getContact('2404837')
+  assert.deepEqual([contact.id, contact.lastName], ['2404837', 'Alvarez'])
+  assert.match(f.calls.at(-1).url.pathname, /\/api\/v1\/contacts\/2404837$/)
+  const missing = transport([{ statusCode: 404, body: { data: null, status: 10 } }])
+  assert.equal(await new AlbiClient({ apiKey: 'k', fetch: missing.fetch }).getContact('1'), null)
+  const deleted = transport([{ status: 1, data: { id: 2404836, firstName: 'Dennis', lastName: 'Alvarez', isDeleted: true } }])
+  assert.equal(await new AlbiClient({ apiKey: 'k', fetch: deleted.fetch }).getContact('2404836'), null)
+  const deletedOrg = transport([{ status: 1, data: { id: 5, name: 'Gone', isDeleted: true } }])
+  assert.equal(await new AlbiClient({ apiKey: 'k', fetch: deletedOrg.fetch }).getOrganization('5'), null)
+})
+
+test('a list read can ask for deletions; only then are deleted records returned, marked deleted', async () => {
+  const rows = { data: [{ ...al.contacts.data[0], id: 1 }, { ...al.contacts.data[0], id: 2, isDeleted: true }], continuationToken: null, status: 1 }
+  const f = transport([...discovery, structuredClone(rows), structuredClone(rows)])
+  const c = new AlbiClient({ apiKey: 'k', fetch: f.fetch })
+  const plain = await c.listContacts({ pageSize: 25, changedSince: '2026-11-20T17:00:00Z' })
+  assert.deepEqual(plain.records.map(record => [record.id, record.deleted ?? false]), [['1', false]])
+  const withDeleted = await c.listContacts({ pageSize: 25, changedSince: '2026-11-20T17:00:00Z', includeDeleted: true })
+  assert.deepEqual(withDeleted.records.map(record => [record.id, record.deleted ?? false]), [['1', false], ['2', true]])
+  assert.equal(f.calls.at(-1).url.searchParams.get('includeDeleted'), 'true')
+  await assert.rejects(c.listContacts({ includeDeleted: 'yes' }))
+})
+
 test('HubSpot owners carry their email, for matching the sales team', async () => {
   const f = transport([{ results: [{ id: '42', firstName: 'Victoria', lastName: 'Dunn', email: 'Victoria@Allied.test' }, { id: '43', firstName: 'A', lastName: 'B' }] }])
   const owners = await new HubSpotClient({ token: 'token', fetch: f.fetch }).listOwners()
