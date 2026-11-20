@@ -114,7 +114,9 @@ export function buildAlbiActivity(input = {}) {
   const owner = plainTextExcerpt(input.ownerName, 300)
   const subject = plainTextExcerpt(input.subject ?? input.title, 300)
   const outcome = plainTextExcerpt(input.outcome, 300)
-  if (owner) lines.push(`Owner: ${owner}`)
+  // Albi records every API-created activity under the key owner's name, so the HubSpot owner is tagged in the text
+  // in one fixed, searchable form for reporting. Always present: Unknown when HubSpot names no owner.
+  lines.push(`{{Owner: ${owner ? owner.replace(/[{}]/g, '') : 'Unknown'}}}`)
   if (subject) lines.push(`Subject: ${subject}`)
   if (outcome) lines.push(`Outcome: ${outcome}`)
   if (excerpt) lines.push(excerpt)

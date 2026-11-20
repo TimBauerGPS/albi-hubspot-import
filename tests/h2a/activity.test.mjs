@@ -100,3 +100,10 @@ test('emails require explicit direct CRM engagement evidence with an allowed dir
   assert.doesNotThrow(() => buildAlbiActivity({ ...base,
     emailEvidence: { source: 'hubspot_crm_engagement', objectType: 'emails', direction: 'EMAIL' } }))
 })
+
+test('every activity is tagged with its HubSpot owner in one searchable form, Unknown when none', () => {
+  const base = { objectType: 'calls', activityId: '50', occurredAt: '2026-10-02T12:00:00Z', activityTypeId: '7', target: { type: 'contact', id: '9' } }
+  assert.equal(buildAlbiActivity({ ...base, ownerName: 'Ali Brown' }).notes.split('\n')[0], '{{Owner: Ali Brown}}')
+  assert.equal(buildAlbiActivity({ ...base, ownerName: null }).notes.split('\n')[0], '{{Owner: Unknown}}')
+  assert.equal(buildAlbiActivity({ ...base, ownerName: 'Al {x} Brown' }).notes.split('\n')[0], '{{Owner: Al x Brown}}')
+})

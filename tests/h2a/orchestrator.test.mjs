@@ -1129,7 +1129,7 @@ test('activity payload includes a known HubSpot owner name', async () => {
   let payload
   deps.albi.createActivity = async value => { payload = value; return { id: '300' } }
   await runCompanySync(deps, { companyId: 'c1', mode: 'live', trigger: 'manual' })
-  assert.match(payload.notes, /Owner: Ali Brown/)
+  assert.match(payload.notes, /^\{\{Owner: Ali Brown\}\}$/m)
 })
 
 function storedReviewRepository(deps) {
