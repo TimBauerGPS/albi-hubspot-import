@@ -583,6 +583,40 @@ test('a recheck clears a contact whose company HubSpot merged from a record alre
   assert.equal(f.row.status, 'cleared')
 })
 
+function splitMerge(f) {
+  f.associations = ['900']
+  f.mappings.organizations.push({ portal_id: '123', hubspot_id: '77', albi_organization_id: '88' }, { portal_id: '123', hubspot_id: '78', albi_organization_id: '89' })
+  const company = { name: 'Acme', hs_merged_object_ids: '77;78' }
+  f.deps.hubspotRead.getCompanies = async ids => [{ id: ids[0], properties: company }]
+  f.deps.hubspotRead.getCompany = async id => ({ id, properties: company })
+  // 88 was merged away in Albi; 89 is the organization that remains.
+  f.deps.albiRead.getOrganization = async id => id === '88' ? null : { id }
+  f.organizations = [{ id: '89', name: 'Acme Holdings LLC', organizationTypeIds: ['12'] }]
+}
+
+function heldContact(f) {
+  f.contacts = []; f.row.reason = 'organization_unresolved'; f.row.conflict_type = 'association'; f.row.candidate_snapshots = []
+  f.mappings.options = [{ mapping_kind: 'default_contact_type', source_key: 'default', albi_id: '12', confirmed: true },
+    { mapping_kind: 'default_organization_type', source_key: 'default', albi_id: '12', confirmed: true }]
+}
+
+test('a recheck clears a contact whose merged company has one organization left in Albi', async () => {
+  const f = fixture()
+  heldContact(f); splitMerge(f)
+  await recheckDryRunReview(f.deps, input)
+  assert.equal(f.row.status, 'cleared')
+})
+
+test('a recheck does not clear a contact to create behind an organization Albi no longer has', async () => {
+  const f = fixture()
+  heldContact(f)
+  f.associations = ['77']
+  f.mappings.organizations = [{ portal_id: '123', hubspot_id: '77', albi_organization_id: '88' }]
+  f.deps.albiRead.getOrganization = async () => null
+  await recheckDryRunReview(f.deps, input)
+  assert.equal(f.row.status, 'needs_review')
+})
+
 test('a contact with several HubSpot organizations uses the first (primary) one', async () => {
   const f = fixture()
   f.contacts = []; f.row.reason = 'multiple_associated_organizations'; f.row.conflict_type = 'association'; f.row.candidate_snapshots = []
@@ -1276,6 +1310,34 @@ test('creating a contact behind a company HubSpot merged from a mapped record us
   assert.equal(result.resolution.status, 'ready_to_recheck')
   assert.equal(mutations(f)[0][1].organizationId, '88')
   assert.deepEqual(f.mappings.organizations.map(row => row.hubspot_id), ['77'], 'no mapping is written for the merged company')
+})
+
+test('creating a contact behind a merged company uses the one organization Albi still has', async () => {
+  const f = fixture(), createInput = asCreate(f)
+  splitMerge(f)
+  f.createdTarget = { ...f.createdTarget, organizationId: '89' }
+  await executeReviewResolution(f.deps, createInput)
+  assert.equal(mutations(f)[0][1].organizationId, '89')
+})
+
+test('a contact create is never sent with an organization Albi no longer has', async () => {
+  const f = fixture(), createInput = asCreate(f)
+  f.associations = ['77']
+  f.mappings.organizations.push({ portal_id: '123', hubspot_id: '77', albi_organization_id: '88' })
+  f.deps.albiRead.getOrganization = async () => null
+  const result = await executeReviewResolution(f.deps, createInput)
+  assert.equal(result.resolution.status, 'failed')
+  assert.deepEqual(mutations(f), [])
+})
+
+test('a contact create goes ahead when Albi cannot be asked about its organization', async () => {
+  const f = fixture(), createInput = asCreate(f)
+  f.associations = ['77']
+  f.mappings.organizations.push({ portal_id: '123', hubspot_id: '77', albi_organization_id: '88' })
+  f.createdTarget = { ...f.createdTarget, organizationId: '88' }
+  f.deps.albiRead.getOrganization = async () => { throw new ApiError('transient', { code: 'timeout' }) }
+  await executeReviewResolution(f.deps, createInput)
+  assert.equal(mutations(f)[0][1].organizationId, '88')
 })
 
 test('a create given a shared Albi read uses it, verifies against the receipt, and adds the new record to that read', async () => {

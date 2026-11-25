@@ -15,6 +15,7 @@ export const H2A_BLOCKED_REASONS = Object.freeze({
   default_type_unconfirmed: 'The default Albi type isn’t confirmed. Confirm the default contact and organization types in Settings, then recheck.',
   referral_sources_unavailable: 'Albi’s referral sources could not be loaded. Reload this record to try again.',
   organization_mapping_ambiguous: 'This contact’s HubSpot organization is linked to more than one Albi organization. Fix the duplicate link first.',
+  organization_gone_in_albi: 'This contact’s HubSpot organization is linked to an Albi organization that no longer exists (it was deleted or merged in Albi). That old link has to be removed before this contact can be created.',
   organization_missing_in_hubspot: 'This contact’s HubSpot organization could not be read. Check the association in HubSpot, then recheck.',
   evidence_unavailable: 'The checks for creating this record didn’t finish in time. Reload the record or Recheck it.',
   source_unavailable: 'The HubSpot record could not be read (it may have been deleted, archived or merged). Check it in HubSpot, then recheck.',

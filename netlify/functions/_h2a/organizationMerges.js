@@ -35,3 +35,24 @@ export function followOrganizationMerge(rows, company, portalId) {
 export function organizationMergeConflict(rows, company, portalId) {
   return (merge(rows, company, portalId)?.targets.size ?? 0) > 1
 }
+
+// True only when Albi itself answers that it has no such organization (a merge in Albi deletes the one merged away).
+// No by-id read, or a read that fails, is not proof.
+export async function organizationGone(getOrganization, targetId) {
+  if (typeof getOrganization !== 'function' || !providerId(targetId)) return false
+  try { return await getOrganization(targetId) === null } catch { return false }
+}
+
+// followOrganizationMerge, ignoring merged records' links to organizations Albi no longer has, so a dead link cannot
+// hold the surviving company in a conflict. Only a target missing from the list in hand (known) costs an Albi read.
+// A company's own link is never ignored here: saving a different one over it is refused.
+export async function followLiveOrganizationMerge(rows, company, portalId, { getOrganization, known = [] } = {}) {
+  const found = merge(rows, company, portalId)
+  if (!found) return rows
+  const gone = new Set()
+  for (const target of found.targets) {
+    if (!known.some(item => item?.id === target) && await organizationGone(getOrganization, target)) gone.add(target)
+  }
+  const live = gone.size ? rows.filter(row => !found.absorbed.includes(row) || !gone.has(targetOf(row))) : rows
+  return followOrganizationMerge(live, company, portalId)
+}

@@ -286,6 +286,7 @@ export default function ReviewRecord({
           : organizationGate ? <div className="mt-3">{organizationFirstCard(organizationGate)}</div>
             : organizationResolved ? <p className="mt-2 text-xs text-gray-700">This contact’s organization is in Albi now. Recheck this record: it is then offered as a create, or as a link if Albi already has the contact.</p>
             : organizationNone ? <p className="mt-2 text-xs text-gray-700">This contact has no organization in HubSpot, so there is none to choose. Recheck this record: it is then offered as a create on its own, or as a link if Albi already has the contact.</p>
+            : readiness?.blockedReason === 'organization_gone_in_albi' ? <p className="mt-2 text-xs text-amber-800">{blockedCopy}</p>
             : <p className="mt-2 text-xs text-amber-800">Fresh server association evidence is unavailable. Recheck or reload this record before choosing an organization.</p>}
       </section>}
 

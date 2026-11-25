@@ -12,7 +12,7 @@ import { LIVE_CLOSE_FOR_ACTION, closeLiveReview } from './liveReview.js'
 import { decideContactMatch, decideOrganizationMatch, selectAllReviewCandidates } from './match.js'
 import { normalizePhone } from './normalize.js'
 import { loadReviewResolutionOptions } from './reviewResolutionOptions.js'
-import { followOrganizationMerge } from './organizationMerges.js'
+import { followLiveOrganizationMerge, organizationGone } from './organizationMerges.js'
 import { applyAlbiTasks } from './albiUpdates.js'
 import { H2A_REVIEW_ERROR_CATEGORIES, H2A_REVIEW_ERROR_CODES } from '../../../shared/h2aReviewReasons.js'
 
@@ -139,8 +139,10 @@ async function evidence(deps, clients, row, decision, deadline, { live = false }
   const loaded = await deps.repository.getMappings(row.company_id)
   if (!loaded || !['contacts', 'organizations', 'options'].every(key => Array.isArray(loaded[key]))) malformed('resolution')
   // A company HubSpot merged from a mapped record is read under that record's mapping.
+  const getOrganization = typeof clients.albiRead?.getOrganization === 'function'
+    ? id => bounded(deps, () => clients.albiRead.getOrganization(id), deadline) : undefined
   const mappings = row.object_type === 'companies'
-    ? { ...loaded, organizations: followOrganizationMerge(loaded.organizations, source, row.portal_id) } : loaded
+    ? { ...loaded, organizations: await followLiveOrganizationMerge(loaded.organizations, source, row.portal_id, { getOrganization }) } : loaded
   if (decision.referralSourceId !== undefined) {
     const sources = await bounded(deps, () => clients.albiRead.listReferralSources(), deadline)
     if (!Array.isArray(sources) || !sources.some(option => option?.id === decision.referralSourceId)) {
@@ -192,11 +194,13 @@ async function evidence(deps, clients, row, decision, deadline, { live = false }
   for (const id of organizationSources) {
     const company = await sourceRead(deps, clients, 'companies', id, deadline)
     if (!company) continue
-    const rows = followOrganizationMerge(mappings.organizations, company, row.portal_id)
+    const rows = await followLiveOrganizationMerge(mappings.organizations, company, row.portal_id, { getOrganization, known: organizations })
     if (mappedOrganizationsOnly) {
       const mapped = rows.filter(mapping => mapping.hubspot_id === id && mapping.portal_id === row.portal_id)
       if (mapped.length > 1) stale('mapping')
-      if (mapped.length === 1 && isResolutionProviderId(mapped[0].albi_organization_id)) {
+      // Albi refuses a contact behind an organization it no longer has; without it the create is refused here.
+      if (mapped.length === 1 && isResolutionProviderId(mapped[0].albi_organization_id) &&
+        !await organizationGone(getOrganization, mapped[0].albi_organization_id)) {
         organizationEvidence.push({ source: company, targetId: mapped[0].albi_organization_id, organizationTypeId: null })
       }
       continue

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { followOrganizationMerge, organizationMergeConflict } from '../../netlify/functions/_h2a/organizationMerges.js'
+import { followLiveOrganizationMerge, followOrganizationMerge, organizationMergeConflict } from '../../netlify/functions/_h2a/organizationMerges.js'
 
 const survivor = { id: '900', properties: { name: 'PURE Insurance', hs_merged_object_ids: '777;778' } }
 const mapped = (hubspotId, albiId, portal = '321') => ({ portal_id: portal, hubspot_id: hubspotId, albi_organization_id: albiId, match_method: 'reviewed' })
@@ -36,4 +36,22 @@ test('only this portal’s mappings and well-formed merged ids are followed', ()
   assert.deepEqual(followOrganizationMerge([mapped('777', '888')], odd, '321'), [{ ...mapped('900', '888'), merged_from: ['777'] }])
   assert.equal(followOrganizationMerge(null, survivor, '321'), null)
   assert.deepEqual(followOrganizationMerge([mapped('777', '888')], null, '321'), [mapped('777', '888')])
+})
+
+test('a merged record’s link to an organization Albi no longer has is not followed', async () => {
+  const split = [mapped('777', '888'), mapped('778', '889')]
+  const asked = []
+  const getOrganization = async id => { asked.push(id); return id === '888' ? null : { id } }
+  assert.deepEqual(await followLiveOrganizationMerge(split, survivor, '321', { getOrganization, known: [{ id: '889' }] }),
+    [{ ...mapped('900', '889'), merged_from: ['778'] }])
+  assert.deepEqual(asked, ['888'], 'only an organization missing from the list in hand costs an Albi read')
+  // Every merged record's organization is gone: the surviving company is simply not linked.
+  assert.deepEqual(await followLiveOrganizationMerge(split, survivor, '321', { getOrganization: async () => null }), [])
+})
+
+test('two organizations Albi still has, a failed read, or no by-id read leave a merge conflict for the reviewer', async () => {
+  const split = [mapped('777', '888'), mapped('778', '889')]
+  for (const options of [{ getOrganization: async id => ({ id }) }, { getOrganization: async () => { throw Error('busy') } }, { known: [] }]) {
+    assert.equal(await followLiveOrganizationMerge(split, survivor, '321', options), split)
+  }
 })

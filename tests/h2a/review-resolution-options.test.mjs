@@ -334,6 +334,40 @@ test('a merged organization whose merged records are on different Albi organizat
     organization: { sourceId: '900', reviewId: null, mergeConflict: true } })
 })
 
+const heldRow = { ...row, company_id: 'gone-org', run_id: 'r', conflict_type: 'association', candidate_snapshots: [] }
+const goneReads = (company, gone) => ({ ...reads, hubspotRead: { ...reads.hubspotRead, getCompanies: async ([id]) => [{ id, properties: company }],
+  getContacts: async () => [{ id: '123', properties: { firstname: 'Alex', lastname: 'Stone' } }],
+  getAssociations: async () => [{ fromId: '123', toObjectType: 'companies', toIds: [company.hs_merged_object_ids ? '900' : '777'] }] },
+  albiRead: { ...reads.albiRead, getOrganization: async id => gone.includes(id) ? null : { id } } })
+const goneMappings = { contacts: [], options: [{ mapping_kind: 'default_contact_type', albi_id: '12', confirmed: true }],
+  organizations: [{ portal_id: '321', hubspot_id: '777', albi_organization_id: '888' }] }
+const splitMappings = { ...goneMappings, organizations: [...goneMappings.organizations, { portal_id: '321', hubspot_id: '778', albi_organization_id: '889' }] }
+const goneRepository = value => ({ getMappings: async () => value, findDryRunReviewBySource: async () => null })
+const goneCreateRow = { ...heldRow, reason: 'no_match', conflict_type: 'contact_match', source_snapshot: { id: '123', firstName: 'Alex', lastName: 'Stone' } }
+
+test('a held contact’s merged company resolves to the one organization Albi still has', async () => {
+  const merged = goneReads({ name: 'PURE', hs_merged_object_ids: '777;778' }, ['888'])
+  const held = await loadReviewResolutionOptions({ row: heldRow, repository: goneRepository(splitMappings), reads: merged })
+  assert.deepEqual(held.organizationResolved, { sourceId: '900', targetId: '889' })
+  const create = await loadReviewResolutionOptions({ row: goneCreateRow, repository: goneRepository(splitMappings), reads: merged })
+  assert.equal(create.createReadiness.ready, true)
+})
+
+test('a merged company whose links are all to organizations Albi no longer has is gated as not in Albi', async () => {
+  const merged = goneReads({ name: 'PURE', hs_merged_object_ids: '777;778' }, ['888', '889'])
+  const held = await loadReviewResolutionOptions({ row: heldRow, repository: goneRepository(splitMappings), reads: merged })
+  assert.deepEqual(held.organizationGate, { sourceId: '900', reviewId: null })
+})
+
+test('a contact behind an organization Albi no longer has says so instead of offering a recheck or a create', async () => {
+  const gone = goneReads({ name: 'PURE' }, ['888'])
+  for (const item of [heldRow, goneCreateRow]) {
+    const result = await loadReviewResolutionOptions({ row: item, repository: goneRepository(goneMappings), reads: gone })
+    assert.equal(result.organizationResolved, undefined)
+    assert.deepEqual(result.createReadiness, { ready: false, blockedReason: 'organization_gone_in_albi' })
+  }
+})
+
 test('separate-record creation names why it is unavailable for a mapped source, and uses the first of several organizations', async () => {
   const forceRow = { ...row, reason: 'name_only_candidate', candidate_snapshots: [{ id: '456', firstName: 'Alex', lastName: 'Stone' }],
     source_snapshot: { id: '123', firstName: 'Alex', lastName: 'Stone' } }
